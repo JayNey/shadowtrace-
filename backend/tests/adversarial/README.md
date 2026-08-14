@@ -58,12 +58,19 @@ Redis (same as integration tests):
 ```bash
 cd backend
 
-# Analysis-only audit (→ REPORTING) — only when tests/adversarial/*.py exists
-uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py -v -s
+# Helper / scorecard unit tests (default pytest; no Postgres)
+uv run --frozen pytest tests/adversarial/test_adversarial_helpers.py -q
+
+# Analysis-only audit (→ REPORTING) — deselects unless -o addopts= (pyproject excludes adversarial_audit)
+uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py \
+  -m adversarial_audit -v -s -o addopts=
 
 # Production full loop — only when tests/adversarial/*.py exists
-uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_full_loop.py -v -s
+uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_full_loop.py \
+  -m adversarial_audit -v -s -o addopts=
 ```
+
+`pytest tests/adversarial/ -q` (Issue #965) runs helper/unit tests and **deselects** the two dynamic modules. Use the `-m adversarial_audit -o addopts=` commands above for analysis-only / full-loop.
 
 When the adversarial pytest tree is **not** checked in, validate golden packs via:
 
@@ -96,7 +103,13 @@ Do **not** claim autonomous investigation quality from Mock plumbing alone. Live
 | **Mock + scenario golden** | Regression / demo packs (e.g. `insider_data_exfiltration`, `adversarial_credential_db_staging_exfil`) | Same as Mock — golden content is scripted, not emergent reasoning |
 | **Live** (`LLM_MODE=openai_compatible` + API key) | Closer-to-production LLM behavior on unseen narratives | Vendor availability, cost, non-determinism |
 
-**Do not** interpret Mock adversarial audit **PASS** as proof of autonomous investigation quality. Mock results validate plumbing and scripted paths only; Live runs (or human red-team review) are required for capability claims.
+**Do not** interpret Mock adversarial audit **PASS** as proof of autonomous investigation quality. Mock results validate plumbing and scripted paths only; Live runs (or human red-team review) are required for capability claims. The `backend-closure-gates` CI job runs adversarial full-loop with default Mock LLM — a green gate is **not** Live investigation proof (ISSUE-334).
+
+### Provenance-aware quality audit (ISSUE-334)
+
+Entity/indicator **text understanding** in `quality_audit` counts only when the token appears in original alert narrative (`title` / `description`). Structured source merge (`attributes.provenance=source`) is tracked separately as `source_projection_hits` and does **not** fill text-understanding credit. Prompt-appendix echo in LLM narrative fields is `echo_only_hits`.
+
+`must_response_targets` includes staging DB host `SRV-DB-STG-02`; it is gated until ISSUE-328 lands. Default CI enforces non-gated targets only; set `ADVERSARIAL_STRICT_DISPOSITION_TARGETS=1` locally to hard-fail on DB isolation gaps.
 
 ### Mock LLM routing (ISSUE-199 / ISSUE-201)
 

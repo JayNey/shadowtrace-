@@ -102,6 +102,11 @@ GROUND_TRUTH: dict[str, Any] = {
         ACCOUNT,
         HOST_WORKSTATION,
         VPN_SRC_IP,
+        HOST_DB,
+    ],
+    # Enforced only when ADVERSARIAL_STRICT_DISPOSITION_TARGETS=1 (ISSUE-328 isolation).
+    "must_response_targets_gated": [
+        HOST_DB,
     ],
     "key_processes": [PROC_NTDS, PROC_MYSQL, PROC_RCLONE],
     "egress_bytes_min": 500_000_000,

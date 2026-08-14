@@ -133,6 +133,7 @@ jobs:
         run: uv sync --frozen --extra dev
 
       - name: ISSUE-261 production and adversarial closure gates
+        # Mock LLM adversarial PASS validates plumbing/scripted paths only — not Live reasoning (ISSUE-334).
         run: |
           production_rc=0
           adversarial_rc=0

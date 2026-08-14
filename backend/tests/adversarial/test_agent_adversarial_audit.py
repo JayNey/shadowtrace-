@@ -3,12 +3,14 @@
 Run (requires Postgres + Redis, same as integration tests):
 
     cd backend
-    uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py -v -s
+    uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py \\
+        -m adversarial_audit -v -s -o addopts=
 
 For a closer-to-production evaluation, set a real LLM before running:
 
     LLM_MODE=live LLM_API_BASE_URL=... LLM_API_KEY=... \\
-      uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py -v -s
+      uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py \\
+        -m adversarial_audit -v -s -o addopts=
 
 Reports are written to ``tests/adversarial/artifacts/latest_audit.json``.
 """
@@ -31,11 +33,17 @@ from app.services.event_service import EventService
 from app.services.evidence_projection import bind_evidence_projection
 from tests.adversarial.audit_report import (
     AdversarialAuditChecks,
-    collect_entity_tokens,
     normalize_enum,
     resolve_observed_severity,
 )
-from tests.adversarial.helpers import ingest_true_positive_event
+from tests.adversarial.helpers import (
+    assert_opaque_alert_quality,
+    audit_required_signals,
+    build_alert_corpus,
+    build_narrative_corpus,
+    ingest_true_positive_event,
+    opaque_scorecard_tokens,
+)
 from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH
 
 pytestmark = [pytest.mark.integration, pytest.mark.adversarial_audit]
@@ -131,18 +139,30 @@ async def test_adversarial_credential_db_staging_exfil_audit(
     report_ctx = await context_store.get(event_id, "report") or {}
     risk_ctx = await context_store.get(event_id, "risk_assessment") or {}
 
-    token_sources: list[Any] = [
-        triage_ctx,
-        evidence_ctx,
-        report_ctx,
-        event_after.model_dump(mode="json"),
-        result.model_dump(mode="json") if hasattr(result, "model_dump") else result,
-    ]
-    tokens = collect_entity_tokens(token_sources)
-    joined = "\n".join(tokens).lower()
-
-    entities_found = [e for e in GROUND_TRUTH["must_identify_entities"] if e.lower() in joined]
-    indicators_found = [i for i in GROUND_TRUTH["must_identify_indicators"] if i.lower() in joined]
+    event_payload = event_after.model_dump(mode="json")
+    alert_corpus = build_alert_corpus(
+        alert_text=str(event_after.title or ""),
+        event_payload=event_payload,
+    )
+    narrative_corpus = build_narrative_corpus(
+        triage_ctx=triage_ctx if isinstance(triage_ctx, dict) else {},
+        evidence_ctx=evidence_ctx if isinstance(evidence_ctx, dict) else {},
+        report_ctx=report_ctx if isinstance(report_ctx, dict) else {},
+    )
+    entity_audit = audit_required_signals(
+        required=list(GROUND_TRUTH["must_identify_entities"]),
+        alert_corpus=alert_corpus,
+        triage_ctx=triage_ctx if isinstance(triage_ctx, dict) else {},
+        narrative_corpus=narrative_corpus,
+    )
+    indicator_audit = audit_required_signals(
+        required=list(GROUND_TRUTH["must_identify_indicators"]),
+        alert_corpus=alert_corpus,
+        triage_ctx=triage_ctx if isinstance(triage_ctx, dict) else {},
+        narrative_corpus=narrative_corpus,
+    )
+    entities_found = list(entity_audit.text_understanding_hits)
+    indicators_found = list(indicator_audit.text_understanding_hits)
 
     outward_severity, triage_severity = resolve_observed_severity(
         risk_ctx=risk_ctx if isinstance(risk_ctx, dict) else None,
@@ -167,7 +187,26 @@ async def test_adversarial_credential_db_staging_exfil_audit(
         status_sequence=await _audit_status_sequence(session_factory, event_id),
     )
     report = checks.to_dict()
-    checks.write_json(ARTIFACT_PATH)
+    report["quality_audit"] = {
+        "alert_corpus_excerpt": alert_corpus[:400],
+        "entities": {
+            "text_understanding_hits": list(entity_audit.text_understanding_hits),
+            "source_projection_hits": list(entity_audit.source_projection_hits),
+            "echo_only_hits": list(entity_audit.echo_only_hits),
+            "text_understanding_missing": list(entity_audit.text_understanding_missing),
+        },
+        "indicators": {
+            "text_understanding_hits": list(indicator_audit.text_understanding_hits),
+            "source_projection_hits": list(indicator_audit.source_projection_hits),
+            "echo_only_hits": list(indicator_audit.echo_only_hits),
+            "text_understanding_missing": list(indicator_audit.text_understanding_missing),
+        },
+    }
+    ARTIFACT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ARTIFACT_PATH.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
     print("\n[adversarial-audit] human verdict:", report["verdict_for_human"])
     print("[adversarial-audit] checks:", json.dumps(report["checks"], ensure_ascii=False, indent=2))
@@ -177,6 +216,13 @@ async def test_adversarial_credential_db_staging_exfil_audit(
         assert report["observed"]["severity"] == normalize_enum(risk_ctx.get("severity"))
     if triage_severity and report["observed"]["severity"] != triage_severity:
         assert report["observed"]["triage_severity"] == triage_severity
+
+    assert_opaque_alert_quality(
+        alert_corpus=alert_corpus,
+        entity_audit=entity_audit,
+        indicator_audit=indicator_audit,
+        opaque_tokens=opaque_scorecard_tokens(GROUND_TRUTH),
+    )
 
     # ISSUE-319: analysis-only audit must not require CLOSED / full-loop scoring.
     assert report["audit_mode"] == "analysis_only"

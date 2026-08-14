@@ -158,26 +158,6 @@ def _human_verdict(
     return "WEAK — pipeline completed but under-scored or wrong verdict"
 
 
-def collect_entity_tokens(payload: Any) -> list[str]:
-    """Flatten nested context payloads into searchable tokens."""
-    tokens: list[str] = []
-
-    def _walk(value: Any) -> None:
-        if isinstance(value, str):
-            stripped = value.strip()
-            if stripped:
-                tokens.append(stripped)
-        elif isinstance(value, dict):
-            for item in value.values():
-                _walk(item)
-        elif isinstance(value, list):
-            for item in value:
-                _walk(item)
-
-    _walk(payload)
-    return tokens
-
-
 def normalize_enum(value: Any) -> str | None:
     if value is None:
         return None
@@ -194,9 +174,9 @@ def resolve_observed_severity(
 ) -> tuple[str | None, str | None]:
     """Outward severity for audit scorecards (ISSUE-330).
 
-  Returns ``(outward_severity, triage_severity)``.  Outward severity prefers
-  ``risk_assessment.severity``, then the event row.  Triage severity is returned
-  separately for transparency and must never be used as a silent fallback.
+    Returns ``(outward_severity, triage_severity)``.  Outward severity prefers
+    ``risk_assessment.severity``, then the event row.  Triage severity is returned
+    separately for transparency and must never be used as a silent fallback.
     """
     outward: str | None = None
     if isinstance(risk_ctx, dict):
@@ -204,8 +184,6 @@ def resolve_observed_severity(
     if outward is None:
         outward = normalize_enum(event_severity)
     triage_severity = (
-        normalize_enum(triage_ctx.get("severity"))
-        if isinstance(triage_ctx, dict)
-        else None
+        normalize_enum(triage_ctx.get("severity")) if isinstance(triage_ctx, dict) else None
     )
     return outward, triage_severity

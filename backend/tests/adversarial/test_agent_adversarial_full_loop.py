@@ -6,7 +6,7 @@ Does **not** inject APPROVED actions via ``run_full_response_chain`` or verify-t
 ISSUE-203 quality gates (hard failures):
 - Terminal ``REPORTING``/``CLOSED`` with non-empty report
 - ``response_agent``/``verify_agent`` traces (snake_case agent_name)
-- Response plan targets cover ``GROUND_TRUTH.must_response_targets``
+- Response plan covers enforced ``GROUND_TRUTH.must_response_targets`` (DB host gated)
 - Mock writeback ``CONFIRMED(readback_verified)`` + terminal outbox enqueued
 - ``sunset_shims_used`` must be empty; intentional adversarial DI is reported separately.
 
@@ -17,7 +17,7 @@ Default runner timeout: ~120s (Mock). Override with ``ADVERSARIAL_FULL_LOOP_TIME
     export DATABASE_URL=postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
     export REDIS_URL=redis://localhost:6379/0
     uv run --frozen python -m pytest \\
-        tests/adversarial/test_agent_adversarial_full_loop.py -m adversarial_audit -v -s
+        tests/adversarial/test_agent_adversarial_full_loop.py -m adversarial_audit -v -s -o addopts=
 
 Artifact: ``tests/adversarial/artifacts/latest_full_loop_audit.json``
 """
@@ -40,13 +40,23 @@ from app.services.context_service import EventContextStore
 from app.services.event_service import EventService
 from tests.adversarial.audit_report import (
     AdversarialAuditChecks,
-    collect_entity_tokens,
     normalize_enum,
     resolve_observed_severity,
 )
 from tests.adversarial.full_loop_runner import run_production_full_loop
-from tests.adversarial.helpers import ingest_true_positive_event, missing_response_targets
-from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH
+from tests.adversarial.helpers import (
+    assert_opaque_alert_quality,
+    audit_required_signals,
+    block_ip_reason_destination_mislabels,
+    build_alert_corpus,
+    build_narrative_corpus,
+    ingest_true_positive_event,
+    missing_response_targets,
+    opaque_scorecard_tokens,
+    response_plan_targets,
+    strict_disposition_targets_enabled,
+)
+from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH, HOST_DB
 
 pytestmark = [pytest.mark.integration, pytest.mark.adversarial_audit]
 
@@ -118,9 +128,7 @@ def _assert_executed_report_not_all_pending(sections: list[Any]) -> None:
         total = sum(data_counts.values())
         pending = data_counts.get("pending", 0)
         if total > 0:
-            assert pending < total, (
-                f"ISSUE-329: report data still pending=all ({data_counts})"
-            )
+            assert pending < total, f"ISSUE-329: report data still pending=all ({data_counts})"
         return
 
     parsed = _parse_action_status_counts(blob)
@@ -131,8 +139,7 @@ def _assert_executed_report_not_all_pending(sections: list[Any]) -> None:
         return
     pending = counts.get("pending", 0)
     assert pending < total, (
-        f"ISSUE-329: report still shows executed + pending=all ({counts}); "
-        f"content={blob[:500]}"
+        f"ISSUE-329: report still shows executed + pending=all ({counts}); content={blob[:500]}"
     )
 
 
@@ -151,7 +158,10 @@ def _assert_entity_writeback_not_claimed_applicable(sections: list[Any]) -> None
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                if row.get("writeback_required") is True and row.get("writeback_applicable") is False:
+                if (
+                    row.get("writeback_required") is True
+                    and row.get("writeback_applicable") is False
+                ):
                     assert row.get("writeback_applicable") is not True, (
                         f"ISSUE-331: entity writeback_row claimed applicable=true ({row})"
                     )
@@ -323,21 +333,44 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     report_ctx = await context_store.get(event_id, "report") or {}
     risk_ctx = await context_store.get(event_id, "risk_assessment") or {}
     status_sequence = await _audit_status_sequence(session_factory, event_id)
-    disposition_gaps = missing_response_targets(
+    disposition_gaps_enforced = missing_response_targets(
         ground_truth=GROUND_TRUTH,
         actions=list(loop_result.response_plan_actions),
     )
+    disposition_gaps_all = missing_response_targets(
+        ground_truth=GROUND_TRUTH,
+        actions=list(loop_result.response_plan_actions),
+        enforce_gated=True,
+    )
+    block_ip_reason_gaps = block_ip_reason_destination_mislabels(
+        loop_result.response_plan_actions,
+        triage_ctx=triage_ctx if isinstance(triage_ctx, dict) else None,
+    )
 
-    token_sources: list[Any] = [
-        triage_ctx,
-        evidence_ctx,
-        report_ctx,
-        event_final.model_dump(mode="json"),
-    ]
-    tokens = collect_entity_tokens(token_sources)
-    joined = "\n".join(tokens).lower()
-    entities_found = [e for e in GROUND_TRUTH["must_identify_entities"] if e.lower() in joined]
-    indicators_found = [i for i in GROUND_TRUTH["must_identify_indicators"] if i.lower() in joined]
+    event_payload = event_final.model_dump(mode="json")
+    alert_corpus = build_alert_corpus(
+        alert_text=str(event_final.title or ""),
+        event_payload=event_payload,
+    )
+    narrative_corpus = build_narrative_corpus(
+        triage_ctx=triage_ctx,
+        evidence_ctx=evidence_ctx,
+        report_ctx=report_ctx,
+    )
+    entity_audit = audit_required_signals(
+        required=list(GROUND_TRUTH["must_identify_entities"]),
+        alert_corpus=alert_corpus,
+        triage_ctx=triage_ctx,
+        narrative_corpus=narrative_corpus,
+    )
+    indicator_audit = audit_required_signals(
+        required=list(GROUND_TRUTH["must_identify_indicators"]),
+        alert_corpus=alert_corpus,
+        triage_ctx=triage_ctx,
+        narrative_corpus=narrative_corpus,
+    )
+    entities_found = list(entity_audit.text_understanding_hits)
+    indicators_found = list(indicator_audit.text_understanding_hits)
 
     outward_severity, triage_severity = resolve_observed_severity(
         risk_ctx=risk_ctx if isinstance(risk_ctx, dict) else None,
@@ -396,7 +429,13 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         "resume_attempts": loop_result.resume_attempts,
         "sunset_shims_used": list(loop_result.sunset_shims_used),
         "adversarial_di_overrides": list(loop_result.adversarial_di_overrides),
-        "disposition_target_gaps": disposition_gaps,
+        "disposition_target_gaps": disposition_gaps_all,
+        "disposition_target_gaps_enforced": disposition_gaps_enforced,
+        "disposition_target_gaps_strict_pending": [
+            gap for gap in disposition_gaps_all if gap not in disposition_gaps_enforced
+        ],
+        "strict_disposition_targets_enabled": strict_disposition_targets_enabled(),
+        "block_ip_reason_destination_mislabels": block_ip_reason_gaps,
         "status_sequence_includes_closed": EventStatus.CLOSED.value in status_sequence,
         "status_sequence_includes_reporting": EventStatus.REPORTING.value in status_sequence,
         "status_sequence_includes_planning": EventStatus.PLANNING_RESPONSE.value in status_sequence,
@@ -407,6 +446,21 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         "status_sequence_includes_verifying": EventStatus.VERIFYING.value in status_sequence,
         "notes": loop_result.notes,
     }
+    report["quality_audit"] = {
+        "alert_corpus_excerpt": alert_corpus[:400],
+        "entities": {
+            "text_understanding_hits": list(entity_audit.text_understanding_hits),
+            "source_projection_hits": list(entity_audit.source_projection_hits),
+            "echo_only_hits": list(entity_audit.echo_only_hits),
+            "text_understanding_missing": list(entity_audit.text_understanding_missing),
+        },
+        "indicators": {
+            "text_understanding_hits": list(indicator_audit.text_understanding_hits),
+            "source_projection_hits": list(indicator_audit.source_projection_hits),
+            "echo_only_hits": list(indicator_audit.echo_only_hits),
+            "text_understanding_missing": list(indicator_audit.text_understanding_missing),
+        },
+    }
     report["production_checks"] = {
         "response_agent_ran": loop_result.response_agent_traced,
         "approval_flow_ran": loop_result.approval_records > 0 or loop_result.approval_rounds > 0,
@@ -415,10 +469,12 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         "verify_agent_traced": loop_result.verify_agent_traced,
         "verification_context_present": loop_result.verification_present,
         "disposition_writeback_ok": loop_result.writeback_confirmed,
-        "disposition_targets_aligned": not disposition_gaps,
+        "disposition_targets_aligned": not disposition_gaps_enforced,
+        "disposition_targets_strict_aligned": not disposition_gaps_all,
         "no_sunset_shims": len(loop_result.sunset_shims_used) == 0,
         "tools_invoked": loop_result.tool_call_count > 0,
         "llm_invoked": loop_result.llm_call_count > 0,
+        "block_ip_reason_destination_mislabels": block_ip_reason_gaps,
     }
     report["closure_diagnostics"] = await _closure_diagnostics(
         session_factory,
@@ -447,7 +503,27 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     assert prod["execution_ran"], "expected ActionExecution jobs after approval"
     assert prod["verify_agent_ran"], "expected verify_agent trace"
     assert prod["disposition_targets_aligned"], (
-        f"ISSUE-198: response plan must cover GROUND_TRUTH targets; missing={disposition_gaps}"
+        "ISSUE-198/334: response plan must cover enforced GROUND_TRUTH targets; "
+        f"missing={disposition_gaps_enforced}, all_gaps={disposition_gaps_all}"
+    )
+    if strict_disposition_targets_enabled():
+        assert prod["disposition_targets_strict_aligned"], (
+            "ISSUE-328 strict mode: response plan must also cover gated DB isolation targets; "
+            f"missing={disposition_gaps_all}"
+        )
+    else:
+        plan_targets = response_plan_targets(list(loop_result.response_plan_actions))
+        if HOST_DB.lower() not in plan_targets:
+            assert HOST_DB in disposition_gaps_all, (
+                "ISSUE-334: missing DB isolation must be an explicit gap until ISSUE-328; "
+                f"all_gaps={disposition_gaps_all}"
+            )
+            assert HOST_DB not in disposition_gaps_enforced
+    assert_opaque_alert_quality(
+        alert_corpus=alert_corpus,
+        entity_audit=entity_audit,
+        indicator_audit=indicator_audit,
+        opaque_tokens=opaque_scorecard_tokens(GROUND_TRUTH),
     )
     assert prod["tools_invoked"], "expected tool_call_log rows from evidence/verify/execute"
     assert prod["llm_invoked"], "expected llm_call_log rows from live/mock LLM agents"
