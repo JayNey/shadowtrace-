@@ -259,13 +259,7 @@ def _indicator_is_valid(indicator: str) -> bool:
     text = indicator.strip()
     if not text:
         return False
-    if _is_ip_literal(text):
-        return True
-    domain_result = validate_entity_set(
-        EntitySet(domains=[DomainEntity(entity_id="ioc-check", fqdn=text)]),
-        provenance="llm",
-    )
-    return bool(domain_result.entity_set.domains)
+    return _is_ip_literal(text) or _fqdn_if_valid(text) is not None
 
 
 def _is_ip_literal(value: str) -> bool:
@@ -276,17 +270,22 @@ def _is_ip_literal(value: str) -> bool:
     return True
 
 
+def _fqdn_if_valid(item: str) -> str | None:
+    """Return *item* when it validates as an FQDN (never an IP literal)."""
+    text = item.strip()
+    if not text or _is_ip_literal(text):
+        return None
+    domain_result = validate_entity_set(
+        EntitySet(domains=[DomainEntity(entity_id="ioc-check", fqdn=text)]),
+        provenance="llm",
+    )
+    return next((d.fqdn for d in domain_result.entity_set.domains if d.fqdn), None)
+
+
 def _fqdn_from_ioc_list(iocs: list[str]) -> str | None:
     """Return the first IOC that validates as an FQDN (never an IP literal)."""
     for raw in iocs:
-        item = raw.strip()
-        if not item or _is_ip_literal(item):
-            continue
-        domain_result = validate_entity_set(
-            EntitySet(domains=[DomainEntity(entity_id="ioc-check", fqdn=item)]),
-            provenance="llm",
-        )
-        fqdn = next((d.fqdn for d in domain_result.entity_set.domains if d.fqdn), None)
+        fqdn = _fqdn_if_valid(raw)
         if fqdn:
             return fqdn
     return None
@@ -296,14 +295,7 @@ def _dns_domain_keys(entities: EntitySet, iocs: list[str]) -> set[str]:
     """Domain keys usable for query_dns from entities plus FQDN IOCs."""
     keys = {d.fqdn for d in entities.domains if d.fqdn}
     for raw in iocs:
-        item = raw.strip()
-        if not item or _is_ip_literal(item):
-            continue
-        domain_result = validate_entity_set(
-            EntitySet(domains=[DomainEntity(entity_id="ioc-check", fqdn=item)]),
-            provenance="llm",
-        )
-        fqdn = next((d.fqdn for d in domain_result.entity_set.domains if d.fqdn), None)
+        fqdn = _fqdn_if_valid(raw)
         if fqdn:
             keys.add(fqdn)
     return keys

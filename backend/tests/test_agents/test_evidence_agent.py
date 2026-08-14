@@ -1247,7 +1247,7 @@ async def test_sqlalchemy_evidence_upsert_keeps_higher_confidence() -> None:
         await engine.dispose()
 
 
-def test_build_params_query_dns_from_ioc_when_no_domain_entity() -> None:
+async def test_build_params_query_dns_from_ioc_when_no_domain_entity() -> None:
     """ISSUE-332: FQDN IOCs backfill query_dns when EntitySet.domains is empty."""
     agent = EvidenceAgent(llm_client=None, tool_executor=None)
     time_range = {"start": "2024-01-01T00:00:00Z", "end": "2024-01-02T00:00:00Z"}
@@ -1260,7 +1260,7 @@ def test_build_params_query_dns_from_ioc_when_no_domain_entity() -> None:
     assert params == {"domain": "storage-sync-cdn.example", "time_range": time_range}
 
 
-def test_build_params_query_dns_skips_ip_only_ioc() -> None:
+async def test_build_params_query_dns_skips_ip_only_ioc() -> None:
     """ISSUE-332: IP-only IOCs must not be sent as DNS domain queries."""
     agent = EvidenceAgent(llm_client=None, tool_executor=None)
     time_range = {"start": "2024-01-01T00:00:00Z", "end": "2024-01-02T00:00:00Z"}
@@ -1273,7 +1273,33 @@ def test_build_params_query_dns_skips_ip_only_ioc() -> None:
     assert params is None
 
 
-def test_build_params_query_dns_prefers_entity_domain_over_ioc() -> None:
+async def test_build_params_query_dns_skips_ipv6_ioc() -> None:
+    """ISSUE-332: IPv6 literals must not be sent as DNS domain queries."""
+    agent = EvidenceAgent(llm_client=None, tool_executor=None)
+    time_range = {"start": "2024-01-01T00:00:00Z", "end": "2024-01-02T00:00:00Z"}
+    params = agent._build_params(
+        "query_dns",
+        EntitySet(),
+        time_range,
+        ioc_list=["2001:db8::1"],
+    )
+    assert params is None
+
+
+async def test_build_params_query_dns_mixed_ip_and_fqdn_uses_fqdn() -> None:
+    """ISSUE-332: mixed IP+FQDN ioc_list uses the first valid FQDN."""
+    agent = EvidenceAgent(llm_client=None, tool_executor=None)
+    time_range = {"start": "2024-01-01T00:00:00Z", "end": "2024-01-02T00:00:00Z"}
+    params = agent._build_params(
+        "query_dns",
+        EntitySet(),
+        time_range,
+        ioc_list=["203.0.113.10", "storage-sync-cdn.example"],
+    )
+    assert params == {"domain": "storage-sync-cdn.example", "time_range": time_range}
+
+
+async def test_build_params_query_dns_prefers_entity_domain_over_ioc() -> None:
     agent = EvidenceAgent(llm_client=None, tool_executor=None)
     time_range = {"start": "2024-01-01T00:00:00Z", "end": "2024-01-02T00:00:00Z"}
     entities = EntitySet(domains=[DomainEntity(entity_id="d1", fqdn="entity.example")])
@@ -1284,6 +1310,124 @@ def test_build_params_query_dns_prefers_entity_domain_over_ioc() -> None:
         ioc_list=["ioc.example"],
     )
     assert params == {"domain": "entity.example", "time_range": time_range}
+
+
+async def test_collection_partial_done_floor_matches_min_evidence_sources() -> None:
+    """MIN_EVIDENCE_SOURCES is the PARTIAL_DONE floor; keep the two constants equal."""
+    from app.agents.evidence_agent import _COLLECTION_STATUS_PARTIAL_DONE
+    from app.models.workflow import MIN_EVIDENCE_SOURCES
+
+    assert _COLLECTION_STATUS_PARTIAL_DONE == MIN_EVIDENCE_SOURCES
+
+
+class _DnsCallRecorder:
+    def __init__(self, inner: object) -> None:
+        self.inner = inner
+        self.dns_calls: list[dict[str, object]] = []
+
+    async def call(
+        self,
+        tool_name: str,
+        params: dict[str, object],
+        event_id: str,
+        **kwargs: object,
+    ) -> object:
+        if tool_name == "query_dns":
+            self.dns_calls.append(params)
+        return await self.inner.call(tool_name, params, event_id, **kwargs)  # type: ignore[misc]
+
+
+async def test_execute_query_dns_from_fqdn_ioc_when_domains_empty(
+    tool_executor: Any,
+) -> None:
+    """ISSUE-332: empty domains + FQDN IOC must invoke query_dns with that domain."""
+    event_id = f"evt-332-dns-ioc-{new_sfx()}"
+    wm = _FakeWorkingMemory()
+    await _seed_event_context(wm, event_id)
+    recorder = _DnsCallRecorder(tool_executor)
+    agent = _build_agent(
+        tool_executor=recorder,
+        wm=wm,
+        evidence_repo=InMemoryEvidenceRepository(),
+    )
+    triage = TriageResult(
+        event_type=EventType.SUSPICIOUS_DOMAIN,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(),
+        ioc_list=["storage-sync-cdn.example"],
+    )
+    with bind_evidence_query_scope(DEFAULT_SCOPE):
+        output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+
+    assert recorder.dns_calls
+    assert recorder.dns_calls[0]["domain"] == "storage-sync-cdn.example"
+    dns_gaps = [gap for gap in output.gaps if gap.missing_source is EvidenceSource.DNS]
+    assert all(gap.reason != "source_skipped" for gap in dns_gaps)
+
+
+async def test_execute_query_dns_ip_only_ioc_source_skipped_not_invalid_entity(
+    tool_executor: Any,
+) -> None:
+    """ISSUE-332: empty domains + IPv4-only IOC skips query_dns as source_skipped."""
+    event_id = f"evt-332-dns-ip-{new_sfx()}"
+    wm = _FakeWorkingMemory()
+    await _seed_event_context(wm, event_id)
+    recorder = _DnsCallRecorder(tool_executor)
+    agent = _build_agent(
+        tool_executor=recorder,
+        wm=wm,
+        evidence_repo=InMemoryEvidenceRepository(),
+    )
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(),
+        ioc_list=["203.0.113.10"],
+    )
+    with bind_evidence_query_scope(DEFAULT_SCOPE):
+        output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+
+    assert recorder.dns_calls == []
+    dns_gaps = [gap for gap in output.gaps if gap.missing_source is EvidenceSource.DNS]
+    assert len(dns_gaps) == 1
+    assert dns_gaps[0].reason == "source_skipped"
+    assert EvidenceSource.DNS.value in output.failed_sources
+    dns_timing = next(
+        row for row in agent.last_query_timings if row["tool_name"] == "query_dns"
+    )
+    assert dns_timing["tool_outcome"] == "source_skipped"
+
+
+async def test_query_dns_invalid_ioc_skips_with_source_skipped_not_invalid_entity(
+    tool_executor: Any,
+) -> None:
+    """ISSUE-332: syntax-invalid IOC is not a DNS entity; skip as source_skipped."""
+    event_id = f"evt-332-dns-invalid-{new_sfx()}"
+    wm = _FakeWorkingMemory()
+    await _seed_event_context(wm, event_id)
+    recorder = _DnsCallRecorder(tool_executor)
+    agent = _build_agent(
+        tool_executor=recorder,
+        wm=wm,
+        evidence_repo=InMemoryEvidenceRepository(),
+    )
+    triage = TriageResult(
+        event_type=EventType.SUSPICIOUS_DOMAIN,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(),
+        ioc_list=["not-a-valid-indicator"],
+    )
+    with bind_evidence_query_scope(DEFAULT_SCOPE):
+        output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+
+    assert recorder.dns_calls == []
+    dns_gaps = [gap for gap in output.gaps if gap.missing_source is EvidenceSource.DNS]
+    assert len(dns_gaps) == 1
+    assert dns_gaps[0].reason == "source_skipped"
+    assert dns_gaps[0].reason != "invalid_entity"
 
 
 async def test_plan_driven_required_tools_limits_queries(
