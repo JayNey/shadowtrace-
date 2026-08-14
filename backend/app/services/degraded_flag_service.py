@@ -121,10 +121,6 @@ REDIS_CONTEXT_UNAVAILABLE_FLAG = "redis_context_unavailable"
 
 RecoveryWiringFn = Callable[["EventContextStore", "DegradedFlagService"], None]
 
-# Only register recoveries that can be safely probed. Business/audit flags stay
-# manual-clear to avoid wiping real degradation (ISSUE-353 / ID-REL-002).
-_DEGRADED_FLAG_RECOVERY_WIRING: tuple[RecoveryWiringFn, ...] = ()
-
 
 def wire_redis_context_recovery(
     store: EventContextStore,
