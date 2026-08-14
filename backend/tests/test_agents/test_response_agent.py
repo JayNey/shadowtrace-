@@ -167,7 +167,11 @@ class _FakeEventService:
 
 
 class _FailingLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def chat(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
         raise RuntimeError("llm unavailable")
 
 
@@ -933,8 +937,9 @@ async def test_playbook_release_service_path_used_when_wired() -> None:
                 lifecycle_state=KnowledgeReleaseLifecycleState.ACTIVE,
             )
 
+    llm = _FailingLLM()
     agent = ResponseAgent(
-        llm_client=_FailingLLM(),
+        llm_client=llm,
         working_memory=wm,
         event_service=_FakeEventService(),
         playbook_release_service=_FakeReleaseService(),
@@ -942,8 +947,13 @@ async def test_playbook_release_service_path_used_when_wired() -> None:
         capability_manifest=build_mock_capability_manifest(),
     )
     plan = await agent.execute(_agent_input(event_id))
+    assert llm.calls == 0
     assert any(a.tool_name == "disable_account" for a in plan.actions)
     assert plan.generated_by is ResponsePlanGeneratedBy.TEMPLATE
+    assert plan.strategy_summary == "playbook pb-a1b2c3d4@v1-test"
+    pinned = [a.playbook_ref for a in plan.actions if a.playbook_ref is not None]
+    assert pinned
+    assert all(ref.playbook_id == "pb-a1b2c3d4" for ref in pinned)
 
 
 @pytest.mark.asyncio
@@ -988,7 +998,263 @@ async def test_playbook_ref_validation_error_skips_legacy_fallback() -> None:
     )
     plan = await agent.execute(_agent_input(event_id))
     assert not any(a.playbook_ref is not None for a in plan.actions)
+    assert plan.generated_by is ResponsePlanGeneratedBy.TEMPLATE
     assert "playbook resolution failed" in plan.strategy_summary
+    assert "llm failed; rule fallback" in plan.strategy_summary
+
+
+@pytest.mark.asyncio
+async def test_playbook_resolution_failure_falls_through_to_llm() -> None:
+    from app.core.errors import ValidationError as ShadowValidationError
+    from app.models.playbook_release import PlaybookRef
+
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(event_type=EventType.DATA_EXFILTRATION))
+    ref = PlaybookRef.model_validate(_playbook_ref("pb-5a6b7c8d"))
+    wm.values[(event_id, "rag_output")] = {"playbook_refs": [ref.model_dump(mode="json")]}
+
+    class _RejectingReleaseService:
+        async def resolve_playbook_ref(self, *_args: Any, **_kwargs: Any) -> tuple[Playbook, Any]:
+            raise ShadowValidationError(
+                "playbook content hash mismatch",
+                details={"reason": "content_hash_mismatch"},
+            )
+
+    class _IsolateLLM:
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            import json
+
+            from app.core.llm.base import LLMResponse
+
+            payload = {
+                "actions": [
+                    {
+                        "tool_name": "isolate_host",
+                        "target_type": "host",
+                        "target": "PC-FIN-023",
+                        "parameters": {},
+                        "reason": "contain exfil staging host",
+                    },
+                    {
+                        "tool_name": "create_ticket",
+                        "target_type": "ticket",
+                        "target": "ticket",
+                        "parameters": {"title": "track", "description": "track"},
+                        "reason": "track response",
+                    },
+                ],
+                "strategy_summary": "LLM isolate staging host",
+            }
+            return LLMResponse(
+                content=json.dumps(payload),
+                model_name="mock",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            )
+
+    agent = ResponseAgent(
+        llm_client=_IsolateLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(),
+        playbook_release_service=_RejectingReleaseService(),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    assert any(a.tool_name == "isolate_host" for a in plan.actions)
+    assert plan.generated_by is ResponsePlanGeneratedBy.LLM
+    assert "playbook resolution failed" in plan.strategy_summary
+    assert "LLM isolate staging host" in plan.strategy_summary
+    assert not any(a.playbook_ref is not None for a in plan.actions)
+
+
+@pytest.mark.asyncio
+async def test_playbook_resolution_failure_llm_empty_uses_rule_fallback() -> None:
+    from app.core.errors import ValidationError as ShadowValidationError
+    from app.core.llm.base import LLMResponse
+    from app.models.playbook_release import PlaybookRef
+
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(event_type=EventType.DATA_EXFILTRATION))
+    ref = PlaybookRef.model_validate(_playbook_ref("pb-5a6b7c8d"))
+    wm.values[(event_id, "rag_output")] = {"playbook_refs": [ref.model_dump(mode="json")]}
+
+    class _RejectingReleaseService:
+        async def resolve_playbook_ref(self, *_args: Any, **_kwargs: Any) -> tuple[Playbook, Any]:
+            raise ShadowValidationError(
+                "playbook content hash mismatch",
+                details={"reason": "content_hash_mismatch"},
+            )
+
+    class _EmptyCandidatesLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            import json
+
+            self.calls += 1
+            payload = {
+                "actions": [
+                    {
+                        "tool_name": TERMINAL_DISPOSITION_TOOL,
+                        "target_type": "source_object",
+                        "target": "INC-001",
+                        "parameters": {},
+                        "reason": "disposition-only filtered from candidates",
+                    }
+                ],
+                "strategy_summary": "no containment proposed",
+            }
+            return LLMResponse(
+                content=json.dumps(payload),
+                model_name="mock",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            )
+
+    llm = _EmptyCandidatesLLM()
+    agent = ResponseAgent(
+        llm_client=llm,
+        working_memory=wm,
+        event_service=_FakeEventService(),
+        playbook_release_service=_RejectingReleaseService(),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    tool_names = {a.tool_name for a in plan.actions}
+    assert llm.calls == 1
+    assert "isolate_host" not in tool_names
+    assert "disable_account" in tool_names
+    assert plan.generated_by is ResponsePlanGeneratedBy.TEMPLATE
+    assert plan.strategy_summary == (
+        "playbook resolution failed (validation_error); llm empty; rule fallback"
+    )
+
+
+@pytest.mark.asyncio
+async def test_playbook_resolution_failure_llm_schema_error_uses_rule_fallback() -> None:
+    from app.core.errors import ValidationError as ShadowValidationError
+    from app.core.llm.base import LLMResponse
+    from app.models.playbook_release import PlaybookRef
+
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(event_type=EventType.DATA_EXFILTRATION))
+    ref = PlaybookRef.model_validate(_playbook_ref("pb-5a6b7c8d"))
+    wm.values[(event_id, "rag_output")] = {"playbook_refs": [ref.model_dump(mode="json")]}
+
+    class _RejectingReleaseService:
+        async def resolve_playbook_ref(self, *_args: Any, **_kwargs: Any) -> tuple[Playbook, Any]:
+            raise ShadowValidationError(
+                "playbook content hash mismatch",
+                details={"reason": "content_hash_mismatch"},
+            )
+
+    class _EmptyActionsLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            import json
+
+            self.calls += 1
+            payload = {"actions": [], "strategy_summary": "no containment proposed"}
+            return LLMResponse(
+                content=json.dumps(payload),
+                model_name="mock",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            )
+
+    llm = _EmptyActionsLLM()
+    agent = ResponseAgent(
+        llm_client=llm,
+        working_memory=wm,
+        event_service=_FakeEventService(),
+        playbook_release_service=_RejectingReleaseService(),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    tool_names = {a.tool_name for a in plan.actions}
+    assert llm.calls == 1
+    assert "isolate_host" not in tool_names
+    assert "disable_account" in tool_names
+    assert plan.generated_by is ResponsePlanGeneratedBy.TEMPLATE
+    assert plan.strategy_summary == (
+        "playbook resolution failed (validation_error); llm failed; rule fallback"
+    )
+
+
+@pytest.mark.asyncio
+async def test_playbook_pydantic_validation_error_falls_through_to_llm() -> None:
+    from app.core.llm.base import LLMResponse
+    from app.models.playbook_release import PlaybookRef
+
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(event_type=EventType.DATA_EXFILTRATION))
+    ref = PlaybookRef.model_validate(_playbook_ref("pb-5a6b7c8d"))
+    wm.values[(event_id, "rag_output")] = {"playbook_refs": [ref.model_dump(mode="json")]}
+
+    class _PydanticRejectingReleaseService:
+        async def resolve_playbook_ref(self, *_args: Any, **_kwargs: Any) -> tuple[Playbook, Any]:
+            PlaybookRef.model_validate({})
+
+    class _IsolateLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            import json
+
+            self.calls += 1
+            payload = {
+                "actions": [
+                    {
+                        "tool_name": "isolate_host",
+                        "target_type": "host",
+                        "target": "PC-FIN-023",
+                        "parameters": {},
+                        "reason": "contain exfil staging host",
+                    },
+                    {
+                        "tool_name": "create_ticket",
+                        "target_type": "ticket",
+                        "target": "ticket",
+                        "parameters": {"title": "track", "description": "track"},
+                        "reason": "track response",
+                    },
+                ],
+                "strategy_summary": "LLM isolate staging host",
+            }
+            return LLMResponse(
+                content=json.dumps(payload),
+                model_name="mock",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            )
+
+    llm = _IsolateLLM()
+    agent = ResponseAgent(
+        llm_client=llm,
+        working_memory=wm,
+        event_service=_FakeEventService(),
+        playbook_release_service=_PydanticRejectingReleaseService(),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    assert llm.calls == 1
+    assert any(a.tool_name == "isolate_host" for a in plan.actions)
+    assert plan.generated_by is ResponsePlanGeneratedBy.LLM
+    assert "playbook ref invalid" in plan.strategy_summary
+    assert "LLM isolate staging host" in plan.strategy_summary
+    assert not any(a.playbook_ref is not None for a in plan.actions)
 
 
 @pytest.mark.asyncio

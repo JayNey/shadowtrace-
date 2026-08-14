@@ -905,6 +905,8 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                 "playbook_refs_invalid; DEFAULT_RESPONSE_RULES fallback",
             )
 
+        playbook_resolution_failed_note: str | None = None
+
         if playbook_refs and self.playbook_release_service is not None:
             try:
                 playbook, release = await self.playbook_release_service.resolve_playbook_ref(
@@ -929,31 +931,14 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                     input.event_id,
                     exc.error_message,
                 )
-                return (
-                    expand_rule_candidates(
-                        get_rule_actions(event_type, severity),
-                        entities,
-                    ),
-                    ResponsePlanGeneratedBy.TEMPLATE,
-                    (
-                        f"playbook resolution failed ({exc.error_code}); "
-                        "DEFAULT_RESPONSE_RULES fallback"
-                    ),
-                )
+                playbook_resolution_failed_note = f"playbook resolution failed ({exc.error_code})"
             except ValidationError as exc:
                 logger.warning(
                     "ResponseAgent playbook ref invalid event=%s err=%s",
                     input.event_id,
                     exc,
                 )
-                return (
-                    expand_rule_candidates(
-                        get_rule_actions(event_type, severity),
-                        entities,
-                    ),
-                    ResponsePlanGeneratedBy.TEMPLATE,
-                    "playbook ref invalid; DEFAULT_RESPONSE_RULES fallback",
-                )
+                playbook_resolution_failed_note = "playbook ref invalid"
         elif playbook_refs and self.playbook_kb_service is not None:
             # Legacy/test bootstrap only — production wires playbook_release_service.
             playbook = await self._load_playbook_legacy(playbook_refs[0].playbook_id)
@@ -964,6 +949,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                     f"playbook {playbook.playbook_id}",
                 )
 
+        llm_fallback_reason = "llm empty"
         if self.llm_client is not None and triage is not None:
             try:
                 llm_candidates, strategy_summary = await self._generate_with_llm(
@@ -973,6 +959,8 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                 )
                 if llm_candidates:
                     summary = (strategy_summary or "").strip() or "LLM proposed candidate actions"
+                    if playbook_resolution_failed_note:
+                        summary = f"{playbook_resolution_failed_note}; {summary}"
                     return (
                         llm_candidates,
                         ResponsePlanGeneratedBy.LLM,
@@ -986,12 +974,17 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                     input.event_id,
                     exc,
                 )
+                llm_fallback_reason = "llm failed"
 
         rule_actions = get_rule_actions(event_type, severity)
+        if playbook_resolution_failed_note:
+            strategy = f"{playbook_resolution_failed_note}; {llm_fallback_reason}; rule fallback"
+        else:
+            strategy = "DEFAULT_RESPONSE_RULES fallback"
         return (
             expand_rule_candidates(rule_actions, entities),
             ResponsePlanGeneratedBy.TEMPLATE,
-            "DEFAULT_RESPONSE_RULES fallback",
+            strategy,
         )
 
     async def _generate_with_llm(
