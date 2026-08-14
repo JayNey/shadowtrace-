@@ -27,6 +27,7 @@ import StatusBadge from "./StatusBadge";
 import SeverityTag from "./SeverityTag";
 import VerdictTag from "./VerdictTag";
 import WritebackBadge from "./WritebackBadge";
+import { getSeverityConfig } from "./constants";
 import {
   isHighRiskNoneMismatch,
   labelVerdictReasonCode,
@@ -86,6 +87,12 @@ export default function EventOverviewCard({ detail, onRefresh }: Props) {
   }, [classificationSource, lowConfidence]);
 
   const riskAssessment = event.event_context_snapshot?.risk_assessment;
+  const outwardSeverity = riskAssessment?.severity ?? event.severity;
+  const triageSeverity = event.event_context_snapshot?.triage_severity;
+  const showTriageSeverityChip =
+    triageSeverity !== undefined &&
+    triageSeverity !== null &&
+    triageSeverity !== outwardSeverity;
   const demotionCodes = useMemo(
     () =>
       resolveVerdictDemotionCodes({
@@ -156,7 +163,12 @@ export default function EventOverviewCard({ detail, onRefresh }: Props) {
             <Typography.Text type="secondary">{event.event_id}</Typography.Text>
             <Space wrap>
               <StatusBadge status={event.status} />
-              <SeverityTag severity={event.severity} />
+              <SeverityTag severity={outwardSeverity} />
+              {showTriageSeverityChip && triageSeverity ? (
+                <Tag data-testid="overview-triage-severity-tag">
+                  分诊 {getSeverityConfig(triageSeverity).label}
+                </Tag>
+              ) : null}
               <VerdictTag verdict={event.final_verdict} />
               {event.external_unsynced && <Tag color="orange">外部状态未同步</Tag>}
               {showDemotionNotice ? (

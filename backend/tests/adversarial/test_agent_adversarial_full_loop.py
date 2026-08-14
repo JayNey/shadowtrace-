@@ -42,6 +42,7 @@ from tests.adversarial.audit_report import (
     AdversarialAuditChecks,
     collect_entity_tokens,
     normalize_enum,
+    resolve_observed_severity,
 )
 from tests.adversarial.full_loop_runner import run_production_full_loop
 from tests.adversarial.helpers import ingest_true_positive_event, missing_response_targets
@@ -290,6 +291,7 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     triage_ctx = await context_store.get(event_id, "triage_result") or {}
     evidence_ctx = await context_store.get(event_id, "evidence_output") or {}
     report_ctx = await context_store.get(event_id, "report") or {}
+    risk_ctx = await context_store.get(event_id, "risk_assessment") or {}
     status_sequence = await _audit_status_sequence(session_factory, event_id)
     disposition_gaps = missing_response_targets(
         ground_truth=GROUND_TRUTH,
@@ -307,6 +309,12 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     entities_found = [e for e in GROUND_TRUTH["must_identify_entities"] if e.lower() in joined]
     indicators_found = [i for i in GROUND_TRUTH["must_identify_indicators"] if i.lower() in joined]
 
+    outward_severity, triage_severity = resolve_observed_severity(
+        risk_ctx=risk_ctx if isinstance(risk_ctx, dict) else None,
+        event_severity=event_final.severity,
+        triage_ctx=triage_ctx if isinstance(triage_ctx, dict) else None,
+    )
+
     async with session_factory() as session:
         action_count = await session.scalar(
             select(func.count()).select_from(orm.Action).where(orm.Action.event_id == event_id)
@@ -317,7 +325,8 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     checks = AdversarialAuditChecks(
         ground_truth=GROUND_TRUTH,
         event_type=normalize_enum(triage_ctx.get("event_type") or event_final.event_type),
-        severity=normalize_enum(triage_ctx.get("severity") or event_final.severity),
+        severity=outward_severity,
+        triage_severity=triage_severity,
         risk_score=int(event_final.risk_score or 0),
         final_verdict=normalize_enum(event_final.final_verdict),
         entities_found=entities_found,
@@ -446,6 +455,10 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     )
     assert report["checks"]["verdict_matches_expected"]
     assert report["checks"]["risk_score_at_least_minimum"]
+    if isinstance(risk_ctx, dict) and risk_ctx.get("severity"):
+        assert report["observed"]["severity"] == normalize_enum(risk_ctx.get("severity"))
+    if triage_severity and report["observed"]["severity"] != triage_severity:
+        assert report["observed"]["triage_severity"] == triage_severity
     # ISSUE-319: lock full-loop scorecard assembly (not only helper unit tests).
     assert report["audit_mode"] == "full_loop"
     assert report["checks"]["closed_reached"] is True

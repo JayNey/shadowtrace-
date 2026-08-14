@@ -615,6 +615,39 @@ async def test_containment_quality_gate_confirmed_threat_at_medium_severity() ->
 
 
 @pytest.mark.asyncio
+async def test_planning_severity_uses_max_of_risk_and_triage() -> None:
+    """ISSUE-330: planning still uses max(risk, triage); display unification must not flatten."""
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(severity=Severity.HIGH))
+    captured: dict[str, Any] = {}
+
+    class _CaptureAgent(ResponseAgent):
+        async def _generate_candidates(self, **kwargs: Any) -> Any:
+            captured["severity"] = kwargs["severity"]
+            return ([], ResponsePlanGeneratedBy.TEMPLATE, "capture")
+
+    agent = _CaptureAgent(
+        llm_client=_UngroundedOnlyLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.NONE),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    await agent.execute(
+        ResponseAgentInput(
+            event_id=event_id,
+            risk_assessment=_risk(Severity.MEDIUM, score=55),
+            evidence_output=EvidenceOutput(
+                evidence_list=[],
+                collection_status=CollectionStatus.COMPLETED,
+                overall_confidence=0.9,
+            ),
+        )
+    )
+    assert captured["severity"] is Severity.HIGH
+
+
+@pytest.mark.asyncio
 async def test_containment_quality_gate_aligns_block_ip_with_grounded_entity() -> None:
     """ISSUE-198: rule fallback block_ip must target a grounded EntitySet IOC."""
     grounded_ip = "203.0.113.50"

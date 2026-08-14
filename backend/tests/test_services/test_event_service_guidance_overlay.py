@@ -313,3 +313,32 @@ async def test_get_event_backfills_evidence_when_orm_has_only_risk() -> None:
     assert snap.get("collection_status") == "failed"
     assert snap.get("evidence_count") == 0
     assert snap.get("analysis_only_complete") is True
+
+
+@pytest.mark.asyncio
+async def test_get_event_overlays_bounded_triage_severity_from_wm() -> None:
+    """ISSUE-330: GET hydrates triage_severity without copying the triage payload."""
+    event_id = "evt-overlay-330-triage"
+    row = _reporting_row(
+        event_id,
+        snapshot={"risk_assessment": {"risk_score": 77, "severity": "high"}},
+    )
+    service = _service_with_row(
+        row,
+        store_values={
+            "triage_result": {
+                "severity": "medium",
+                "decision_summary": "event_type=data_exfiltration, severity=medium",
+                "reasoning": "CoT must not leak",
+            }
+        },
+    )
+
+    event = await service.get_event(event_id)
+
+    assert event is not None
+    snap = event.event_context_snapshot or {}
+    assert snap.get("triage_severity") == "medium"
+    assert "triage_result" not in snap
+    assert "CoT must not leak" not in str(snap)
+    service._store.get.assert_any_await(event_id, "triage_result")

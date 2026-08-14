@@ -682,6 +682,7 @@ class EventService:
 
     async def get_event(self, event_id: str) -> SecurityEvent | None:
         from app.services.event_context_snapshot_projection import (
+            bound_triage_severity,
             merge_evidence_summary_into_snapshot,
             merge_report_generated_into_snapshot,
             merge_storyline_summary_into_snapshot,
@@ -785,6 +786,27 @@ class EventService:
             # Ignore embedded ``report`` blobs in CLOSED freezes — GET /report
             # is driven by the report table, not the context freeze.
             snapshot["report_generated"] = False
+
+        if bound_triage_severity(snapshot.get("triage_severity")) is None:
+            nested = snapshot.get("triage_result")
+            extracted = (
+                bound_triage_severity(nested.get("severity")) if isinstance(nested, dict) else None
+            )
+            if extracted is None:
+                try:
+                    triage_ctx = await self._store.get(event_id, "triage_result")
+                    if isinstance(triage_ctx, dict):
+                        extracted = bound_triage_severity(triage_ctx.get("severity"))
+                    else:
+                        extracted = bound_triage_severity(getattr(triage_ctx, "severity", None))
+                except Exception:
+                    logger.debug(
+                        "overlay triage_severity failed event_id=%s",
+                        event_id,
+                        exc_info=True,
+                    )
+            if extracted is not None:
+                snapshot["triage_severity"] = extracted
 
         # ISSUE-254: always return a hard-projected API snapshot (never CLOSED dump).
         projected = project_snapshot_for_api(snapshot)
