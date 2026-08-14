@@ -557,3 +557,52 @@ async def test_asset_isolated_no_cross_host_false_positive() -> None:
     conflicts = detector.detect([isolated, edr_other_host])
     rules = {c.detail.get("rule_name") for c in conflicts}
     assert RULE_ASSET_ISOLATED_BUT_EDR_ACTIVE not in rules
+
+
+async def test_execute_query_dns_from_fqdn_ioc_when_domains_empty_concurrent(
+    tool_executor: Any,
+    evidence_projection: EvidenceProjection,
+) -> None:
+    """ISSUE-332: concurrent path also calls query_dns from FQDN IOC when domains empty."""
+
+    class _DnsCallRecorder:
+        def __init__(self, inner: object) -> None:
+            self.inner = inner
+            self.dns_calls: list[dict[str, object]] = []
+
+        async def call(
+            self,
+            tool_name: str,
+            params: dict[str, object],
+            event_id: str,
+            **kwargs: object,
+        ) -> object:
+            if tool_name == "query_dns":
+                self.dns_calls.append(params)
+            return await self.inner.call(tool_name, params, event_id, **kwargs)  # type: ignore[misc]
+
+    event_id = f"evt-332-dns-ioc-conc-{new_sfx()}"
+    recorder = _DnsCallRecorder(tool_executor)
+    agent, wm, _ = _build_agent(tool_executor=recorder, evidence_mode="concurrent")
+    await wm.write(
+        event_id,
+        "event",
+        {"event_id": event_id, "occurred_at": "2024-06-15T09:00:00Z"},
+    )
+    triage = TriageResult(
+        event_type=EventType.SUSPICIOUS_DOMAIN,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(),
+        ioc_list=["storage-sync-cdn.example"],
+    )
+    with bind_evidence_projection(evidence_projection):
+        with bind_evidence_query_scope(DEFAULT_SCOPE):
+            output = await agent.execute(
+                EvidenceAgentInput(event_id=event_id, triage_result=triage)
+            )
+
+    assert recorder.dns_calls
+    assert recorder.dns_calls[0]["domain"] == "storage-sync-cdn.example"
+    dns_gaps = [gap for gap in output.gaps if gap.missing_source is EvidenceSource.DNS]
+    assert all(gap.reason != "source_skipped" for gap in dns_gaps)

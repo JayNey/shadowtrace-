@@ -259,17 +259,46 @@ def _indicator_is_valid(indicator: str) -> bool:
     text = indicator.strip()
     if not text:
         return False
+    return _is_ip_literal(text) or _fqdn_if_valid(text) is not None
+
+
+def _is_ip_literal(value: str) -> bool:
     try:
-        ipaddress.ip_address(text)
+        ipaddress.ip_address(value.strip())
     except ValueError:
-        pass
-    else:
-        return True
+        return False
+    return True
+
+
+def _fqdn_if_valid(item: str) -> str | None:
+    """Return *item* when it validates as an FQDN (never an IP literal)."""
+    text = item.strip()
+    if not text or _is_ip_literal(text):
+        return None
     domain_result = validate_entity_set(
         EntitySet(domains=[DomainEntity(entity_id="ioc-check", fqdn=text)]),
         provenance="llm",
     )
-    return bool(domain_result.entity_set.domains)
+    return next((d.fqdn for d in domain_result.entity_set.domains if d.fqdn), None)
+
+
+def _fqdn_from_ioc_list(iocs: list[str]) -> str | None:
+    """Return the first IOC that validates as an FQDN (never an IP literal)."""
+    for raw in iocs:
+        fqdn = _fqdn_if_valid(raw)
+        if fqdn:
+            return fqdn
+    return None
+
+
+def _dns_domain_keys(entities: EntitySet, iocs: list[str]) -> set[str]:
+    """Domain keys usable for query_dns from entities plus FQDN IOCs."""
+    keys = {d.fqdn for d in entities.domains if d.fqdn}
+    for raw in iocs:
+        fqdn = _fqdn_if_valid(raw)
+        if fqdn:
+            keys.add(fqdn)
+    return keys
 
 
 def _threat_intel_indicator_keys(
@@ -300,8 +329,8 @@ def _skip_reason_for_tool(
         raw_values = {ip.address for ip in raw.ips if ip.address}
         valid_values = {ip.address for ip in validated.ips if ip.address}
     elif tool_name == "query_dns":
-        raw_values = {d.fqdn for d in raw.domains if d.fqdn}
-        valid_values = {d.fqdn for d in validated.domains if d.fqdn}
+        raw_values = _dns_domain_keys(raw, list(raw_iocs or []))
+        valid_values = _dns_domain_keys(validated, list(valid_iocs or []))
     elif tool_name == "query_asset_info":
         raw_values = {value for host in raw.hosts for value in (host.hostname, host.ip) if value}
         valid_values = {
@@ -1597,9 +1626,10 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 params["dst_ip"] = external_ip
             return params
         if tool_name == "query_dns":
-            if not domain:
+            dns_domain = domain or _fqdn_from_ioc_list(iocs)
+            if not dns_domain:
                 return None
-            return {"domain": domain, "time_range": time_range}
+            return {"domain": dns_domain, "time_range": time_range}
         if tool_name == "query_asset_info":
             if not host_ip and not hostname:
                 return None

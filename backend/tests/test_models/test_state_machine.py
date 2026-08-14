@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from app.models.enums import (
@@ -361,6 +363,13 @@ def test_closed_gate_required_rejects_actual_disposition_mismatch() -> None:
 
 
 def test_closed_gate_required_happy_path() -> None:
+    validate_closed_gate(_closed_ctx())
+
+
+def test_closed_gate_does_not_consult_min_evidence_sources() -> None:
+    """ISSUE-332: CLOSED predicates do not read MIN_EVIDENCE_SOURCES or source counts."""
+    source = inspect.getsource(validate_closed_gate)
+    assert "MIN_EVIDENCE" not in source
     validate_closed_gate(_closed_ctx())
 
 
