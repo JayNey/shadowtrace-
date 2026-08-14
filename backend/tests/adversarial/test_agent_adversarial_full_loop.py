@@ -414,6 +414,8 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         "approval_records": loop_result.approval_records,
         "response_plan_present": loop_result.response_plan_present,
         "response_plan_actions": list(loop_result.response_plan_actions),
+        "response_plan_generated_by": loop_result.response_plan_generated_by,
+        "response_plan_strategy_summary": loop_result.response_plan_strategy_summary,
         "response_agent_traced": loop_result.response_agent_traced,
         "verification_present": loop_result.verification_present,
         "verify_agent_traced": loop_result.verify_agent_traced,
@@ -557,6 +559,24 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     assert report_sections, "ISSUE-329: persisted report must include sections"
     _assert_executed_report_not_all_pending(report_sections)
     _assert_entity_writeback_not_claimed_applicable(report_sections)
+    # ISSUE-342: artifact must expose plan provenance and runtime action statuses.
+    assert loop_result.response_plan_generated_by, (
+        "full_loop artifact must include response_plan.generated_by for audit provenance"
+    )
+    assert (
+        report["full_loop"]["response_plan_generated_by"]
+        == loop_result.response_plan_generated_by
+    )
+    executed_actions = [
+        action
+        for action in loop_result.response_plan_actions
+        if isinstance(action, dict) and str(action.get("status") or "").lower() != "pending"
+    ]
+    action_statuses = [action.get("status") for action in loop_result.response_plan_actions]
+    assert executed_actions, (
+        "ISSUE-342: artifact response_plan_actions must overlay Action-table runtime status "
+        f"after execute; got statuses={action_statuses}"
+    )
     assert EventStatus.EXECUTING_RESPONSE.value in status_sequence, (
         "expected audited transition through executing_response"
     )
