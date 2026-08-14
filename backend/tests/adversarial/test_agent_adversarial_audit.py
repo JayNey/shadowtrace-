@@ -183,6 +183,11 @@ async def test_adversarial_credential_db_staging_exfil_audit(
         entities_found=entities_found,
         indicators_found=indicators_found,
         report_excerpt=_report_excerpt(result.report),
+        report_quality=(
+            result.report.report_quality.value
+            if result.report is not None and getattr(result.report, "report_quality", None) is not None
+            else None
+        ),
         triage_summary=str(triage_ctx.get("decision_summary") or ""),
         evidence_collection_status=str(
             evidence_ctx.get("collection_status") or evidence_ctx.get("status") or ""

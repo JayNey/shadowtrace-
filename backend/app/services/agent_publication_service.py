@@ -267,6 +267,7 @@ class AgentPublicationService:
 
         await self._publish_report_generated(persisted)
         await self._persist_report_generated_flag(event_id, True)
+        await self._persist_report_quality_snapshot(event_id, persisted)
         return persisted
 
     async def _publish_report_generated(self, report: InvestigationReport) -> None:
@@ -315,6 +316,29 @@ class AgentPublicationService:
                 exc_info=True,
             )
             await self._mark_projection_degraded(event_id, "report_generated_snapshot")
+
+    async def _persist_report_quality_snapshot(
+        self,
+        event_id: str,
+        report: InvestigationReport,
+    ) -> None:
+        quality = (
+            report.report_quality.value
+            if hasattr(report.report_quality, "value")
+            else str(report.report_quality or "complete")
+        )
+        try:
+            await self._event_service.merge_report_quality_context_snapshot(
+                event_id,
+                quality,
+            )
+        except Exception:
+            logger.warning(
+                "failed to merge report_quality snapshot event=%s",
+                event_id,
+                exc_info=True,
+            )
+            await self._mark_projection_degraded(event_id, "report_quality_snapshot")
 
     async def _maybe_flag_triage_risk_inconsistency(
         self,

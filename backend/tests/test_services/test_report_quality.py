@@ -615,3 +615,27 @@ async def test_report_agent_template_fallback_keeps_enrichment_and_degraded() ->
     assert agent.last_report_markdown is not None
     assert "模板降级结构化摘要" in agent.last_report_markdown
     assert "decision_brief" in agent.last_report_markdown
+
+
+def test_closed_gate_does_not_require_report_quality_complete() -> None:
+    """ISSUE-348: CLOSED gate checks report existence only, not complete quality."""
+    from app.models.enums import DispositionPolicy
+    from app.models.workflow import TransitionContext, validate_closed_gate
+
+    validate_closed_gate(
+        TransitionContext(
+            disposition_policy=DispositionPolicy.NOT_REQUIRED,
+            report_exists=True,
+        )
+    )
+
+
+def test_http_gate_still_rejects_incomplete_without_force() -> None:
+    """ISSUE-348: HTTP POST gate unchanged — graph honesty does not weaken POST /report."""
+    from app.services.report_quality import should_reject_incomplete_without_force
+
+    assert should_reject_incomplete_without_force(
+        ReportQuality.INCOMPLETE_PLACEHOLDER,
+        force=False,
+        gate_enforced=True,
+    )

@@ -173,6 +173,13 @@ class _FakeEventService:
     ) -> None:
         return None
 
+    async def merge_report_quality_context_snapshot(
+        self,
+        event_id: str,
+        report_quality: str,
+    ) -> None:
+        return None
+
 
 class _FakeEventBus:
     def __init__(self) -> None:

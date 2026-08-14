@@ -458,6 +458,7 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         entities_found=entities_found,
         indicators_found=indicators_found,
         report_excerpt=_report_excerpt(report_ctx),
+        report_quality=str(report_row.report_quality) if report_row is not None else None,
         triage_summary=str(triage_ctx.get("decision_summary") or ""),
         evidence_collection_status=str(
             evidence_ctx.get("collection_status") or evidence_ctx.get("status") or ""

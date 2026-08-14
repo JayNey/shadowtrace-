@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from app.models.agent_io import CollectionStatus
-from app.models.enums import EventStatus, EventType, FinalVerdict, Severity
+from app.models.enums import EventStatus, EventType, FinalVerdict, ReportQuality, Severity
 from app.models.evidence import SKIP_GAP_REASONS, skipped_entity_description
 
 AdversarialAuditMode = Literal["analysis_only", "full_loop"]
@@ -72,6 +72,7 @@ class AdversarialAuditChecks:
     evidence_collection_status: str | None
     status_sequence: list[str]
     triage_severity: str | None = None
+    report_quality: str | None = None
     audit_mode: AdversarialAuditMode = "analysis_only"
     evidence_gaps: list[dict[str, Any]] | None = None
     quality_scores: list[dict[str, Any]] | None = None
@@ -131,6 +132,14 @@ class AdversarialAuditChecks:
         analysis_passed = sum(
             1 for key, value in checks.items() if key in _ANALYSIS_SCORED_CHECKS and value is True
         )
+        quality_value = _normalize_report_quality(self.report_quality)
+        quality_complete = quality_value is None or quality_value is ReportQuality.COMPLETE
+        quality_note: str | None = None
+        if quality_value is not None and not quality_complete:
+            quality_note = (
+                f"report_quality={quality_value.value} "
+                "(not complete; honest graph upsert grade — does not block CLOSED)"
+            )
         payload: dict[str, Any] = {
             "generated_at": datetime.now(UTC).isoformat(),
             "audit_mode": self.audit_mode,
@@ -141,6 +150,7 @@ class AdversarialAuditChecks:
                 "triage_severity": self.triage_severity,
                 "risk_score": self.risk_score,
                 "final_verdict": self.final_verdict,
+                "report_quality": quality_value.value if quality_value is not None else None,
                 "status_sequence": self.status_sequence,
                 "triage_summary": self.triage_summary,
                 "evidence_collection_status": self.evidence_collection_status,
@@ -156,6 +166,8 @@ class AdversarialAuditChecks:
                 "total_dimensions": len(scored_keys),
                 "analysis_passed": analysis_passed,
                 "analysis_total_dimensions": len(_ANALYSIS_SCORED_CHECKS),
+                "report_quality_complete": quality_complete,
+                "report_quality_note": quality_note,
             },
             "verdict_for_human": _human_verdict(checks, audit_mode=self.audit_mode),
             "unscored": {
@@ -349,6 +361,17 @@ def normalize_enum(value: Any) -> str | None:
     if isinstance(value, (EventType, FinalVerdict, Severity)):
         return value.value
     return str(value)
+
+
+def _normalize_report_quality(value: Any) -> ReportQuality | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, ReportQuality):
+        return value
+    try:
+        return ReportQuality(str(value))
+    except ValueError:
+        return None
 
 
 def resolve_observed_severity(

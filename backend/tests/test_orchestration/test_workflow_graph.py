@@ -341,6 +341,13 @@ class FakeEventService:
     ) -> None:
         self.context_snapshots.setdefault(event_id, {})["report_generated"] = generated
 
+    async def merge_report_quality_context_snapshot(
+        self,
+        event_id: str,
+        report_quality: str,
+    ) -> None:
+        self.context_snapshots.setdefault(event_id, {})["report_quality"] = report_quality
+
     async def merge_analysis_only_complete_context_snapshot(
         self,
         event_id: str,

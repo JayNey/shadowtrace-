@@ -756,3 +756,18 @@ def test_build_output_quality_unscored_blocking_profile_flag() -> None:
     bucket = build_output_quality_unscored([], output_quality_blocking=True)
     assert bucket["blocking_profile"] is True
     assert bucket["present"] is False
+
+
+def test_scorecard_annotates_non_complete_report_quality() -> None:
+    report = _analysis_pass_checks(report_quality="degraded_template").to_dict()
+    assert report["observed"]["report_quality"] == "degraded_template"
+    assert report["score"]["report_quality_complete"] is False
+    assert report["score"]["report_quality_note"] is not None
+    assert "does not block CLOSED" in report["score"]["report_quality_note"]
+    assert report["verdict_for_human"].startswith("PASS")
+
+
+def test_scorecard_complete_report_quality_has_no_note() -> None:
+    report = _analysis_pass_checks(report_quality="complete").to_dict()
+    assert report["score"]["report_quality_complete"] is True
+    assert report["score"]["report_quality_note"] is None
