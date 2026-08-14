@@ -8,6 +8,12 @@
 #   BOOTSTRAP_GENERATE_REPORT=true make bootstrap          # ISSUE-256 demo report profile
 #   BOOTSTRAP_INCLUDE_RESPONSE=true make bootstrap         # full_loop (needs scripted approve)
 #
+# Demo Makefile targets (ISSUE-304 / ISSUE-352):
+#   make bootstrap-demo              # analysis seed only (INCLUDE_RESPONSE=false, NOT CLOSED)
+#   make bootstrap-demo-analysis     # alias of bootstrap-demo
+#   make bootstrap-demo-full-loop    # response + report; stops at waiting_approval
+#   make demo-full-loop              # official single-scenario CLOSED gold path
+#
 # Prerequisites:
 #   - Docker Compose core services must be healthy (make up).
 #   - ``python3`` available on host for the inline API trigger script.
@@ -322,9 +328,10 @@ echo -e "  健康检查:  ${YELLOW}${BACKEND_HEALTH}${NC}"
 echo -e "  Mock XDR:  ${YELLOW}${MOCK_XDR_HEALTH}${NC}"
 echo ""
 echo -e "  演示门禁:  curl -s ${BACKEND_HEALTH} | jq .playbook_resources"
-echo -e "  冒烟验证:  make smoke-demo          # 官方 demo（compat 终态门禁）"
+echo -e "  冒烟验证:  make smoke-demo          # 官方 demo compat 终态（非 strict CLOSED）"
 echo -e "  短路径冒烟: bash scripts/smoke_bootstrap.sh   # 默认不含终态门禁"
 echo -e "  金标全闭环: make demo-full-loop     # ISSUE-256/304（seed + 脚本审批 → CLOSED）"
+echo -e "  分析种子:   make bootstrap-demo      # 不含 response，非 CLOSED（别名 bootstrap-demo-analysis）"
 echo -e "  Matrix:     EVAL_MATRIX_REQUIRE_CLOSED=1 make eval-full-loop-matrix"
 echo -e "  查看日志:  ${COMPOSE_CMD} logs -f backend"
 echo -e "  make down  停止并移除容器（数据卷保留）"

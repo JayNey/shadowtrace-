@@ -360,11 +360,21 @@ def test_smoke_demo_defaults_compat_terminal_mode() -> None:
 def test_makefile_issue_304_targets() -> None:
     text = MAKEFILE_PATH.read_text(encoding="utf-8")
     assert "bootstrap-demo-full-loop:" in text
+    assert "bootstrap-demo-analysis:" in text
     assert "demo-full-loop:" in text
     assert "test-ci-lite:" in text
     assert "test_smoke_event_terminal.py" in text
     assert "SMOKE_TERMINAL_MODE" in text
     assert "EVAL_REQUIRE_CLOSED" in text
+
+
+def test_makefile_bootstrap_demo_documents_analysis_only_profile() -> None:
+    text = MAKEFILE_PATH.read_text(encoding="utf-8")
+    block_start = text.index("# Analysis-only demo seed (ISSUE-352)")
+    block_end = text.index("bootstrap-demo-analysis:", block_start)
+    block = text[block_start:block_end]
+    assert "BOOTSTRAP_INCLUDE_RESPONSE=false" in block
+    assert "CLOSED" in block
 
 
 def test_makefile_bootstrap_demo_full_loop_sets_response_and_report() -> None:
@@ -404,15 +414,23 @@ def test_deployment_docs_official_demo_path_first() -> None:
     assert official_section < legacy_section
     official_block = text[official_section:legacy_section]
     assert "make up-demo" in official_block
+    assert "make demo-full-loop" in official_block
+    assert "make bootstrap-demo-full-loop" in official_block
+    assert "EVAL_REQUIRE_CLOSED=1 make eval-full-loop" in official_block
+    assert "bootstrap-demo-analysis" in official_block
+    assert "非 CLOSED" in official_block
     assert "make smoke-demo" in official_block
     assert "make test-ci-lite" in text
-    assert "bootstrap-demo-full-loop" in text
-    assert "EVAL_REQUIRE_CLOSED=1 make eval-full-loop" in text
 
 
-def test_readme_points_to_up_demo_smoke_demo() -> None:
+def test_readme_points_to_closed_gold_path_first() -> None:
     text = README.read_text(encoding="utf-8")
-    assert "make up-demo && make bootstrap-demo && make smoke-demo" in text
+    demo_full_loop_idx = text.index("make up-demo && make demo-full-loop")
+    bootstrap_smoke_idx = text.index("make up-demo && make bootstrap-demo && make smoke-demo")
+    assert demo_full_loop_idx < bootstrap_smoke_idx
+    assert "bootstrap-demo-full-loop" in text
+    assert "bootstrap-demo-analysis" in text
+    assert "非 CLOSED" in text
     assert "make demo-full-loop" in text
     assert "make test-ci-lite" in text
     assert "EVAL_SCENARIO=" in text

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Full mock demo stack smoke (ISSUE-141 / #647).
 #
-# Prerequisites: make up-demo && make bootstrap-demo
+# Prerequisites: make up-demo && make bootstrap-demo (analysis seed; NOT CLOSED)
 # Checks: core health/events, Celery worker, ingestion scheduler, observability URLs + OTEL path.
 set -euo pipefail
 
@@ -73,7 +73,7 @@ if ! docker exec "${beat_id}" pgrep -f 'celery.*beat' >/dev/null; then
 fi
 echo "  ok: scheduler beat + ingestion worker healthy"
 
-echo "[smoke-demo] core bootstrap smoke (requires make bootstrap-demo) ..."
+echo "[smoke-demo] core bootstrap smoke (requires make bootstrap-demo / bootstrap-demo-analysis) ..."
 if ! BACKEND_PORT="${BACKEND_PORT}" FRONTEND_PORT="${FRONTEND_PORT}" MOCK_XDR_PORT="${MOCK_XDR_PORT}" \
   BOOTSTRAP_AUTH_TOKEN="${BOOTSTRAP_AUTH_TOKEN:-bootstrap-token}" \
   SMOKE_TERMINAL_MODE="${SMOKE_TERMINAL_MODE:-compat}" \
@@ -81,7 +81,7 @@ if ! BACKEND_PORT="${BACKEND_PORT}" FRONTEND_PORT="${FRONTEND_PORT}" MOCK_XDR_PO
   SMOKE_TERMINAL_MIN_EVENTS="${SMOKE_TERMINAL_MIN_EVENTS:-3}" \
   SMOKE_TERMINAL_POLL_S="${SMOKE_TERMINAL_POLL_S:-5}" \
   bash "${ROOT}/scripts/smoke_bootstrap.sh"; then
-  echo "[smoke-demo] ERROR: bootstrap smoke failed — run: make bootstrap-demo" >&2
+  echo "[smoke-demo] ERROR: bootstrap smoke failed — run: make bootstrap-demo-analysis" >&2
   exit 1
 fi
 

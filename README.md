@@ -4,19 +4,30 @@
 
 ### 官方 Mock Demo（推荐）
 
-需要 Docker 24+。全栈 demo 含 Celery worker；`make smoke-demo` 会验证每场景终态（失败即非零退出）。
+需要 Docker 24+。全栈 demo 含 Celery worker。
 
-```bash
-make up-demo && make bootstrap-demo && make smoke-demo
-# 浏览器：http://localhost:3000
-```
-
-单场景 **CLOSED** 金路径（脚本审批，勿空等 `APPROVAL_TIMEOUT`）：
+**单场景 CLOSED 金路径**（脚本审批，勿空等 `APPROVAL_TIMEOUT`）：
 
 ```bash
 make up-demo && make demo-full-loop
 # 或：EVAL_SCENARIO=insider_data_exfiltration make demo-full-loop
 # compat 剖面：make eval-full-loop（不含 strict CLOSED gate）
+```
+
+分步全闭环（与 `demo-full-loop` 等价剖面；`bootstrap-demo-full-loop` 会停在 `waiting_approval`）：
+
+```bash
+make up-demo
+make bootstrap-demo-full-loop
+EVAL_REQUIRE_CLOSED=1 make eval-full-loop
+```
+
+**分析种子 + compat 冒烟**（`bootstrap-demo` 默认不含 response，**非 CLOSED**；别名 `bootstrap-demo-analysis`）：
+
+```bash
+make up-demo && make bootstrap-demo && make smoke-demo
+# 浏览器：http://localhost:3000
+# smoke-demo 验证 compat 终态（analysis_only_complete 或 closed/contained）；失败即非零退出
 ```
 
 详见 [docs/deployment.md](docs/deployment.md)。
