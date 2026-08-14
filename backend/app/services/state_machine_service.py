@@ -227,10 +227,10 @@ async def _build_authoritative_context(
     )
 
     # Derive disposition_is_mock from active config (ISSUE-227 CLOSED gate).
-    from app.core.config import get_settings
+    from app.core.config import get_settings, is_mock_disposition_mode
 
     settings = get_settings()
-    disposition_is_mock = "mock" in settings.disposition_mode.strip().lower()
+    disposition_is_mock = is_mock_disposition_mode(settings.disposition_mode)
 
     return TransitionContext(
         final_verdict=FinalVerdict(row.final_verdict),

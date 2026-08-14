@@ -3,6 +3,7 @@
 import os
 from enum import StrEnum
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -10,9 +11,45 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.core.errors import ConfigurationError
 from app.models.workflow import AUTO_APPROVABLE_ACTION_LEVELS, parse_action_level_label
 
+_ModeField = Literal[
+    "source_mode",
+    "tool_mode",
+    "disposition_mode",
+    "disposition_adapter_kind",
+    "llm_mode",
+    "embedding_mode",
+]
 
-def _looks_mock(value: str) -> bool:
-    return "mock" in value.strip().lower()
+# Documented mock runtime modes (README / 工程实施拆解方案). Substring checks like
+# ``"mock" in value`` are forbidden — they false-positive on values such as
+# ``not_mock`` or ``mockish`` (ISSUE-344 / #987).
+_MOCK_MODE_VALUES: dict[_ModeField, frozenset[str]] = {
+    "source_mode": frozenset({"mock_xdr"}),
+    "tool_mode": frozenset({"mock"}),
+    "disposition_mode": frozenset({"mock_xdr"}),
+    "disposition_adapter_kind": frozenset({"mock"}),
+    "llm_mode": frozenset({"mock"}),
+    "embedding_mode": frozenset({"mock"}),
+}
+
+
+def _normalize_mode_value(value: str) -> str:
+    return value.strip().lower()
+
+
+def is_mock_disposition_mode(value: str) -> bool:
+    """Return True when *value* is an explicit mock disposition mode."""
+    return _normalize_mode_value(value) in _MOCK_MODE_VALUES["disposition_mode"]
+
+
+def is_mock_tool_mode(value: str) -> bool:
+    """Return True when *value* is an explicit mock tool mode."""
+    return _normalize_mode_value(value) in _MOCK_MODE_VALUES["tool_mode"]
+
+
+def _looks_mock(value: str, field: _ModeField) -> bool:
+    """Return True when *value* is a documented mock mode for *field*."""
+    return _normalize_mode_value(value) in _MOCK_MODE_VALUES[field]
 
 
 class TaskMode(StrEnum):
@@ -557,11 +594,11 @@ class Settings(BaseSettings):
         violations: list[str] = []
         if self.source_mode.strip().lower() != "mock_xdr":
             violations.append(f"source_mode={self.source_mode}")
-        if not _looks_mock(self.tool_mode):
+        if not _looks_mock(self.tool_mode, "tool_mode"):
             violations.append(f"tool_mode={self.tool_mode}")
-        if not _looks_mock(self.disposition_mode):
+        if not _looks_mock(self.disposition_mode, "disposition_mode"):
             violations.append(f"disposition_mode={self.disposition_mode}")
-        if not _looks_mock(self.disposition_adapter_kind):
+        if not _looks_mock(self.disposition_adapter_kind, "disposition_adapter_kind"):
             violations.append(f"disposition_adapter_kind={self.disposition_adapter_kind}")
         raw_level = (self.auto_response_max_auto_level or "L1").strip()
         level = parse_action_level_label(raw_level)
@@ -598,17 +635,17 @@ class Settings(BaseSettings):
             violations.append("DEV_AUTH_TOKENS set: dev-token auth forbidden in production")
         if self.simulation_enabled:
             violations.append("simulation_enabled=true")
-        if _looks_mock(self.source_mode):
+        if _looks_mock(self.source_mode, "source_mode"):
             violations.append(f"source_mode={self.source_mode}")
-        if _looks_mock(self.tool_mode):
+        if _looks_mock(self.tool_mode, "tool_mode"):
             violations.append(f"tool_mode={self.tool_mode}")
-        if _looks_mock(self.disposition_mode):
+        if _looks_mock(self.disposition_mode, "disposition_mode"):
             violations.append(f"disposition_mode={self.disposition_mode}")
-        if _looks_mock(self.disposition_adapter_kind):
+        if _looks_mock(self.disposition_adapter_kind, "disposition_adapter_kind"):
             violations.append(f"disposition_adapter_kind={self.disposition_adapter_kind}")
-        if _looks_mock(self.llm_mode):
+        if _looks_mock(self.llm_mode, "llm_mode"):
             violations.append(f"llm_mode={self.llm_mode}")
-        if _looks_mock(self.embedding_mode):
+        if _looks_mock(self.embedding_mode, "embedding_mode"):
             violations.append(f"embedding_mode={self.embedding_mode}")
         if self.retrieval_fixture_fallback:
             violations.append("retrieval_fixture_fallback=true")

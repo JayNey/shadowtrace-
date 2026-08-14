@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings, get_settings, is_mock_disposition_mode, is_mock_tool_mode
 from app.db import models as orm
 from app.models.enums import ActionLevel, EventStatus, Severity
 from app.models.investigation_intent import PRIMARY_LINK_ROLE, PROVISIONAL_LINK_ROLE
@@ -75,9 +75,9 @@ class AutoResponsePolicyService:
             return AutoResponseDecision(False, "orchestration_analysis_only")
         if self._settings.source_mode.strip().lower() != "mock_xdr":
             return AutoResponseDecision(False, "source_mode_not_mock_xdr")
-        if "mock" not in self._settings.tool_mode.strip().lower():
+        if not is_mock_tool_mode(self._settings.tool_mode):
             return AutoResponseDecision(False, "tool_mode_not_mock")
-        if "mock" not in self._settings.disposition_mode.strip().lower():
+        if not is_mock_disposition_mode(self._settings.disposition_mode):
             return AutoResponseDecision(False, "disposition_mode_not_mock")
         if link_role == PROVISIONAL_LINK_ROLE:
             return AutoResponseDecision(False, "provisional_hold")
