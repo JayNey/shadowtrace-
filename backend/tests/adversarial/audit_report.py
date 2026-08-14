@@ -15,6 +15,7 @@ from typing import Any, Literal
 from app.models.agent_io import CollectionStatus
 from app.models.enums import EventStatus, EventType, FinalVerdict, ReportQuality, Severity
 from app.models.evidence import SKIP_GAP_REASONS, skipped_entity_description
+from tests.adversarial.helpers import SignalAuditResult, disposition_gap_target_label
 
 AdversarialAuditMode = Literal["analysis_only", "full_loop"]
 
@@ -58,6 +59,9 @@ class AdversarialAuditChecks:
 
     ``output_quality`` lives in the ``unscored`` bucket (ISSUE-347): visibility
     only, never a scored dimension and never wired into ``validate_closed_gate``.
+
+    ``quality_unscored`` and PASS side-notes disclose coverage / understanding
+    gaps without changing scored dimensions or CLOSED (ISSUE-349).
     """
 
     ground_truth: dict[str, Any]
@@ -77,6 +81,9 @@ class AdversarialAuditChecks:
     evidence_gaps: list[dict[str, Any]] | None = None
     quality_scores: list[dict[str, Any]] | None = None
     output_quality_blocking: bool = False
+    disposition_gaps: tuple[str, ...] = ()
+    entity_signal_audit: SignalAuditResult | None = None
+    indicator_signal_audit: SignalAuditResult | None = None
 
     def __post_init__(self) -> None:
         if self.audit_mode not in {"analysis_only", "full_loop"}:
@@ -140,6 +147,11 @@ class AdversarialAuditChecks:
                 f"report_quality={quality_value.value} "
                 "(not complete; honest graph upsert grade — does not block CLOSED)"
             )
+        quality_unscored = _build_quality_unscored(
+            entity_audit=self.entity_signal_audit,
+            indicator_audit=self.indicator_signal_audit,
+            disposition_gaps=self.disposition_gaps,
+        )
         payload: dict[str, Any] = {
             "generated_at": datetime.now(UTC).isoformat(),
             "audit_mode": self.audit_mode,
@@ -160,6 +172,7 @@ class AdversarialAuditChecks:
                 "indicators_found": self.indicators_found,
             },
             "checks": checks,
+            "quality_unscored": quality_unscored,
             "score": {
                 "passed": scored_passed,
                 "scored_dimensions": scored_passed,
@@ -169,7 +182,11 @@ class AdversarialAuditChecks:
                 "report_quality_complete": quality_complete,
                 "report_quality_note": quality_note,
             },
-            "verdict_for_human": _human_verdict(checks, audit_mode=self.audit_mode),
+            "verdict_for_human": _human_verdict(
+                checks,
+                audit_mode=self.audit_mode,
+                quality_unscored=quality_unscored,
+            ),
             "unscored": {
                 "output_quality": build_output_quality_unscored(
                     self.quality_scores,
@@ -320,11 +337,77 @@ def build_output_quality_unscored(
     }
 
 
+def _build_quality_unscored(
+    *,
+    entity_audit: SignalAuditResult | None,
+    indicator_audit: SignalAuditResult | None,
+    disposition_gaps: tuple[str, ...],
+) -> dict[str, Any]:
+    """Unscored provenance buckets (ISSUE-349) — side-notes, not scored dimensions."""
+    entity = entity_audit or SignalAuditResult(
+        required=(),
+        text_understanding_hits=(),
+        source_projection_hits=(),
+        echo_only_hits=(),
+        text_understanding_missing=(),
+    )
+    indicator = indicator_audit or SignalAuditResult(
+        required=(),
+        text_understanding_hits=(),
+        source_projection_hits=(),
+        echo_only_hits=(),
+        text_understanding_missing=(),
+    )
+    return {
+        "text_understanding": {
+            "entities": {
+                "hits": len(entity.text_understanding_hits),
+                "required": len(entity.required),
+                "missing": list(entity.text_understanding_missing),
+            },
+            "indicators": {
+                "hits": len(indicator.text_understanding_hits),
+                "required": len(indicator.required),
+                "missing": list(indicator.text_understanding_missing),
+            },
+        },
+        "source_projection": {
+            "entities": list(entity.source_projection_hits),
+            "indicators": list(indicator.source_projection_hits),
+        },
+        "echo_only": {
+            "entities": list(entity.echo_only_hits),
+            "indicators": list(indicator.echo_only_hits),
+        },
+        "disposition_coverage_gaps": list(disposition_gaps),
+    }
+
+
+def _pass_side_notes(quality_unscored: dict[str, Any]) -> str:
+    notes: list[str] = []
+    gaps = quality_unscored.get("disposition_coverage_gaps") or []
+    if gaps:
+        labels = [disposition_gap_target_label(str(gap)) for gap in gaps]
+        notes.append(f"coverage GAP: {', '.join(labels)}")
+    text_understanding = quality_unscored.get("text_understanding") or {}
+    for bucket, label in (("entities", "entities"), ("indicators", "indicators")):
+        row = text_understanding.get(bucket) or {}
+        hits = int(row.get("hits") or 0)
+        required = int(row.get("required") or 0)
+        if required and hits < required:
+            notes.append(f"understanding {label} {hits}/{required}")
+    if not notes:
+        return ""
+    return " (" + "; ".join(notes) + ")"
+
+
 def _human_verdict(
     checks: dict[str, Any],
     *,
     audit_mode: AdversarialAuditMode = "analysis_only",
+    quality_unscored: dict[str, Any] | None = None,
 ) -> str:
+    side_notes = _pass_side_notes(quality_unscored or {})
     if audit_mode == "full_loop" and not checks.get("closed_reached"):
         if checks.get("reached_reporting") and checks.get("risk_score_at_least_minimum"):
             # Keep the token "PASS" out of FAIL text so greps / `"PASS" in verdict` stay clean.
@@ -348,8 +431,11 @@ def _human_verdict(
                 "(see evidence_collection_ok)"
             )
         if audit_mode == "full_loop":
-            return "PASS — full loop reached CLOSED with expected verdict and adequate risk score"
-        return "PASS — agent flagged expected verdict with adequate risk score"
+            return (
+                "PASS — full loop reached CLOSED with expected verdict and adequate risk score"
+                + side_notes
+            )
+        return "PASS — agent flagged expected verdict with adequate risk score" + side_notes
     if checks.get("risk_score_at_least_minimum"):
         return "PARTIAL — high risk detected but verdict/type may differ; review report"
     return "WEAK — pipeline completed but under-scored or wrong verdict"

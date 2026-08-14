@@ -56,7 +56,7 @@ from tests.adversarial.helpers import (
     ingest_true_positive_event,
     missing_response_targets,
     opaque_scorecard_tokens,
-    response_plan_targets,
+    response_plan_tool_targets,
     strict_disposition_targets_enabled,
 )
 from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH, HOST_DB
@@ -483,6 +483,9 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         audit_mode="full_loop",
         quality_scores=quality_scores,
         output_quality_blocking=get_settings().output_quality_blocking,
+        disposition_gaps=tuple(disposition_gaps_enforced),
+        entity_signal_audit=entity_audit,
+        indicator_signal_audit=indicator_audit,
     )
     report = checks.to_dict()
     obs = loop_result.observability
@@ -596,8 +599,8 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
             f"missing={disposition_gaps_all}"
         )
     else:
-        plan_targets = response_plan_targets(list(loop_result.response_plan_actions))
-        if HOST_DB.lower() not in plan_targets:
+        plan_tool_targets = response_plan_tool_targets(list(loop_result.response_plan_actions))
+        if ("isolate_host", HOST_DB.lower()) not in plan_tool_targets:
             assert HOST_DB in disposition_gaps_all, (
                 "ISSUE-334: missing DB isolation must be an explicit gap until ISSUE-328; "
                 f"all_gaps={disposition_gaps_all}"

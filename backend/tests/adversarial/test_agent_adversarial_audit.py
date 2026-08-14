@@ -44,6 +44,7 @@ from tests.adversarial.helpers import (
     build_alert_corpus,
     build_narrative_corpus,
     ingest_true_positive_event,
+    missing_response_targets,
     opaque_scorecard_tokens,
 )
 from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH
@@ -166,6 +167,17 @@ async def test_adversarial_credential_db_staging_exfil_audit(
     )
     entities_found = list(entity_audit.text_understanding_hits)
     indicators_found = list(indicator_audit.text_understanding_hits)
+    response_plan_actions = (
+        report_ctx.get("response_plan_actions") if isinstance(report_ctx, dict) else None
+    )
+    disposition_gaps: tuple[str, ...] = ()
+    if isinstance(response_plan_actions, list):
+        disposition_gaps = tuple(
+            missing_response_targets(
+                ground_truth=GROUND_TRUTH,
+                actions=response_plan_actions,
+            )
+        )
 
     outward_severity, triage_severity = resolve_observed_severity(
         risk_ctx=risk_ctx if isinstance(risk_ctx, dict) else None,
@@ -201,6 +213,9 @@ async def test_adversarial_credential_db_staging_exfil_audit(
         status_sequence=await _audit_status_sequence(session_factory, event_id),
         quality_scores=quality_scores,
         output_quality_blocking=get_settings().output_quality_blocking,
+        disposition_gaps=disposition_gaps,
+        entity_signal_audit=entity_audit,
+        indicator_signal_audit=indicator_audit,
     )
     report = checks.to_dict()
     report["quality_audit"] = {
