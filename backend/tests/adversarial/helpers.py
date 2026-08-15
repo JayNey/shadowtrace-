@@ -93,7 +93,7 @@ async def ingest_true_positive_event(
 def response_plan_targets(
     actions: list[dict[str, object]] | tuple[dict[str, object], ...],
 ) -> set[str]:
-    """Normalize response-plan action targets for GROUND_TRUTH alignment checks."""
+    """Normalize response-plan action targets (legacy target-only view)."""
     targets: set[str] = set()
     for action in actions:
         if not isinstance(action, dict):
@@ -102,6 +102,67 @@ def response_plan_targets(
         if isinstance(target, str) and target.strip():
             targets.add(target.strip().lower())
     return targets
+
+
+def response_plan_tool_targets(
+    actions: list[dict[str, object]] | tuple[dict[str, object], ...],
+) -> set[tuple[str, str]]:
+    """Normalize ``(tool_name, target)`` pairs for containment alignment checks."""
+    pairs: set[tuple[str, str]] = set()
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        tool = str(action.get("tool_name") or "").strip().lower()
+        target = str(action.get("target") or "").strip().lower()
+        if tool and target:
+            pairs.add((tool, target))
+    return pairs
+
+
+def _looks_like_ip(value: str) -> bool:
+    parts = value.split(".")
+    return len(parts) == 4 and all(part.isdigit() for part in parts)
+
+
+def containment_tool_for_target(target: str, ground_truth: dict[str, object]) -> str:
+    """Map a GROUND_TRUTH target to its required containment tool (tool×target contract)."""
+    target_key = target.strip().lower()
+    mapped = ground_truth.get("response_containment_tools")
+    if isinstance(mapped, dict):
+        for raw_key, raw_tool in mapped.items():
+            tool = str(raw_tool or "").strip().lower()
+            if tool and str(raw_key).strip().lower() == target_key:
+                return tool
+    entities = [
+        str(item).strip()
+        for item in (ground_truth.get("must_identify_entities") or [])
+        if str(item).strip()
+    ]
+    indicators = [
+        str(item).strip()
+        for item in (ground_truth.get("must_identify_indicators") or [])
+        if str(item).strip()
+    ]
+    if entities and target_key == entities[0].lower():
+        return "disable_account"
+    if target_key in {item.lower() for item in entities[1:]}:
+        return "isolate_host"
+    if target_key in {item.lower() for item in indicators}:
+        indicator = next(item for item in indicators if item.lower() == target_key)
+        return "block_ip" if _looks_like_ip(indicator) else "block_domain"
+    return "isolate_host"
+
+
+def format_disposition_gap(tool: str, target: str) -> str:
+    """Stable ``tool×target`` label for artifacts and human side-notes."""
+    return f"{tool.strip().lower()}×{target.strip()}"
+
+
+def disposition_gap_target_label(gap: str) -> str:
+    """Extract the target token from a ``tool×target`` gap label."""
+    if "×" in gap:
+        return gap.split("×", 1)[1]
+    return gap
 
 
 def _gated_response_targets(ground_truth: dict[str, object]) -> set[str]:
@@ -159,8 +220,13 @@ def missing_response_targets(
             if enforce_gated
             else [item for item in all_targets if item.lower() not in gated]
         )
-    present = response_plan_targets(actions)
-    return [item for item in required if item.lower() not in present]
+    present = response_plan_tool_targets(actions)
+    gaps: list[str] = []
+    for item in required:
+        tool = containment_tool_for_target(item, ground_truth)
+        if (tool, item.strip().lower()) not in present:
+            gaps.append(format_disposition_gap(tool, item))
+    return gaps
 
 
 def build_alert_corpus(*, alert_text: str = "", event_payload: dict[str, Any] | None = None) -> str:

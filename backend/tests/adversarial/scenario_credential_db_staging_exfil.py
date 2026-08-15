@@ -108,6 +108,13 @@ GROUND_TRUTH: dict[str, Any] = {
     "must_response_targets_gated": [
         HOST_DB,
     ],
+    "response_containment_tools": {
+        ACCOUNT: "disable_account",
+        HOST_WORKSTATION: "isolate_host",
+        HOST_DB: "isolate_host",
+        VPN_SRC_IP: "block_ip",
+        UPLOAD_DOMAIN: "block_domain",
+    },
     "key_processes": [PROC_NTDS, PROC_MYSQL, PROC_RCLONE],
     "egress_bytes_min": 500_000_000,
     "true_positive_incident_id": INCIDENT_ID,

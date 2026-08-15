@@ -13,12 +13,22 @@ from tests.adversarial.helpers import (
     block_ip_reason_destination_mislabels,
     build_alert_corpus,
     build_narrative_corpus,
+    containment_tool_for_target,
+    disposition_gap_target_label,
+    format_disposition_gap,
     missing_response_targets,
     opaque_scorecard_tokens,
     response_plan_targets,
+    response_plan_tool_targets,
     strict_disposition_targets_enabled,
 )
-from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH, HOST_DB, VPN_SRC_IP
+from tests.adversarial.scenario_credential_db_staging_exfil import (
+    ACCOUNT,
+    GROUND_TRUTH,
+    HOST_DB,
+    HOST_WORKSTATION,
+    VPN_SRC_IP,
+)
 
 _CLOSED_SEQUENCE = [
     "new",
@@ -36,6 +46,14 @@ _REPORTING_ONLY_SEQUENCE = [
     "verifying",
     "reporting",
 ]
+_EMPTY_ENTITY_BUCKETS = {
+    "hosts": [],
+    "accounts": [],
+    "ips": [],
+    "domains": [],
+    "processes": [],
+    "files": [],
+}
 
 
 def _analysis_pass_checks(**overrides: object) -> AdversarialAuditChecks:
@@ -61,13 +79,59 @@ def test_response_plan_targets_normalizes_case() -> None:
     assert response_plan_targets(actions) == {"wks-data-031", "198.51.100.44"}
 
 
+def test_response_plan_tool_targets_requires_tool_name() -> None:
+    actions = [{"target": "WKS-DATA-031"}, {"tool_name": "isolate_host", "target": "WKS-DATA-031"}]
+    assert response_plan_tool_targets(actions) == {("isolate_host", "wks-data-031")}
+
+
+def test_containment_tool_for_target_maps_ground_truth_entities() -> None:
+    assert containment_tool_for_target(ACCOUNT, GROUND_TRUTH) == "disable_account"
+    assert containment_tool_for_target("WKS-DATA-031", GROUND_TRUTH) == "isolate_host"
+    assert containment_tool_for_target(HOST_DB, GROUND_TRUTH) == "isolate_host"
+    assert containment_tool_for_target(VPN_SRC_IP, GROUND_TRUTH) == "block_ip"
+
+
+def test_containment_tool_explicit_map_survives_entity_reorder() -> None:
+    reordered = {
+        **GROUND_TRUTH,
+        "must_identify_entities": [HOST_WORKSTATION, ACCOUNT, HOST_DB],
+    }
+    assert containment_tool_for_target(HOST_WORKSTATION, reordered) == "isolate_host"
+    assert containment_tool_for_target(ACCOUNT, reordered) == "disable_account"
+
+
+def test_disposition_gap_target_label_roundtrip() -> None:
+    gap = format_disposition_gap("isolate_host", "WKS-DATA-031")
+    assert gap == "isolate_host×WKS-DATA-031"
+    assert disposition_gap_target_label(gap) == "WKS-DATA-031"
+    assert disposition_gap_target_label(HOST_DB) == HOST_DB
+    assert "×" in gap
+    assert "isolate_hostxWKS-DATA-031" != gap
+
+
 def test_missing_response_targets_reports_gaps(monkeypatch) -> None:
     monkeypatch.delenv("ADVERSARIAL_STRICT_DISPOSITION_TARGETS", raising=False)
     actions = [{"tool_name": "disable_account", "target": "svc-analytics-47"}]
     gaps = missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
-    assert "WKS-DATA-031" in gaps
-    assert "198.51.100.44" in gaps
-    assert HOST_DB not in gaps
+    assert format_disposition_gap("isolate_host", "WKS-DATA-031") in gaps
+    assert format_disposition_gap("block_ip", VPN_SRC_IP) in gaps
+    assert format_disposition_gap("isolate_host", HOST_DB) not in gaps
+
+
+def test_missing_response_targets_requires_tool_target_pair() -> None:
+    actions = [
+        {"tool_name": "disable_account", "target": "svc-analytics-47"},
+        {"tool_name": "disable_account", "target": "WKS-DATA-031"},
+        {"tool_name": "block_ip", "target": VPN_SRC_IP},
+    ]
+    gaps = missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
+    assert gaps == [format_disposition_gap("isolate_host", "WKS-DATA-031")]
+
+
+def test_target_only_action_does_not_clear_isolation_gap() -> None:
+    actions = [{"target": "WKS-DATA-031"}]
+    gaps = missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
+    assert format_disposition_gap("isolate_host", "WKS-DATA-031") in gaps
 
 
 def test_missing_response_targets_all_includes_gated_db() -> None:
@@ -83,7 +147,8 @@ def test_missing_response_targets_all_includes_gated_db() -> None:
         enforce_gated=True,
     )
     assert enforced == []
-    assert HOST_DB in all_gaps
+    assert format_disposition_gap("isolate_host", HOST_DB) in all_gaps
+    assert HOST_DB not in all_gaps
 
 
 def test_text_understanding_rejects_prompt_echo_only() -> None:
@@ -233,15 +298,17 @@ def test_missing_db_gap_recorded_but_not_required_when_plan_includes_host() -> N
     ]
     without_db = with_db[:-1]
     assert missing_response_targets(ground_truth=GROUND_TRUTH, actions=with_db) == []
-    assert HOST_DB not in missing_response_targets(ground_truth=GROUND_TRUTH, actions=with_db)
+    assert format_disposition_gap("isolate_host", HOST_DB) not in missing_response_targets(
+        ground_truth=GROUND_TRUTH, actions=with_db
+    )
     all_with = missing_response_targets(
         ground_truth=GROUND_TRUTH, actions=with_db, enforce_gated=True
     )
     all_without = missing_response_targets(
         ground_truth=GROUND_TRUTH, actions=without_db, enforce_gated=True
     )
-    assert HOST_DB not in all_with
-    assert HOST_DB in all_without
+    assert format_disposition_gap("isolate_host", HOST_DB) not in all_with
+    assert format_disposition_gap("isolate_host", HOST_DB) in all_without
 
 
 def test_opaque_alert_quality_rejects_source_projection_credit() -> None:
@@ -389,10 +456,14 @@ def test_strict_disposition_targets_env(monkeypatch) -> None:
     ]
     monkeypatch.delenv("ADVERSARIAL_STRICT_DISPOSITION_TARGETS", raising=False)
     assert strict_disposition_targets_enabled() is False
-    assert HOST_DB not in missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
+    assert format_disposition_gap("isolate_host", HOST_DB) not in missing_response_targets(
+        ground_truth=GROUND_TRUTH, actions=actions
+    )
     monkeypatch.setenv("ADVERSARIAL_STRICT_DISPOSITION_TARGETS", "1")
     assert strict_disposition_targets_enabled() is True
-    assert HOST_DB in missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
+    assert format_disposition_gap("isolate_host", HOST_DB) in missing_response_targets(
+        ground_truth=GROUND_TRUTH, actions=actions
+    )
 
 
 def test_human_verdict_requires_reporting_for_pass() -> None:
@@ -420,6 +491,70 @@ def test_analysis_only_pass_does_not_require_closed() -> None:
     assert "closed_reached" not in report["checks"]
     assert report["score"]["total_dimensions"] == 5
     assert report["verdict_for_human"].startswith("PASS")
+
+
+def test_full_loop_pass_annotates_coverage_and_understanding_gaps() -> None:
+    entity_audit = audit_required_signals(
+        required=list(GROUND_TRUTH["must_identify_entities"]),
+        alert_corpus="Correlation: elevated session and volume signals",
+        triage_ctx={"entities": _EMPTY_ENTITY_BUCKETS},
+        narrative_corpus="",
+    )
+    indicator_audit = audit_required_signals(
+        required=list(GROUND_TRUTH["must_identify_indicators"]),
+        alert_corpus="Correlation: elevated session and volume signals",
+        triage_ctx={"entities": _EMPTY_ENTITY_BUCKETS},
+        narrative_corpus="",
+    )
+    report = _analysis_pass_checks(
+        audit_mode="full_loop",
+        status_sequence=_CLOSED_SEQUENCE,
+        entities_found=list(entity_audit.text_understanding_hits),
+        indicators_found=list(indicator_audit.text_understanding_hits),
+        disposition_gaps=(format_disposition_gap("isolate_host", "WKS-DATA-031"),),
+        entity_signal_audit=entity_audit,
+        indicator_signal_audit=indicator_audit,
+    ).to_dict()
+    assert report["verdict_for_human"].startswith("PASS")
+    assert "coverage GAP: WKS-DATA-031" in report["verdict_for_human"]
+    assert "understanding entities 0/3" in report["verdict_for_human"]
+    assert report["score"]["passed"] == 7
+    assert report["score"]["total_dimensions"] == 7
+    assert "disposition_targets_aligned" not in report["checks"]
+    assert "text_understanding" not in report["checks"]
+    assert report["unscored"]["disposition_coverage_gaps"] == [
+        format_disposition_gap("isolate_host", "WKS-DATA-031")
+    ]
+    assert report["unscored"]["text_understanding"]["entities"]["hits"] == 0
+    assert report["unscored"]["output_quality"]["present"] is False
+    assert "quality_unscored" not in report
+
+
+def test_analysis_only_pass_annotates_understanding_without_closed_gate() -> None:
+    entity_audit = audit_required_signals(
+        required=list(GROUND_TRUTH["must_identify_entities"]),
+        alert_corpus="Correlation: elevated session and volume signals",
+        triage_ctx={"entities": _EMPTY_ENTITY_BUCKETS},
+        narrative_corpus="",
+    )
+    report = _analysis_pass_checks(
+        entities_found=list(entity_audit.text_understanding_hits),
+        entity_signal_audit=entity_audit,
+    ).to_dict()
+    assert report["verdict_for_human"].startswith("PASS")
+    assert "understanding entities 0/3" in report["verdict_for_human"]
+    assert "closed_reached" not in report["checks"]
+    assert report["score"]["total_dimensions"] == 5
+
+
+def test_analysis_only_missing_plan_discloses_enforced_coverage_gaps() -> None:
+    gaps = missing_response_targets(ground_truth=GROUND_TRUTH, actions=[])
+    assert format_disposition_gap("isolate_host", "WKS-DATA-031") in gaps
+    report = _analysis_pass_checks(disposition_gaps=tuple(gaps)).to_dict()
+    assert report["verdict_for_human"].startswith("PASS")
+    assert "coverage GAP:" in report["verdict_for_human"]
+    assert "WKS-DATA-031" in report["verdict_for_human"]
+    assert report["score"]["total_dimensions"] == 5
 
 
 def test_full_loop_pass_requires_closed() -> None:
