@@ -494,7 +494,7 @@ def build_writeback_certification(
         simulated=simulated,
         disposition_is_mock=disposition_is_mock,
     )
-    tier_ok = _writeback_tier_ok(
+    tier_ok = writeback_tier_ok(
         confirmation_evidence=confirmation_evidence,
         simulated=simulated,
         disposition_is_mock=disposition_is_mock,
@@ -531,14 +531,18 @@ def _writeback_certification_label(
     return "unknown"
 
 
-def _writeback_tier_ok(
+def writeback_tier_ok(
     *,
     confirmation_evidence: str | None,
     simulated: bool | None,
     disposition_is_mock: bool,
     mock_cert_strict: bool,
 ) -> bool:
-    """Optional mock_cert profile enforces non-mock evidence tiers on Mock receipts."""
+    """Optional mock_cert / live evidence-tier check (ISSUE-351).
+
+    Mock default skips enforcement. ``mock_cert_strict`` and non-mock paths
+    require strong confirmation evidence; live also rejects ``simulated is not False``.
+    """
     if disposition_is_mock and not mock_cert_strict:
         return True
     if disposition_is_mock and mock_cert_strict:
@@ -546,6 +550,32 @@ def _writeback_tier_ok(
     if simulated is not False:
         return False
     return confirmation_evidence in _STRONG_TERMINAL_CONFIRMATION_EVIDENCE
+
+
+def evaluate_writeback_confirmed(
+    *,
+    terminal_delivered: bool,
+    confirmed_receipt: bool,
+    confirmation_evidence: str | None,
+    simulated: bool | None,
+    disposition_is_mock: bool,
+    mock_cert_strict: bool,
+) -> bool:
+    """Plumbing flag for ``disposition_writeback_ok`` (ISSUE-351).
+
+    Mock default: unique delivered CONFIRMED terminal is enough (CLOSED stays
+    mock-lenient). Live and ``mock_cert_strict`` also require ``writeback_tier_ok``.
+    """
+    if not (terminal_delivered and confirmed_receipt):
+        return False
+    if disposition_is_mock and not mock_cert_strict:
+        return True
+    return writeback_tier_ok(
+        confirmation_evidence=confirmation_evidence,
+        simulated=simulated,
+        disposition_is_mock=disposition_is_mock,
+        mock_cert_strict=mock_cert_strict,
+    )
 
 
 def normalize_enum(value: Any) -> str | None:

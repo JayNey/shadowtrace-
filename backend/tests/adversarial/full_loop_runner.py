@@ -43,7 +43,7 @@ from app.services.report_input_builder import (
     _load_actions_from_orm,
     overlay_response_plan_from_orm,
 )
-from tests.adversarial.audit_report import _writeback_tier_ok
+from tests.adversarial.audit_report import evaluate_writeback_confirmed
 from tests.adversarial.helpers import mock_writeback_cert_strict_enabled
 from tests.integration.autonomous_e2e.helpers import (
     ObservabilitySnapshot,
@@ -80,10 +80,8 @@ class TerminalWritebackSnapshot:
 
 
 def resolve_disposition_is_mock() -> bool:
-    """Whether disposition adapter runs in Mock mode (ISSUE-351 certification)."""
-    settings = get_settings()
-    adapter = settings.disposition_adapter_kind.strip().lower()
-    return is_mock_disposition_mode(settings.disposition_mode) or adapter == "mock"
+    """Match production CLOSED projection: disposition_mode allowlist only (ISSUE-227/333/351)."""
+    return is_mock_disposition_mode(get_settings().disposition_mode)
 
 
 def resolve_full_loop_timeout_s() -> float:
@@ -324,14 +322,14 @@ async def _terminal_writeback_snapshot(
     receipt_status = receipt_row.status if receipt_row is not None else None
     terminal_delivered = delivered_terminal_count == 1 and terminal_outbox_count == 1
     confirmed_receipt = receipt_row is not None
-    writeback_confirmed = terminal_delivered and confirmed_receipt
-    if writeback_confirmed and mock_cert_strict and disposition_is_mock:
-        writeback_confirmed = _writeback_tier_ok(
-            confirmation_evidence=confirmation_evidence,
-            simulated=simulated,
-            disposition_is_mock=disposition_is_mock,
-            mock_cert_strict=True,
-        )
+    writeback_confirmed = evaluate_writeback_confirmed(
+        terminal_delivered=terminal_delivered,
+        confirmed_receipt=confirmed_receipt,
+        confirmation_evidence=confirmation_evidence,
+        simulated=simulated,
+        disposition_is_mock=disposition_is_mock,
+        mock_cert_strict=mock_cert_strict,
+    )
     return TerminalWritebackSnapshot(
         writeback_confirmed=writeback_confirmed,
         terminal_outbox_enqueued=terminal_outbox_count == 1,
