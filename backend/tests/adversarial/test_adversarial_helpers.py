@@ -125,7 +125,7 @@ def test_missing_response_targets_reports_gaps(monkeypatch) -> None:
     gaps = missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
     assert format_disposition_gap("isolate_host", "WKS-DATA-031") in gaps
     assert format_disposition_gap("block_ip", VPN_SRC_IP) in gaps
-    assert format_disposition_gap("isolate_host", HOST_DB) not in gaps
+    assert format_disposition_gap("isolate_host", HOST_DB) in gaps
 
 
 def test_missing_response_targets_requires_tool_target_pair() -> None:
@@ -135,7 +135,10 @@ def test_missing_response_targets_requires_tool_target_pair() -> None:
         {"tool_name": "block_ip", "target": VPN_SRC_IP},
     ]
     gaps = missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
-    assert gaps == [format_disposition_gap("isolate_host", "WKS-DATA-031")]
+    assert gaps == [
+        format_disposition_gap("isolate_host", "WKS-DATA-031"),
+        format_disposition_gap("isolate_host", HOST_DB),
+    ]
 
 
 def test_target_only_action_does_not_clear_isolation_gap() -> None:
@@ -144,7 +147,8 @@ def test_target_only_action_does_not_clear_isolation_gap() -> None:
     assert format_disposition_gap("isolate_host", "WKS-DATA-031") in gaps
 
 
-def test_missing_response_targets_all_includes_gated_db() -> None:
+def test_missing_response_targets_default_enforces_db_isolation() -> None:
+    """ISSUE-328: SRV-DB-STG-02 is no longer gated out of default CI."""
     actions = [
         {"tool_name": "disable_account", "target": "svc-analytics-47"},
         {"tool_name": "isolate_host", "target": "WKS-DATA-031"},
@@ -156,9 +160,10 @@ def test_missing_response_targets_all_includes_gated_db() -> None:
         actions=actions,
         enforce_gated=True,
     )
-    assert enforced == []
-    assert format_disposition_gap("isolate_host", HOST_DB) in all_gaps
-    assert HOST_DB not in all_gaps
+    db_gap = format_disposition_gap("isolate_host", HOST_DB)
+    assert db_gap in enforced
+    assert enforced == all_gaps
+    assert HOST_DB not in enforced
 
 
 def test_text_understanding_rejects_prompt_echo_only() -> None:
@@ -299,7 +304,7 @@ def test_narrative_corpus_ignores_evidence_tool_hostnames() -> None:
     assert "account abuse over vpn" in corpus
 
 
-def test_missing_db_gap_recorded_but_not_required_when_plan_includes_host() -> None:
+def test_missing_db_gap_cleared_when_plan_isolates_host() -> None:
     with_db = [
         {"tool_name": "disable_account", "target": "svc-analytics-47"},
         {"tool_name": "isolate_host", "target": "WKS-DATA-031"},
@@ -310,6 +315,9 @@ def test_missing_db_gap_recorded_but_not_required_when_plan_includes_host() -> N
     assert missing_response_targets(ground_truth=GROUND_TRUTH, actions=with_db) == []
     assert format_disposition_gap("isolate_host", HOST_DB) not in missing_response_targets(
         ground_truth=GROUND_TRUTH, actions=with_db
+    )
+    assert format_disposition_gap("isolate_host", HOST_DB) in missing_response_targets(
+        ground_truth=GROUND_TRUTH, actions=without_db
     )
     all_with = missing_response_targets(
         ground_truth=GROUND_TRUTH, actions=with_db, enforce_gated=True
@@ -459,6 +467,11 @@ def test_block_ip_reason_reads_triage_ip_normalized_field() -> None:
 
 
 def test_strict_disposition_targets_env(monkeypatch) -> None:
+    """Helper still skips names listed in must_response_targets_gated unless env is on."""
+    gated_truth = {
+        **GROUND_TRUTH,
+        "must_response_targets_gated": [HOST_DB],
+    }
     actions = [
         {"tool_name": "disable_account", "target": "svc-analytics-47"},
         {"tool_name": "isolate_host", "target": "WKS-DATA-031"},
@@ -467,12 +480,12 @@ def test_strict_disposition_targets_env(monkeypatch) -> None:
     monkeypatch.delenv("ADVERSARIAL_STRICT_DISPOSITION_TARGETS", raising=False)
     assert strict_disposition_targets_enabled() is False
     assert format_disposition_gap("isolate_host", HOST_DB) not in missing_response_targets(
-        ground_truth=GROUND_TRUTH, actions=actions
+        ground_truth=gated_truth, actions=actions
     )
     monkeypatch.setenv("ADVERSARIAL_STRICT_DISPOSITION_TARGETS", "1")
     assert strict_disposition_targets_enabled() is True
     assert format_disposition_gap("isolate_host", HOST_DB) in missing_response_targets(
-        ground_truth=GROUND_TRUTH, actions=actions
+        ground_truth=gated_truth, actions=actions
     )
 
 

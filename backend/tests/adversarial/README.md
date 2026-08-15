@@ -109,7 +109,7 @@ Do **not** claim autonomous investigation quality from Mock plumbing alone. Live
 
 Entity/indicator **text understanding** in `quality_audit` counts only when the token appears in original alert narrative (`title` / `description`). Structured source merge (`attributes.provenance=source`) is tracked separately as `source_projection_hits` and does **not** fill text-understanding credit. Prompt-appendix echo in LLM narrative fields is `echo_only_hits`.
 
-`must_response_targets` includes staging DB host `SRV-DB-STG-02`; it is gated until ISSUE-328 lands. Default CI enforces non-gated targets only; set `ADVERSARIAL_STRICT_DISPOSITION_TARGETS=1` locally to hard-fail on DB isolation gaps.
+`must_response_targets` includes staging DB host `SRV-DB-STG-02`. ISSUE-328 made DB isolation default-enforced (`must_response_targets_gated` is empty). Set `ADVERSARIAL_STRICT_DISPOSITION_TARGETS=1` only if new deferred targets are added to the gated list.
 
 ### Mock LLM routing (ISSUE-199 / ISSUE-201)
 

@@ -8,6 +8,7 @@ from app.agents.rules.response_plan_quality_gate import (
     CONTAINMENT_TOOLS,
     apply_containment_quality_gate,
     apply_evidence_sufficiency_gate,
+    entity_containment_coverage_needs,
     evidence_blocks_high_impact_actions,
     evidence_insufficiency_reason_code,
     has_actionable_containment_targets,
@@ -20,7 +21,7 @@ from app.models.agent_io import (
     RiskAssessment,
     ScoringMode,
 )
-from app.models.entities import EntitySet, HostEntity, IPEntity
+from app.models.entities import AccountEntity, EntitySet, HostEntity, IPEntity
 from app.models.enums import ActionLevel, EvidenceSource, FinalVerdict, Severity
 from app.models.evidence import Evidence
 
@@ -138,7 +139,8 @@ def test_apply_gate_marks_unsatisfied_when_no_rule_containment() -> None:
     assert "containment_quality_gate_unsatisfied" in strategy
 
 
-def test_apply_gate_noop_when_llm_already_has_containment() -> None:
+def test_apply_gate_merges_uncovered_host_when_llm_already_has_containment() -> None:
+    """ISSUE-328: block_ip alone does not cover an EntitySet host."""
     llm_filtered = [_Candidate("block_ip", "198.51.100.44")]
     rule_filtered = [_Candidate("isolate_host", "victim-host-01")]
     merged, generated_by, strategy = apply_containment_quality_gate(
@@ -152,9 +154,43 @@ def test_apply_gate_noop_when_llm_already_has_containment() -> None:
         entities=_entities_with_external_ip(),
         disposition_only=False,
     )
+    tool_names = {item.tool_name for item in merged}
+    isolate_targets = {item.target for item in merged if item.tool_name == "isolate_host"}
+    assert "block_ip" in tool_names
+    assert isolate_targets == {"victim-host-01"}
+    assert generated_by is ResponsePlanGeneratedBy.LLM
+    assert "entity_coverage_merge" in strategy
+
+
+def test_apply_gate_noop_when_entity_coverage_complete() -> None:
+    """ISSUE-328: no host/account in EntitySet and dest IP already blocked → noop."""
+    entities = EntitySet(
+        ips=[
+            IPEntity(
+                entity_id="ip-dst",
+                address="198.51.100.77",
+                scope="external",
+                attributes={"normalized_field": "dst_ip"},
+            )
+        ]
+    )
+    llm_filtered = [_Candidate("block_ip", "198.51.100.77")]
+    rule_filtered = [_Candidate("isolate_host", "BACKUP-SRV-01")]
+    merged, generated_by, strategy = apply_containment_quality_gate(
+        candidates=llm_filtered,
+        rule_fallback_candidates=rule_filtered,
+        generated_by=ResponsePlanGeneratedBy.LLM,
+        strategy="LLM ok",
+        severity=Severity.HIGH,
+        risk_assessment=_risk(),
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        entities=entities,
+        disposition_only=False,
+    )
     assert merged == llm_filtered
     assert generated_by is ResponsePlanGeneratedBy.LLM
     assert strategy == "LLM ok"
+    assert all(item.target != "BACKUP-SRV-01" for item in merged)
 
 
 def test_containment_tools_cover_issue_scope() -> None:
@@ -370,3 +406,158 @@ def test_apply_evidence_gate_uses_safe_fallback_when_stripped_empty() -> None:
     )
     assert [item.tool_name for item in kept] == ["create_ticket"]
     assert "zero_evidence_limited" in strategy
+
+
+def _exfil_coverage_entities() -> EntitySet:
+    return EntitySet(
+        accounts=[AccountEntity(entity_id="acct-1", username="svc-analytics-47")],
+        hosts=[
+            HostEntity(entity_id="host-wks", hostname="WKS-DATA-031"),
+            HostEntity(entity_id="host-db", hostname="SRV-DB-STG-02"),
+        ],
+        ips=[
+            IPEntity(
+                entity_id="ip-vpn",
+                address="198.51.100.44",
+                scope="external",
+                attributes={"normalized_field": "src_ip"},
+            ),
+            IPEntity(
+                entity_id="ip-upload",
+                address="198.51.100.77",
+                scope="external",
+                attributes={"normalized_field": "dst_ip"},
+            ),
+        ],
+    )
+
+
+def test_entity_coverage_needs_skip_vpn_src_and_hosts_outside_entityset() -> None:
+    needs = entity_containment_coverage_needs(_exfil_coverage_entities())
+    pairs = {(item.tool_name, item.canonical_target) for item in needs}
+    assert ("disable_account", "svc-analytics-47") in pairs
+    assert ("isolate_host", "WKS-DATA-031") in pairs
+    assert ("isolate_host", "SRV-DB-STG-02") in pairs
+    assert ("block_ip", "198.51.100.77") in pairs
+    assert ("block_ip", "198.51.100.44") not in pairs
+    assert all(item.canonical_target != "BACKUP-SRV-01" for item in needs)
+
+
+def test_apply_gate_merges_uncovered_db_host_without_isolating_bait() -> None:
+    """ISSUE-328: WKS isolated + block_ip + disable_account still must isolate DB."""
+    llm_filtered = [
+        _Candidate("block_ip", "198.51.100.77"),
+        _Candidate("isolate_host", "WKS-DATA-031"),
+        _Candidate("disable_account", "svc-analytics-47"),
+    ]
+    rule_filtered = [
+        _Candidate("isolate_host", "WKS-DATA-031"),
+        _Candidate("isolate_host", "SRV-DB-STG-02"),
+        _Candidate("isolate_host", "BACKUP-SRV-01"),
+        _Candidate("disable_account", "svc-analytics-47"),
+        _Candidate("block_ip", "198.51.100.77"),
+    ]
+    merged, generated_by, strategy = apply_containment_quality_gate(
+        candidates=llm_filtered,
+        rule_fallback_candidates=rule_filtered,
+        generated_by=ResponsePlanGeneratedBy.LLM,
+        strategy="LLM partial containment",
+        severity=Severity.HIGH,
+        risk_assessment=_risk(),
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        entities=_exfil_coverage_entities(),
+        disposition_only=False,
+    )
+    isolate_targets = {item.target for item in merged if item.tool_name == "isolate_host"}
+    assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
+    assert "BACKUP-SRV-01" not in isolate_targets
+    assert any(item.tool_name == "disable_account" for item in merged)
+    assert any(item.target == "198.51.100.77" for item in merged if item.tool_name == "block_ip")
+    assert generated_by is ResponsePlanGeneratedBy.LLM
+    assert "entity_coverage_merge" in strategy
+
+
+def test_apply_gate_synthesizes_isolate_when_rules_omit_host() -> None:
+    """ISSUE-328: once isolate_host is admitted, uncovered EntitySet hosts are synthesized."""
+    llm_filtered = [
+        _Candidate("block_ip", "198.51.100.77"),
+        _Candidate("isolate_host", "WKS-DATA-031"),
+    ]
+    merged, _, strategy = apply_containment_quality_gate(
+        candidates=llm_filtered,
+        rule_fallback_candidates=[_Candidate("block_ip", "198.51.100.77")],
+        generated_by=ResponsePlanGeneratedBy.LLM,
+        strategy="LLM ok",
+        severity=Severity.HIGH,
+        risk_assessment=_risk(),
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        entities=_exfil_coverage_entities(),
+        disposition_only=False,
+    )
+    isolate_targets = {item.target for item in merged if item.tool_name == "isolate_host"}
+    assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
+    assert "BACKUP-SRV-01" not in isolate_targets
+    assert "entity_coverage_merge" in strategy
+
+
+def test_apply_gate_does_not_synthesize_tool_absent_from_plan_and_fallback() -> None:
+    """Do not invent isolate/block when PolicyFilter never admitted those tools."""
+    llm_filtered = [_Candidate("disable_account", "svc-analytics-47")]
+    merged, generated_by, strategy = apply_containment_quality_gate(
+        candidates=llm_filtered,
+        rule_fallback_candidates=[_Candidate("disable_account", "svc-analytics-47")],
+        generated_by=ResponsePlanGeneratedBy.LLM,
+        strategy="LLM ok",
+        severity=Severity.HIGH,
+        risk_assessment=_risk(),
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        entities=_exfil_coverage_entities(),
+        disposition_only=False,
+    )
+    tool_names = {item.tool_name for item in merged}
+    assert tool_names == {"disable_account"}
+    assert generated_by is ResponsePlanGeneratedBy.LLM
+    assert strategy == "LLM ok"
+
+
+def test_apply_gate_skips_coverage_when_evidence_insufficient() -> None:
+    """ISSUE-248 still outranks containment encouragement, including coverage merge."""
+    evidence = EvidenceOutput(
+        evidence_list=[],
+        collection_status=CollectionStatus.FAILED,
+        overall_confidence=0.0,
+    )
+    llm_filtered = [_Candidate("create_ticket")]
+    merged, generated_by, strategy = apply_containment_quality_gate(
+        candidates=llm_filtered,
+        rule_fallback_candidates=[_Candidate("isolate_host", "SRV-DB-STG-02")],
+        generated_by=ResponsePlanGeneratedBy.LLM,
+        strategy="LLM ok",
+        severity=Severity.HIGH,
+        risk_assessment=_risk(score=92, evidence_limited=True),
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        entities=_exfil_coverage_entities(),
+        disposition_only=False,
+        evidence_output=evidence,
+    )
+    assert merged == llm_filtered
+    assert generated_by is ResponsePlanGeneratedBy.LLM
+    assert strategy == "LLM ok"
+
+
+def test_apply_gate_noop_on_empty_entityset() -> None:
+    llm_filtered = [_Candidate("create_ticket")]
+    merged, generated_by, strategy = apply_containment_quality_gate(
+        candidates=llm_filtered,
+        rule_fallback_candidates=[_Candidate("isolate_host", "SRV-DB-STG-02")],
+        generated_by=ResponsePlanGeneratedBy.LLM,
+        strategy="LLM ok",
+        severity=Severity.HIGH,
+        risk_assessment=_risk(),
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        entities=EntitySet(),
+        disposition_only=False,
+    )
+    assert merged == llm_filtered
+    assert generated_by is ResponsePlanGeneratedBy.LLM
+    assert strategy == "LLM ok"

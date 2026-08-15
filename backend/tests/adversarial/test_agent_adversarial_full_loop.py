@@ -6,7 +6,7 @@ Does **not** inject APPROVED actions via ``run_full_response_chain`` or verify-t
 ISSUE-203 quality gates (hard failures):
 - Terminal ``REPORTING``/``CLOSED`` with non-empty report
 - ``response_agent``/``verify_agent`` traces (snake_case agent_name)
-- Response plan covers enforced ``GROUND_TRUTH.must_response_targets`` (DB host gated)
+- Response plan covers enforced ``GROUND_TRUTH.must_response_targets`` (ISSUE-328: DB host included)
 - Mock terminal writeback ``CONFIRMED`` + terminal outbox enqueued (certification language
   exports raw ``confirmation_evidence`` / ``simulated``; see ISSUE-351)
 - ``sunset_shims_used`` must be empty; intentional adversarial DI is reported separately.
@@ -55,14 +55,17 @@ from tests.adversarial.helpers import (
     block_ip_reason_destination_mislabels,
     build_alert_corpus,
     build_narrative_corpus,
-    format_disposition_gap,
     ingest_true_positive_event,
     missing_response_targets,
     opaque_scorecard_tokens,
     response_plan_tool_targets,
     strict_disposition_targets_enabled,
 )
-from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH, HOST_DB
+from tests.adversarial.scenario_credential_db_staging_exfil import (
+    GROUND_TRUTH,
+    HOST_BACKUP_NOISE,
+    HOST_DB,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.adversarial_audit]
 
@@ -607,24 +610,20 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     assert prod["execution_ran"], "expected ActionExecution jobs after approval"
     assert prod["verify_agent_ran"], "expected verify_agent trace"
     assert prod["disposition_targets_aligned"], (
-        "ISSUE-198/334: response plan must cover enforced GROUND_TRUTH targets; "
+        "ISSUE-198/328/334: response plan must cover enforced GROUND_TRUTH targets; "
         f"missing={disposition_gaps_enforced}, all_gaps={disposition_gaps_all}"
     )
     if strict_disposition_targets_enabled():
         assert prod["disposition_targets_strict_aligned"], (
-            "ISSUE-328 strict mode: response plan must also cover gated DB isolation targets; "
+            "strict mode: response plan must also cover any remaining gated targets; "
             f"missing={disposition_gaps_all}"
         )
-    else:
-        plan_tool_targets = response_plan_tool_targets(list(loop_result.response_plan_actions))
-        db_gap = format_disposition_gap("isolate_host", HOST_DB)
-        if ("isolate_host", HOST_DB.lower()) not in plan_tool_targets:
-            assert db_gap in disposition_gaps_all, (
-                "ISSUE-334: missing DB isolation must be an explicit gap until ISSUE-328; "
-                f"all_gaps={disposition_gaps_all}"
-            )
-            assert db_gap not in disposition_gaps_enforced
-            assert HOST_DB not in disposition_gaps_all
+    plan_tool_targets = response_plan_tool_targets(list(loop_result.response_plan_actions))
+    assert ("isolate_host", HOST_DB.lower()) in plan_tool_targets, (
+        "ISSUE-328: EntitySet DB host must be isolated; "
+        f"plan={plan_tool_targets}, all_gaps={disposition_gaps_all}"
+    )
+    assert ("isolate_host", HOST_BACKUP_NOISE.lower()) not in plan_tool_targets
     assert_opaque_alert_quality(
         alert_corpus=alert_corpus,
         entity_audit=entity_audit,
