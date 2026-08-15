@@ -196,7 +196,7 @@ def _build_coverage_candidate(prototype: _CandidateT, need: EntityCoverageNeed) 
     )
     for kwargs in attempts:
         try:
-            return cls(**kwargs)  # type: ignore[misc]
+            return cls(**kwargs)
         except TypeError:
             continue
     raise TypeError(f"cannot construct coverage candidate for {need.tool_name} from {cls.__name__}")

@@ -142,7 +142,7 @@ class ToolExecutorStoreForwarding:
 
     @property
     def job_store(self) -> ExecutionJobStorePort | None:
-        return self._inner.job_store
+        return self._inner.job_store  # type: ignore[no-any-return]
 
     @job_store.setter
     def job_store(self, value: ExecutionJobStorePort | None) -> None:
@@ -150,7 +150,7 @@ class ToolExecutorStoreForwarding:
 
     @property
     def budget_service(self) -> BudgetServicePort | None:
-        return self._inner.budget_service
+        return self._inner.budget_service  # type: ignore[no-any-return]
 
     @budget_service.setter
     def budget_service(self, value: BudgetServicePort | None) -> None:
@@ -158,7 +158,7 @@ class ToolExecutorStoreForwarding:
 
     @property
     def audit_service(self) -> ToolCallLogService | NullAuditService:
-        return self._inner.audit_service
+        return self._inner.audit_service  # type: ignore[no-any-return]
 
     @audit_service.setter
     def audit_service(self, value: ToolCallLogService | NullAuditService) -> None:
