@@ -2,6 +2,8 @@
 
 Infrastructure failures must surface as HTTP 503 ``dependency_unavailable``;
 genuinely empty decision traces keep HTTP 200 with ``insufficient_trace=True``.
+Tests exercise the real ``TrajectoryAnalyzer.analyze`` path — they must not
+mock ``analyze`` itself.
 """
 
 from __future__ import annotations
@@ -15,8 +17,8 @@ from sqlalchemy.exc import OperationalError
 
 from app.api.v1.deps import get_event_service, reset_deps
 from app.main import app
-from app.models.trajectory import TrajectoryReport
-from app.services.trajectory_analyzer import TrajectoryAnalyzer
+from app.models.decision_trace import DecisionTrace
+from app.services.decision_trace_service import DecisionTraceService
 
 _DEV_TOKENS = json.dumps(
     {
@@ -70,6 +72,23 @@ def test_trajectory_session_factory_missing_returns_503(
     assert "insufficient_trace" not in body
 
 
+def test_trajectory_session_factory_oserror_returns_503(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise_os_error() -> None:
+        raise OSError("postgres unreachable")
+
+    monkeypatch.setattr("app.api.v1.deps._get_session_factory", _raise_os_error)
+
+    resp = client.get("/api/v1/events/evt-traj-contract/trajectory", headers=_hdr())
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["error_code"] == "dependency_unavailable"
+    assert "insufficient_trace" not in body
+
+
 def test_trajectory_sqlalchemy_error_returns_503(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -78,8 +97,8 @@ def test_trajectory_sqlalchemy_error_returns_503(
 
     monkeypatch.setattr(trajectory_mod, "_try_get_session_factory", lambda: MagicMock())
     monkeypatch.setattr(
-        TrajectoryAnalyzer,
-        "analyze",
+        DecisionTraceService,
+        "get_decision_trace",
         AsyncMock(side_effect=OperationalError("SELECT 1", {}, Exception("db down"))),
     )
 
@@ -99,14 +118,9 @@ def test_trajectory_empty_trace_returns_200_with_insufficient_trace_flag(
 
     monkeypatch.setattr(trajectory_mod, "_try_get_session_factory", lambda: MagicMock())
     monkeypatch.setattr(
-        TrajectoryAnalyzer,
-        "analyze",
-        AsyncMock(
-            return_value=TrajectoryReport(
-                event_id="evt-traj-contract",
-                insufficient_trace=True,
-            )
-        ),
+        DecisionTraceService,
+        "get_decision_trace",
+        AsyncMock(return_value=DecisionTrace(event_id="evt-traj-contract", entries=[])),
     )
 
     resp = client.get("/api/v1/events/evt-traj-contract/trajectory", headers=_hdr())

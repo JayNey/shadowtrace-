@@ -31,7 +31,7 @@ def _try_get_session_factory() -> async_sessionmaker[AsyncSession] | None:
 
         return _get_session_factory()
     except (ImportError, ModuleNotFoundError):
-        logger.warning("Database session factory unavailable — returning empty trajectory")
+        logger.warning("Database session factory unavailable — trajectory store down")
         return None
     except (ValueError, TypeError):
         raise

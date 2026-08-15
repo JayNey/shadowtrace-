@@ -142,6 +142,8 @@ export default function EventAuditPanel({
     }
     if (trajectoryResult.status === "fulfilled") {
       setTrajectory(trajectoryResult.value.data);
+    } else {
+      setTrajectory(null);
     }
     setLoading(false);
   }, [eventId]);
