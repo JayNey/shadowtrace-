@@ -38,6 +38,7 @@ def test_closed_gate_uses_closed_requires_report_error_code() -> None:
             TransitionContext(
                 report_exists=False,
                 disposition_policy=DispositionPolicy.NOT_REQUIRED,
+                disposition_is_mock=False,
             )
         )
     assert exc.value.error_code == "closed_requires_report"

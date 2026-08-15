@@ -87,6 +87,7 @@ def test_required_closed_gate_fails_without_convergence_summary() -> None:
                 disposition_policy=DispositionPolicy.REQUIRED,
                 report_exists=True,
                 side_effect_convergence=None,
+                disposition_is_mock=False,
             )
         )
 
@@ -511,6 +512,7 @@ async def test_not_required_closed_gate_allows_background_side_effects(
             disposition_policy=DispositionPolicy.NOT_REQUIRED,
             report_exists=True,
             side_effect_convergence=summary,
+            disposition_is_mock=False,
         )
     )
 
@@ -542,6 +544,7 @@ async def test_required_executing_action_blocks_closed_gate(
                 disposition_policy=DispositionPolicy.REQUIRED,
                 report_exists=True,
                 side_effect_convergence=summary,
+                disposition_is_mock=False,
             )
         )
 
@@ -1018,6 +1021,7 @@ async def test_gate_blocks_when_tail_outbox_undelivered_head_confirmed(
                 disposition_policy=DispositionPolicy.REQUIRED,
                 report_exists=True,
                 side_effect_convergence=summary,
+                disposition_is_mock=False,
             )
         )
 
@@ -1693,6 +1697,7 @@ async def test_entity_accepted_without_effect_proof_blocks_gate(
                 disposition_policy=DispositionPolicy.REQUIRED,
                 report_exists=True,
                 side_effect_convergence=summary,
+                disposition_is_mock=False,
             )
         )
 
@@ -2106,6 +2111,7 @@ async def test_entity_verified_terminal_accepted_still_blocks_gate(
                 disposition_policy=DispositionPolicy.REQUIRED,
                 report_exists=True,
                 side_effect_convergence=summary,
+                disposition_is_mock=False,
             )
         )
 
