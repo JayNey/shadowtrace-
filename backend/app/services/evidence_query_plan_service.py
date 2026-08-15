@@ -94,7 +94,7 @@ def resolve_mandatory_baseline(triage: TriageResult) -> frozenset[str]:
     if any(ip.address for ip in entities.ips):
         mandatory.add("query_network_flow")
 
-    has_entity_fqdn = any(domain.fqdn for domain in entities.domains)
+    has_entity_fqdn = any(fqdn_if_valid(domain.fqdn or "") for domain in entities.domains)
     has_fqdn_ioc = any(fqdn_if_valid(item) for item in triage.ioc_list)
     has_any_ioc = any(item.strip() for item in triage.ioc_list)
     if has_entity_fqdn or has_fqdn_ioc:

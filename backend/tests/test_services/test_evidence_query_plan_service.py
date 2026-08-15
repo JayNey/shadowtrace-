@@ -86,6 +86,36 @@ def test_mandatory_baseline_fqdn_ioc_includes_query_dns() -> None:
     assert "query_threat_intel" in mandatory
 
 
+def test_mandatory_baseline_entity_fqdn_empty_ioc_includes_query_dns() -> None:
+    """ISSUE-338: entity FQDN still mandates query_dns when ioc_list is empty."""
+    triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(domains=[DomainEntity(entity_id="d1", fqdn="storage-sync-cdn.example")]),
+        ioc_list=[],
+        reasoning="test",
+    )
+    mandatory = resolve_mandatory_baseline(triage)
+    assert "query_dns" in mandatory
+    assert "query_threat_intel" in mandatory
+
+
+def test_mandatory_baseline_invalid_entity_fqdn_skips_query_dns() -> None:
+    """ISSUE-338: non-FQDN entity domain must not force query_dns."""
+    triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(domains=[DomainEntity(entity_id="d-bad", fqdn="not a domain")]),
+        ioc_list=["198.51.100.44"],
+        reasoning="test",
+    )
+    mandatory = resolve_mandatory_baseline(triage)
+    assert "query_dns" not in mandatory
+    assert "query_threat_intel" in mandatory
+
+
 def test_sanitize_rejects_response_and_disposition_tools() -> None:
     clean, rejected = sanitize_planned_tools(
         ["query_dns", "block_ip", "update_source_event_disposition", "not_a_tool"]

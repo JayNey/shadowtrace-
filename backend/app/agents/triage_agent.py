@@ -31,7 +31,11 @@ from app.agents.rules.entity_extraction_rules import (
     IP_PATTERN,
     extract_entities_regex,
 )
-from app.agents.rules.entity_validation import EntityValidationResult, validate_entity_set
+from app.agents.rules.entity_validation import (
+    EntityValidationResult,
+    fqdn_if_valid,
+    validate_entity_set,
+)
 from app.core.config import get_settings
 from app.core.errors import (
     DependencyUnavailableError,
@@ -199,9 +203,10 @@ def _extract_iocs(
     alert_text: str,
     entities: EntitySet | None = None,
 ) -> list[str]:
-    """Extract IoC strings from raw alert text and entity IPs.
+    """Extract IoC strings from raw alert text and validated entity IPs/FQDNs.
 
-    Only external (non-internal) IPs are included.
+    Only external (non-internal) IPs are included. Entity domains are merged
+    only when they pass ``fqdn_if_valid``.
     """
     iocs: set[str] = set()
 
@@ -223,7 +228,7 @@ def _extract_iocs(
             if addr and not is_internal_ip(addr):
                 iocs.add(addr)
         for domain_entity in entities.domains:
-            fqdn = (domain_entity.fqdn or "").strip()
+            fqdn = fqdn_if_valid(domain_entity.fqdn or "")
             if fqdn:
                 iocs.add(fqdn)
 

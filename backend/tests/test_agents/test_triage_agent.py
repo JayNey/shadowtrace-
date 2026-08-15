@@ -312,6 +312,13 @@ class TestExtractIOCs:
         assert "storage-sync-cdn.example" in iocs
         assert "198.51.100.44" in iocs
 
+    def test_invalid_entity_domain_not_included(self):
+        """ISSUE-338: unvalidated entity fqdn must not land in ioc_list."""
+        entities = EntitySet(domains=[DomainEntity(entity_id="dom-bad", fqdn="not a domain")])
+        iocs = _extract_iocs("Connection from 198.51.100.44", entities)
+        assert "not a domain" not in iocs
+        assert "198.51.100.44" in iocs
+
 
 # --------------------------------------------------------------------------- #
 # Tests: _map_event_type

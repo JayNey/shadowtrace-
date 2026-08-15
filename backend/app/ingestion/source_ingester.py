@@ -15,6 +15,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.source.base import BaseSourceAdapter, SourcePage
+from app.agents.rules.entity_validation import fqdn_if_valid
 from app.core.config import get_settings
 from app.core.errors import ValidationError
 from app.db import models as orm
@@ -1291,8 +1292,22 @@ def _source_processing_order(item: Any) -> int:
 _RAW_PAYLOAD_NORMALIZED_KEYS = ("domain", "fqdn")
 
 
+def _projection_key_occupied(value: Any) -> bool:
+    """True when a projected domain/fqdn slot already has a non-blank value."""
+    if value is None:
+        return False
+    return bool(str(value).strip())
+
+
 def _supporting_projection(item: SourceAsset | SourceLog) -> dict[str, Any]:
-    """Preserve typed SourceAsset/SourceLog fields in the query projection."""
+    """Preserve typed fields and copy validated raw_payload domain/fqdn.
+
+    ISSUE-338: SourceLog has no typed domain field. Promote ``raw_payload.domain``
+    / ``fqdn`` into projected normalized when those keys are blank, so the
+    enricher (which never reads raw_payload) can seed EntitySet.domains.
+    Only FQDNs that pass ``fqdn_if_valid`` are copied — IPs, non-strings, and
+    syntax-invalid values stay out of normalized.
+    """
     projected = dict(item.normalized)
     typed = item.model_dump(
         mode="json",
@@ -1303,14 +1318,14 @@ def _supporting_projection(item: SourceAsset | SourceLog) -> dict[str, Any]:
         projected.setdefault(key, value)
     raw_payload = item.raw_payload or {}
     for key in _RAW_PAYLOAD_NORMALIZED_KEYS:
-        if projected.get(key):
+        if _projection_key_occupied(projected.get(key)):
             continue
         raw_value = raw_payload.get(key)
-        if raw_value is None:
+        if not isinstance(raw_value, str):
             continue
-        text = str(raw_value).strip()
-        if text:
-            projected[key] = text
+        fqdn = fqdn_if_valid(raw_value)
+        if fqdn:
+            projected[key] = fqdn
     if isinstance(item, SourceAsset):
         projected.setdefault("channel", "asset")
     else:
