@@ -140,7 +140,11 @@ def wire_redis_context_recovery(
     store.set_on_redis_recovery(_on_redis_recovery)
 
 
-_DEGRADED_FLAG_RECOVERY_WIRING = (wire_redis_context_recovery,)
+_DEGRADED_FLAG_RECOVERY_WIRING: tuple[RecoveryWiringFn, ...] = (
+    # Only register recoveries that can be safely probed. Business/audit flags
+    # stay manual-clear — a fake recovery would wipe a real degradation.
+    wire_redis_context_recovery,
+)
 
 
 def create_degraded_flag_service(
@@ -149,7 +153,7 @@ def create_degraded_flag_service(
 ) -> DegradedFlagService:
     """Construct DegradedFlagService with allowlisted auto-recoveries wired.
 
-    API, Celery tasks, and bootstrap paths should use this factory so
+    API, Celery tasks, and bootstrap paths use this factory so
     ``redis_context_unavailable`` clears after EventContextStore rebuilds Redis.
     Direct ``DegradedFlagService(...)`` construction skips recovery wiring.
     """

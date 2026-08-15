@@ -20,6 +20,27 @@ def test_deps_module_has_no_hardcoded_insider_scenario_id() -> None:
     assert "scenario_id='insider_data_exfiltration'" not in source
 
 
+def test_get_degraded_flags_uses_create_degraded_flag_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-353: API DI must share the factory with bootstrap/Celery."""
+    from unittest.mock import patch
+
+    monkeypatch.setattr(deps, "_degraded_flags", None)
+    store = MagicMock()
+    session_factory = MagicMock()
+    monkeypatch.setattr(deps, "_get_context_store", lambda: store)
+    monkeypatch.setattr(deps, "_get_session_factory", lambda: session_factory)
+    sentinel = object()
+    with patch(
+        "app.services.degraded_flag_service.create_degraded_flag_service",
+        return_value=sentinel,
+    ) as factory:
+        got = deps._get_degraded_flags()
+    factory.assert_called_once_with(store, session_factory)
+    assert got is sentinel
+
+
 def _patch_production_graph_build_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_stack = {
         "wm": MagicMock(for_writer=MagicMock(return_value=MagicMock())),
