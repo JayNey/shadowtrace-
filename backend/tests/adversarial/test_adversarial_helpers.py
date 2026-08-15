@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.models.evidence import SKIP_GAP_REASONS, skipped_entity_description
 from tests.adversarial.audit_report import AdversarialAuditChecks, evaluate_evidence_collection_ok
 from tests.adversarial.full_loop_runner import resolve_full_loop_timeout_s
 from tests.adversarial.helpers import (
@@ -586,7 +587,7 @@ def test_evidence_collection_ok_exempts_ip_only_dns_skip() -> None:
             "reason": "source_skipped",
             "detail": {
                 "tool_name": "query_dns",
-                "description": "required entity missing or invalid for query_dns",
+                "description": skipped_entity_description("query_dns"),
             },
         }
     ]
@@ -620,3 +621,48 @@ def test_analysis_only_annotates_incomplete_collection() -> None:
     assert report["verdict_for_human"].startswith("PARTIAL")
     assert "evidence_collection_ok" in report["verdict_for_human"]
     assert not report["verdict_for_human"].startswith("PASS")
+
+
+def test_evidence_collection_ok_fails_on_triage_degraded_dns_skip() -> None:
+    gaps = [
+        {
+            "missing_source": "dns",
+            "reason": "triage_degraded",
+            "detail": {
+                "tool_name": "query_dns",
+                "description": "triage degraded; skipped query_dns",
+            },
+        }
+    ]
+    assert "triage_degraded" in SKIP_GAP_REASONS
+    ok, detail = evaluate_evidence_collection_ok(collection_status="degraded", gaps=gaps)
+    assert ok is False
+    assert detail["failure_reasons"] == ["mandatory_query_dns_skipped"]
+    assert detail["mandatory_query_dns_skips"]
+
+
+def test_full_loop_closed_with_mandatory_dns_skip_is_not_pass() -> None:
+    """FQDN was present but query_dns source_skipped with a non-generic description."""
+    gaps = [
+        {
+            "missing_source": "dns",
+            "reason": "source_skipped",
+            "detail": {
+                "tool_name": "query_dns",
+                "description": "query_dns skipped after valid FQDN was present",
+            },
+        }
+    ]
+    report = _analysis_pass_checks(
+        audit_mode="full_loop",
+        status_sequence=_CLOSED_SEQUENCE,
+        evidence_collection_status="degraded",
+        evidence_gaps=gaps,
+    ).to_dict()
+    assert report["checks"]["closed_reached"] is True
+    assert report["checks"]["evidence_collection_ok"] is False
+    assert report["score"]["passed"] == 6
+    assert report["score"]["total_dimensions"] == 7
+    assert report["verdict_for_human"].startswith("FAIL")
+    assert "evidence collection incomplete" in report["verdict_for_human"]
+    assert "PASS" not in report["verdict_for_human"]

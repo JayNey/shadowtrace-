@@ -1,4 +1,8 @@
-"""Build human-readable adversarial audit reports."""
+"""Build human-readable adversarial audit reports.
+
+Dynamic ``adversarial_audit`` pytest modules are excluded by pyproject addopts;
+run them with ``-m adversarial_audit -o addopts=``.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ from typing import Any, Literal
 
 from app.models.agent_io import CollectionStatus
 from app.models.enums import EventStatus, EventType, FinalVerdict, Severity
+from app.models.evidence import SKIP_GAP_REASONS, skipped_entity_description
 
 AdversarialAuditMode = Literal["analysis_only", "full_loop"]
 
@@ -26,8 +31,7 @@ _FULL_LOOP_SCORED_CHECKS = _ANALYSIS_SCORED_CHECKS | frozenset(
     {"closed_reached", "evidence_collection_ok"}
 )
 
-_SKIP_GAP_REASONS = frozenset({"source_skipped", "invalid_entity", "triage_degraded"})
-_GENERIC_QUERY_DNS_SKIP_DESCRIPTION = "required entity missing or invalid for query_dns"
+_GENERIC_QUERY_DNS_SKIP_DESCRIPTION = skipped_entity_description("query_dns")
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,9 +45,11 @@ class AdversarialAuditChecks:
     In ``full_loop`` mode, ``closed_reached`` is a scored dimension and
     ``verdict_for_human`` cannot be release-grade PASS until CLOSED (ISSUE-319).
 
-    ``evidence_collection_ok`` is scored in ``full_loop`` only (ISSUE-346): it
-    surfaces ``collection_status=failed`` and mandatory ``query_dns`` skips at
-    the certification layer without coupling ``MIN_EVIDENCE_SOURCES`` into
+    ``evidence_collection_ok`` is scored in ``full_loop`` only (ISSUE-346).
+    Analysis-only keeps it unscored but annotates PARTIAL when collection is
+    incomplete (failure-or-footnote, not a silent PASS). Surfaces
+    ``collection_status=failed`` and mandatory ``query_dns`` skips at the
+    certification layer without coupling ``MIN_EVIDENCE_SOURCES`` into
     ``validate_closed_gate`` (ISSUE-312).
     """
 
@@ -193,7 +199,7 @@ def _query_dns_skip_gaps(gaps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if tool_name != "query_dns":
             continue
         reason = str(gap.get("reason") or "")
-        if reason not in _SKIP_GAP_REASONS:
+        if reason not in SKIP_GAP_REASONS:
             continue
         hits.append(
             {

@@ -46,7 +46,13 @@ from app.models.entities import (
     ProcessEntity,
 )
 from app.models.enums import EvidenceSource, ToolCategory
-from app.models.evidence import Evidence, EvidenceConflict, EvidenceGap
+from app.models.evidence import (
+    SKIP_GAP_REASONS,
+    Evidence,
+    EvidenceConflict,
+    EvidenceGap,
+    skipped_entity_description,
+)
 from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.models.workflow import GLOBAL_EVIDENCE_TIMEOUT_S, SINGLE_SOURCE_TIMEOUT_S
 from app.services.evidence_projection import (
@@ -105,7 +111,6 @@ TOOL_OUTCOME_OK_EMPTY = "tool_ok_empty"
 TOOL_OUTCOME_FAILED = "tool_failed"
 TOOL_OUTCOME_SKIPPED = "source_skipped"
 
-_SKIP_GAP_REASONS = frozenset({"source_skipped", "invalid_entity", "triage_degraded"})
 _FAILED_GAP_REASONS = frozenset({"tool_failed", "global_timeout", "missing_scope"})
 
 
@@ -124,7 +129,7 @@ def resolve_tool_outcome(
         return TOOL_OUTCOME_OK
     if gap_reason == "no_records":
         return TOOL_OUTCOME_OK_EMPTY
-    if gap_reason in _SKIP_GAP_REASONS:
+    if gap_reason in SKIP_GAP_REASONS:
         return TOOL_OUTCOME_SKIPPED
     if gap_reason in _FAILED_GAP_REASONS or failed:
         return TOOL_OUTCOME_FAILED
@@ -998,7 +1003,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         description: str | None = None,
     ) -> dict[str, Any]:
         if description is None:
-            description = f"required entity missing or invalid for {tool_name}"
+            description = skipped_entity_description(tool_name)
         return {
             "tool_name": tool_name,
             "source": source,
