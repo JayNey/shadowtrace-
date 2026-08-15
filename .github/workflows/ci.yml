@@ -449,8 +449,21 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # ISSUE-337: same redis:7 + health-cmd as backend-test. Promotion comparison
+      # needs REDIS_URL for EventContextStore; without Redis the ingestion
+      # redis_client fixture skips that slice instead of running it.
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     env:
       DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
+      REDIS_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@v4
 

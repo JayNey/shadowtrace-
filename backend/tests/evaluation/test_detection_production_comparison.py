@@ -111,6 +111,7 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace",
 )
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
 
 def _alembic_config() -> Config:
@@ -189,6 +190,20 @@ async def session_factory(
     factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
     yield factory
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def redis_client() -> AsyncIterator[RedisClient]:
+    """ISSUE-337: promotion comparison must fail-closed without Redis (not skip)."""
+    client = RedisClient(url=REDIS_URL)
+    if not await client.ping():
+        await client.aclose()
+        pytest.fail(
+            "Redis is required for evaluation promotion comparison (ISSUE-337); "
+            "backend-evaluation must provide REDIS_URL"
+        )
+    yield client
+    await client.aclose()
 
 
 @pytest_asyncio.fixture
