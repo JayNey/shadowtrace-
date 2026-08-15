@@ -666,3 +666,93 @@ def test_full_loop_closed_with_mandatory_dns_skip_is_not_pass() -> None:
     assert report["verdict_for_human"].startswith("FAIL")
     assert "evidence collection incomplete" in report["verdict_for_human"]
     assert "PASS" not in report["verdict_for_human"]
+
+
+def test_output_quality_unscored_bucket_is_informative_only() -> None:
+    report = _analysis_pass_checks().to_dict()
+    assert "unscored" in report
+    assert report["unscored"]["output_quality"]["present"] is False
+    assert report["unscored"]["output_quality"]["blocking_profile"] is False
+    assert report["score"]["total_dimensions"] == 5
+
+
+def test_output_quality_unscored_surfaces_agent_scores_without_scoring() -> None:
+    from tests.adversarial.audit_report import OUTPUT_QUALITY_PASS_THRESHOLD
+
+    quality_scores = [
+        {
+            "agent_name": "triage",
+            "score": 0.82,
+            "verdict": "pass",
+            "metrics": {"completeness": 0.9},
+            "reasons": ["completeness: 0.90 — good"],
+            "evaluated_by": "rule",
+        },
+        {
+            "agent_name": "report",
+            "score": 0.0,
+            "verdict": "fail",
+            "metrics": {"completeness": 0.0},
+            "reasons": ["eval_error_defaulted: boom"],
+            "evaluated_by": "rule",
+        },
+    ]
+    report = _analysis_pass_checks(quality_scores=quality_scores).to_dict()
+    bucket = report["unscored"]["output_quality"]
+    assert bucket["present"] is True
+    assert bucket["pass_threshold"] == OUTPUT_QUALITY_PASS_THRESHOLD
+    assert bucket["agents"]["triage"]["score"] == 0.82
+    assert bucket["summary"]["agents_passing"] == 1
+    assert bucket["summary"]["eval_error_agents"] == ["report"]
+    assert bucket["agents"]["report"]["eval_error"] is True
+    assert bucket["summary"]["agents_at_or_above_threshold"] == 1
+    assert report["score"]["total_dimensions"] == 5
+
+
+def test_build_output_quality_unscored_eval_error_not_passing() -> None:
+    from tests.adversarial.audit_report import build_output_quality_unscored
+
+    bucket = build_output_quality_unscored(
+        [
+            {
+                "agent_name": "triage",
+                "score": 0.9,
+                "verdict": "pass",
+                "reasons": ["eval_error_defaulted: boom"],
+                "evaluated_by": "rule",
+            }
+        ]
+    )
+    assert bucket["agents"]["triage"]["eval_error"] is True
+    assert bucket["summary"]["agents_passing"] == 0
+    assert bucket["summary"]["agents_at_or_above_threshold"] == 0
+    assert bucket["summary"]["eval_error_agents"] == ["triage"]
+
+
+def test_full_loop_quality_does_not_change_scored_dims() -> None:
+    report = _analysis_pass_checks(
+        audit_mode="full_loop",
+        status_sequence=_CLOSED_SEQUENCE,
+        quality_scores=[
+            {
+                "agent_name": "triage",
+                "score": 0.1,
+                "verdict": "fail",
+                "reasons": ["specificity: 0.00 — low"],
+                "evaluated_by": "rule",
+            }
+        ],
+    ).to_dict()
+    assert report["unscored"]["output_quality"]["present"] is True
+    assert report["score"]["total_dimensions"] == 7
+    assert report["score"]["passed"] == 7
+    assert report["verdict_for_human"].startswith("PASS")
+    assert "output_quality" not in report["checks"]
+
+
+def test_build_output_quality_unscored_blocking_profile_flag() -> None:
+    from tests.adversarial.audit_report import build_output_quality_unscored
+
+    bucket = build_output_quality_unscored([], output_quality_blocking=True)
+    assert bucket["blocking_profile"] is True
+    assert bucket["present"] is False

@@ -256,13 +256,23 @@ class Settings(BaseSettings):
     event_token_budget: int = Field(default=100_000, alias="EVENT_TOKEN_BUDGET")
     event_cost_budget_usd: float = Field(default=5.0, alias="EVENT_COST_BUDGET_USD")
     per_agent_token_cap: int = Field(default=20_000, alias="PER_AGENT_TOKEN_CAP")
-    quality_judge_enabled: bool = Field(default=False, alias="QUALITY_JUDGE_ENABLED")
+    quality_judge_enabled: bool = Field(
+        default=False,
+        alias="QUALITY_JUDGE_ENABLED",
+        description=(
+            "Optional LLM-judge calibration for OutputQualityEvaluator (ISSUE-065). "
+            "Default false for cost; enable only in eval / Live audit profiles."
+        ),
+    )
     output_quality_blocking: bool = Field(
         default=False,
         alias="OUTPUT_QUALITY_BLOCKING",
         description=(
             "When true, OutputQualityEvaluator failures block downstream investigation "
-            "nodes. Default false — P0 must not halt on evaluator outages (ISSUE-309)."
+            "nodes. Default false — P0 must not halt on evaluator outages (ISSUE-309). "
+            "Adversarial / demo-full-loop CI keeps this false and surfaces scores via "
+            "the adversarial audit unscored bucket; opt in locally for blocking drills "
+            "(ISSUE-347)."
         ),
     )
     guardrail_mode: str = Field(default="enforce", alias="GUARDRAIL_MODE")

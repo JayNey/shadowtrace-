@@ -34,6 +34,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1.deps import get_super_agent
+from app.core.config import get_settings
 from app.db import models as orm
 from app.models.agent_io import ResponsePlan, ResponsePlanGeneratedBy
 from app.models.enums import EventStatus
@@ -41,6 +42,7 @@ from app.services.context_service import EventContextStore
 from app.services.event_service import EventService
 from tests.adversarial.audit_report import (
     AdversarialAuditChecks,
+    coerce_quality_scores,
     normalize_enum,
     resolve_observed_severity,
 )
@@ -392,6 +394,7 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     evidence_ctx = await context_store.get(event_id, "evidence_output") or {}
     report_ctx = await context_store.get(event_id, "report") or {}
     risk_ctx = await context_store.get(event_id, "risk_assessment") or {}
+    quality_scores = coerce_quality_scores(await context_store.get(event_id, "quality_scores"))
     status_sequence = await _audit_status_sequence(session_factory, event_id)
     disposition_gaps_enforced = missing_response_targets(
         ground_truth=GROUND_TRUTH,
@@ -466,6 +469,8 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         ),
         status_sequence=status_sequence,
         audit_mode="full_loop",
+        quality_scores=quality_scores,
+        output_quality_blocking=get_settings().output_quality_blocking,
     )
     report = checks.to_dict()
     obs = loop_result.observability
@@ -660,3 +665,8 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     assert report["score"]["passed"] == 7
     assert report["verdict_for_human"].startswith("PASS")
     assert "CLOSED" in report["verdict_for_human"]
+    quality_bucket = report["unscored"]["output_quality"]
+    assert quality_bucket["present"] is True
+    assert quality_bucket["blocking_profile"] is False
+    assert quality_bucket["summary"]["agents_evaluated"] >= 1
+    assert "output_quality" not in report["checks"]

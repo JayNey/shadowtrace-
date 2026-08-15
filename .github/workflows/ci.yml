@@ -114,6 +114,9 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
       REDIS_URL: redis://localhost:6379/0
+      # ISSUE-347: adversarial closure profile — scorecard visibility, not P0 blocking.
+      OUTPUT_QUALITY_BLOCKING: "false"
+      QUALITY_JUDGE_ENABLED: "false"
     steps:
       - uses: actions/checkout@v4
 

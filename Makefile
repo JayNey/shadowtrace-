@@ -65,7 +65,7 @@ CELERY_SIGKILL_ARTIFACT_DIR ?= $(CURDIR)/artifacts/issue-283
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo bootstrap-demo-full-loop smoke-demo demo-full-loop demo-guard-test up-observability down-observability llm-smoke test test-ci-lite lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest autonomous-mock-e2e-worker-sigkill eval-full-loop eval-full-loop-matrix test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift check-migration-revisions evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
+.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo bootstrap-demo-full-loop smoke-demo demo-full-loop demo-guard-test up-observability down-observability llm-smoke test test-ci-lite lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest autonomous-mock-e2e-worker-sigkill eval-full-loop eval-full-loop-matrix adversarial-closure-gates test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift check-migration-revisions evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
@@ -263,6 +263,54 @@ lint:
 
 fmt:
 	cd backend && $(PYTHON) -m ruff check --fix app tests && $(PYTHON) -m ruff format app tests
+
+# --- ISSUE-347 adversarial quality profile (scorecard visibility; P0 stays fail-soft) ---
+# Default mirrors backend-closure-gates CI: unscored output_quality bucket in audit JSON.
+# Set ADVERSARIAL_OUTPUT_QUALITY_BLOCKING=true locally to drill blocking semantics.
+ADVERSARIAL_OUTPUT_QUALITY_BLOCKING ?= false
+ADVERSARIAL_QUALITY_JUDGE_ENABLED ?= false
+adversarial-closure-gates:
+	@set -eu; \
+	project="$(INTEGRATION_PROJECT_NAME)"; \
+	compose() { \
+		COMPOSE_PROJECT_NAME="$$project" \
+		POSTGRES_PORT="$(POSTGRES_PORT)" REDIS_PORT="$(REDIS_PORT)" \
+		BACKEND_PORT="$(BACKEND_PORT)" FRONTEND_PORT="$(FRONTEND_PORT)" \
+		docker compose --project-name "$$project" \
+			-f "$(COMPOSE_FILE)" "$$@"; \
+	}; \
+	cleanup() { \
+		status=$$?; \
+		trap - EXIT INT TERM; \
+		if [ "$$status" -ne 0 ]; then \
+			compose ps -a || true; \
+			compose logs --no-color postgres redis || true; \
+		fi; \
+		compose down --volumes --remove-orphans || true; \
+		exit "$$status"; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	compose up -d --wait --wait-timeout 120 postgres redis; \
+	cd "$(CURDIR)/backend"; \
+	production_rc=0; \
+	adversarial_rc=0; \
+	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
+		OUTPUT_QUALITY_BLOCKING="$(ADVERSARIAL_OUTPUT_QUALITY_BLOCKING)" \
+		QUALITY_JUDGE_ENABLED="$(ADVERSARIAL_QUALITY_JUDGE_ENABLED)" \
+		$(PYTHON) -m pytest \
+		tests/integration/test_production_full_loop_disposition.py \
+		-m integration -v --tb=short -o addopts= \
+		|| production_rc=$$?; \
+	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
+		OUTPUT_QUALITY_BLOCKING="$(ADVERSARIAL_OUTPUT_QUALITY_BLOCKING)" \
+		QUALITY_JUDGE_ENABLED="$(ADVERSARIAL_QUALITY_JUDGE_ENABLED)" \
+		$(PYTHON) -m pytest \
+		tests/adversarial/test_agent_adversarial_full_loop.py \
+		-m adversarial_audit -v --tb=short -o addopts= \
+		|| adversarial_rc=$$?; \
+	if [ "$$production_rc" -ne 0 ] || [ "$$adversarial_rc" -ne 0 ]; then \
+		exit 1; \
+	fi
 
 # --- ISSUE-025 tool-system integration quality gate ---------------------- #
 # In-memory Registry/Executor/Mock chains + unit tool tests.

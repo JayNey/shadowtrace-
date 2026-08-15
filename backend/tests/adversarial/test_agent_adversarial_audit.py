@@ -26,6 +26,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.config import get_settings
 from app.ingestion.source_ingester import SourceIngester
 from app.models.enums import EventStatus
 from app.services.context_service import EventContextStore
@@ -33,6 +34,7 @@ from app.services.event_service import EventService
 from app.services.evidence_projection import bind_evidence_projection
 from tests.adversarial.audit_report import (
     AdversarialAuditChecks,
+    coerce_quality_scores,
     normalize_enum,
     resolve_observed_severity,
 )
@@ -138,6 +140,7 @@ async def test_adversarial_credential_db_staging_exfil_audit(
     evidence_ctx = await context_store.get(event_id, "evidence_output") or {}
     report_ctx = await context_store.get(event_id, "report") or {}
     risk_ctx = await context_store.get(event_id, "risk_assessment") or {}
+    quality_scores = coerce_quality_scores(await context_store.get(event_id, "quality_scores"))
 
     event_payload = event_after.model_dump(mode="json")
     alert_corpus = build_alert_corpus(
@@ -190,6 +193,8 @@ async def test_adversarial_credential_db_staging_exfil_audit(
             else None
         ),
         status_sequence=await _audit_status_sequence(session_factory, event_id),
+        quality_scores=quality_scores,
+        output_quality_blocking=get_settings().output_quality_blocking,
     )
     report = checks.to_dict()
     report["quality_audit"] = {
@@ -234,6 +239,11 @@ async def test_adversarial_credential_db_staging_exfil_audit(
     assert "closed_reached" not in report["checks"]
     assert report["score"]["total_dimensions"] == 5
     assert not report["verdict_for_human"].startswith("PASS — full loop")
+    quality_bucket = report["unscored"]["output_quality"]
+    assert quality_bucket["present"] is True
+    assert quality_bucket["blocking_profile"] is False
+    assert quality_bucket["summary"]["agents_evaluated"] >= 1
+    assert "output_quality" not in report["checks"]
 
     # Soft assertion: pipeline must at least reach reporting for the audit to be meaningful.
     assert EventStatus.REPORTING.value in report["observed"]["status_sequence"], (
