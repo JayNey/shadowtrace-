@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.core.config import Settings, get_settings
+from app.core.config import (
+    Settings,
+    get_settings,
+    is_mock_disposition_mode,
+    is_mock_source_mode,
+    is_mock_tool_mode,
+)
 from app.db import models as orm
 from app.models.enums import ActionLevel, EventStatus, Severity
 from app.models.investigation_intent import PRIMARY_LINK_ROLE, PROVISIONAL_LINK_ROLE
@@ -73,11 +79,11 @@ class AutoResponsePolicyService:
             return AutoResponseDecision(False, "disabled")
         if not full_loop_available(self._settings.orchestration_mode):
             return AutoResponseDecision(False, "orchestration_analysis_only")
-        if self._settings.source_mode.strip().lower() != "mock_xdr":
+        if not is_mock_source_mode(self._settings.source_mode):
             return AutoResponseDecision(False, "source_mode_not_mock_xdr")
-        if "mock" not in self._settings.tool_mode.strip().lower():
+        if not is_mock_tool_mode(self._settings.tool_mode):
             return AutoResponseDecision(False, "tool_mode_not_mock")
-        if "mock" not in self._settings.disposition_mode.strip().lower():
+        if not is_mock_disposition_mode(self._settings.disposition_mode):
             return AutoResponseDecision(False, "disposition_mode_not_mock")
         if link_role == PROVISIONAL_LINK_ROLE:
             return AutoResponseDecision(False, "provisional_hold")
@@ -118,7 +124,7 @@ def _trusted_mock_provenance(
         products.append(str(event.source_type).strip().lower())
     if not products:
         return False
-    return any("mock" in product for product in products)
+    return any(is_mock_source_mode(product) for product in products)
 
 
 def format_auto_response_audit_reason(decision: AutoResponseDecision) -> str:

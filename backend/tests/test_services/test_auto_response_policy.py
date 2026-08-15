@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.config import Settings
+from app.core.config import Settings, is_mock_tool_mode
 from app.core.errors import ConfigurationError
 from app.db import models as orm
 from app.models.enums import EventStatus, Severity
@@ -232,3 +232,62 @@ def test_resolve_runtime_max_auto_level_l0_when_configured() -> None:
         AUTO_RESPONSE_MAX_AUTO_LEVEL="L0",
     )
     assert resolve_runtime_max_auto_level(settings) is ActionLevel.L0
+
+
+def test_auto_response_rejects_mockish_disposition_mode() -> None:
+    settings = Settings(
+        AUTO_RESPONSE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        TOOL_MODE="mock",
+        DISPOSITION_MODE="mock_xdr",
+    )
+    settings.disposition_mode = "mockish"
+    policy = AutoResponsePolicyService(settings)
+    decision = policy.evaluate(_event(), link_role="primary", source_product="mock_xdr")
+    assert decision.eligible is False
+    assert decision.reason == "disposition_mode_not_mock"
+
+
+def test_auto_response_rejects_not_mock_disposition_mode() -> None:
+    settings = Settings(
+        AUTO_RESPONSE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        TOOL_MODE="mock",
+        DISPOSITION_MODE="mock_xdr",
+    )
+    settings.disposition_mode = "not_mock"
+    policy = AutoResponsePolicyService(settings)
+    decision = policy.evaluate(_event(), link_role="primary", source_product="mock_xdr")
+    assert decision.eligible is False
+    assert decision.reason == "disposition_mode_not_mock"
+
+
+def test_auto_response_rejects_mockish_source_product_provenance() -> None:
+    policy = AutoResponsePolicyService(
+        Settings(
+            AUTO_RESPONSE_ENABLED=True,
+            SOURCE_MODE="mock_xdr",
+            TOOL_MODE="mock",
+            DISPOSITION_MODE="mock_xdr",
+        )
+    )
+    decision = policy.evaluate(
+        _event(source_product="mockish"),
+        link_role="primary",
+        source_product="mockish",
+    )
+    assert decision.eligible is False
+    assert decision.reason == "untrusted_provenance"
+
+
+@pytest.mark.parametrize(
+    "tool_mode,expected",
+    [
+        ("mock", True),
+        ("not_mock", False),
+        ("mockish", False),
+        ("live", False),
+    ],
+)
+def test_is_mock_tool_mode_uses_explicit_allowlist(tool_mode: str, expected: bool) -> None:
+    assert is_mock_tool_mode(tool_mode) is expected

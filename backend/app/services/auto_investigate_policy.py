@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings, get_settings, is_mock_source_mode
 from app.db import models as orm
 from app.models.enums import EventStatus, Severity
 
@@ -56,7 +56,7 @@ class AutoInvestigatePolicyService:
     ) -> AutoInvestigateDecision:
         if not self.enabled:
             return AutoInvestigateDecision(False, "disabled")
-        if self._settings.source_mode.strip().lower() != "mock_xdr":
+        if not is_mock_source_mode(self._settings.source_mode):
             return AutoInvestigateDecision(False, "source_mode_not_mock_xdr")
         if link_role == _PROVISIONAL_LINK_ROLE:
             return AutoInvestigateDecision(False, "provisional_hold")
@@ -92,7 +92,7 @@ def _trusted_mock_provenance(
         products.append(str(event.source_type).strip().lower())
     if not products:
         return False
-    return any("mock" in product for product in products)
+    return any(is_mock_source_mode(product) for product in products)
 
 
 __all__ = ["AutoInvestigateDecision", "AutoInvestigatePolicyService"]

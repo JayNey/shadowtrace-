@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.config import get_settings
+from app.core.config import get_settings, is_mock_tool_mode
 from app.core.errors import EventNotFoundError, InvalidStateTransitionError, ValidationError
 from app.core.event_bus import EventBus
 from app.db import models as orm
@@ -713,8 +713,7 @@ class ActionExecutionService:
         if job.status not in {ExecutionJobStatus.QUEUED, ExecutionJobStatus.RUNNING}:
             return job
         settings = get_settings()
-        tool_mode = settings.tool_mode.strip().lower()
-        if "mock" not in tool_mode or not settings.simulation_enabled:
+        if not is_mock_tool_mode(settings.tool_mode) or not settings.simulation_enabled:
             return job
         from app.providers.tools.mock_provider import get_mock_tool_provider
 

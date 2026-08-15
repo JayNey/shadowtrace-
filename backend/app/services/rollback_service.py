@@ -45,7 +45,7 @@ from app.agents.rules.rollback_mapping import (
     get_rollback_verify_tool,
     is_rollbackable,
 )
-from app.core.config import get_settings
+from app.core.config import get_settings, is_mock_disposition_mode
 from app.core.errors import AdapterNotFoundError
 from app.core.event_bus import EventBus
 from app.db import models as orm
@@ -1117,8 +1117,7 @@ def _xdr_writeback_allowed() -> bool:
     ``ALLOW_XDR_WRITEBACK`` flag to be explicitly enabled (ISSUE-061 §降级策略).
     """
     settings = get_settings()
-    disposition_mode = settings.disposition_mode.strip().lower()
-    if "mock" in disposition_mode:
+    if is_mock_disposition_mode(settings.disposition_mode):
         return True
     return bool(settings.allow_xdr_writeback)
 
