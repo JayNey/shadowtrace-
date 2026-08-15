@@ -705,7 +705,49 @@ def test_output_quality_unscored_surfaces_agent_scores_without_scoring() -> None
     assert bucket["summary"]["agents_passing"] == 1
     assert bucket["summary"]["eval_error_agents"] == ["report"]
     assert bucket["agents"]["report"]["eval_error"] is True
+    assert bucket["summary"]["agents_at_or_above_threshold"] == 1
     assert report["score"]["total_dimensions"] == 5
+
+
+def test_build_output_quality_unscored_eval_error_not_passing() -> None:
+    from tests.adversarial.audit_report import build_output_quality_unscored
+
+    bucket = build_output_quality_unscored(
+        [
+            {
+                "agent_name": "triage",
+                "score": 0.9,
+                "verdict": "pass",
+                "reasons": ["eval_error_defaulted: boom"],
+                "evaluated_by": "rule",
+            }
+        ]
+    )
+    assert bucket["agents"]["triage"]["eval_error"] is True
+    assert bucket["summary"]["agents_passing"] == 0
+    assert bucket["summary"]["agents_at_or_above_threshold"] == 0
+    assert bucket["summary"]["eval_error_agents"] == ["triage"]
+
+
+def test_full_loop_quality_does_not_change_scored_dims() -> None:
+    report = _analysis_pass_checks(
+        audit_mode="full_loop",
+        status_sequence=_CLOSED_SEQUENCE,
+        quality_scores=[
+            {
+                "agent_name": "triage",
+                "score": 0.1,
+                "verdict": "fail",
+                "reasons": ["specificity: 0.00 — low"],
+                "evaluated_by": "rule",
+            }
+        ],
+    ).to_dict()
+    assert report["unscored"]["output_quality"]["present"] is True
+    assert report["score"]["total_dimensions"] == 7
+    assert report["score"]["passed"] == 7
+    assert report["verdict_for_human"].startswith("PASS")
+    assert "output_quality" not in report["checks"]
 
 
 def test_build_output_quality_unscored_blocking_profile_flag() -> None:

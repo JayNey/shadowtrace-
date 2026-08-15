@@ -665,3 +665,8 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     assert report["score"]["passed"] == 7
     assert report["verdict_for_human"].startswith("PASS")
     assert "CLOSED" in report["verdict_for_human"]
+    quality_bucket = report["unscored"]["output_quality"]
+    assert quality_bucket["present"] is True
+    assert quality_bucket["blocking_profile"] is False
+    assert quality_bucket["summary"]["agents_evaluated"] >= 1
+    assert "output_quality" not in report["checks"]

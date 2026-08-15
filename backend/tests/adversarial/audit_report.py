@@ -256,6 +256,7 @@ def build_output_quality_unscored(
     agents: dict[str, Any] = {}
     eval_error_agents: list[str] = []
     passing = 0
+    above_threshold = 0
     scores: list[float] = []
 
     for item in quality_scores or []:
@@ -286,8 +287,11 @@ def build_output_quality_unscored(
             "reasons": [str(reason) for reason in reasons[:5]],
         }
         scores.append(score)
-        if verdict == "pass":
+        # ISSUE-309: eval errors must not masquerade as PASS in the summary.
+        if verdict == "pass" and not eval_error:
             passing += 1
+        if not eval_error and score >= OUTPUT_QUALITY_PASS_THRESHOLD:
+            above_threshold += 1
 
     return {
         "present": bool(agents),
@@ -297,6 +301,7 @@ def build_output_quality_unscored(
         "summary": {
             "agents_evaluated": len(agents),
             "agents_passing": passing,
+            "agents_at_or_above_threshold": above_threshold,
             "minimum_score": min(scores) if scores else None,
             "eval_error_agents": eval_error_agents,
         },

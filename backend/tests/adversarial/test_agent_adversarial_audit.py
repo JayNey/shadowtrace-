@@ -239,6 +239,11 @@ async def test_adversarial_credential_db_staging_exfil_audit(
     assert "closed_reached" not in report["checks"]
     assert report["score"]["total_dimensions"] == 5
     assert not report["verdict_for_human"].startswith("PASS — full loop")
+    quality_bucket = report["unscored"]["output_quality"]
+    assert quality_bucket["present"] is True
+    assert quality_bucket["blocking_profile"] is False
+    assert quality_bucket["summary"]["agents_evaluated"] >= 1
+    assert "output_quality" not in report["checks"]
 
     # Soft assertion: pipeline must at least reach reporting for the audit to be meaningful.
     assert EventStatus.REPORTING.value in report["observed"]["status_sequence"], (

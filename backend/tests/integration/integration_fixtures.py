@@ -45,6 +45,7 @@ from app.services.evidence_projection import EvidenceProjection, bind_evidence_p
 from app.services.false_positive_matcher import FalsePositiveMatcher
 from app.services.knowledge_release_service import KnowledgeReleaseService
 from app.services.knowledge_store import KnowledgeStore
+from app.services.output_quality_evaluator import build_output_quality_evaluator
 from app.services.state_machine_service import StateMachineService
 from app.services.working_memory import WorkingMemory
 from tests.test_tools.tool_system_fixtures import new_sfx
@@ -441,6 +442,13 @@ def build_analysis_pipeline(
             working_memory=working_memory,
             degraded_flags=degraded_flags,
             settings=e2e_settings,
+            output_quality_evaluator=build_output_quality_evaluator(
+                working_memory=working_memory,
+                llm_client=effective_llm,
+                judge_enabled=e2e_settings.quality_judge_enabled,
+                degraded_flags=degraded_flags,
+                blocking_enabled=e2e_settings.output_quality_blocking,
+            ),
         )
         projection = EvidenceProjection(session_factory)
         return pipeline, projection

@@ -292,18 +292,25 @@ adversarial-closure-gates:
 	trap cleanup EXIT INT TERM; \
 	compose up -d --wait --wait-timeout 120 postgres redis; \
 	cd "$(CURDIR)/backend"; \
+	production_rc=0; \
+	adversarial_rc=0; \
 	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
 		OUTPUT_QUALITY_BLOCKING="$(ADVERSARIAL_OUTPUT_QUALITY_BLOCKING)" \
 		QUALITY_JUDGE_ENABLED="$(ADVERSARIAL_QUALITY_JUDGE_ENABLED)" \
 		$(PYTHON) -m pytest \
 		tests/integration/test_production_full_loop_disposition.py \
-		-m integration -v --tb=short -o addopts=; \
+		-m integration -v --tb=short -o addopts= \
+		|| production_rc=$$?; \
 	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
 		OUTPUT_QUALITY_BLOCKING="$(ADVERSARIAL_OUTPUT_QUALITY_BLOCKING)" \
 		QUALITY_JUDGE_ENABLED="$(ADVERSARIAL_QUALITY_JUDGE_ENABLED)" \
 		$(PYTHON) -m pytest \
 		tests/adversarial/test_agent_adversarial_full_loop.py \
-		-m adversarial_audit -v --tb=short -o addopts=
+		-m adversarial_audit -v --tb=short -o addopts= \
+		|| adversarial_rc=$$?; \
+	if [ "$$production_rc" -ne 0 ] || [ "$$adversarial_rc" -ne 0 ]; then \
+		exit 1; \
+	fi
 
 # --- ISSUE-025 tool-system integration quality gate ---------------------- #
 # In-memory Registry/Executor/Mock chains + unit tool tests.
