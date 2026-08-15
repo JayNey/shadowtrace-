@@ -82,8 +82,7 @@ def test_validation_corpus_aligns_with_prompt_appendix() -> None:
 
 def test_related_alerts_are_capped_at_five() -> None:
     alerts = [
-        TriageRelatedAlertHint(title=f"alert-{index}", tag=f"tag-{index}")
-        for index in range(8)
+        TriageRelatedAlertHint(title=f"alert-{index}", tag=f"tag-{index}") for index in range(8)
     ]
     appendix = format_triage_structured_appendix(
         structured_context=TriageStructuredPromptContext(related_alerts=alerts),
@@ -102,9 +101,7 @@ def test_format_structured_appendix_respects_max_total_chars() -> None:
         accounts=[
             AccountEntity(entity_id=f"a{i}", username=f"user-{i}-{long_value}") for i in range(6)
         ],
-        hosts=[
-            HostEntity(entity_id=f"h{i}", hostname=f"HOST-{i}-{long_value}") for i in range(6)
-        ],
+        hosts=[HostEntity(entity_id=f"h{i}", hostname=f"HOST-{i}-{long_value}") for i in range(6)],
         ips=[
             IPEntity(entity_id=f"i{i}", address=f"198.51.100.{i}", scope="external")
             for i in range(6)

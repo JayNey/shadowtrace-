@@ -157,8 +157,7 @@ def test_format_triage_decision_excerpt_labels_divergent_severity() -> None:
         severity=Severity.MEDIUM,
         need_investigation=True,
         decision_summary=(
-            "event_type=data_exfiltration, severity=medium, need_investigation=True; "
-            "notes only"
+            "event_type=data_exfiltration, severity=medium, need_investigation=True; notes only"
         ),
     )
     excerpt = format_triage_decision_excerpt(triage, outward_severity=Severity.HIGH)
@@ -174,8 +173,7 @@ def test_format_triage_decision_excerpt_match_strips_machine_prefix() -> None:
         severity=Severity.HIGH,
         need_investigation=True,
         decision_summary=(
-            "event_type=data_exfiltration, severity=high, need_investigation=True; "
-            "notes only"
+            "event_type=data_exfiltration, severity=high, need_investigation=True; notes only"
         ),
     )
     excerpt = format_triage_decision_excerpt(triage, outward_severity=Severity.HIGH)

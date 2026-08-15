@@ -276,8 +276,7 @@ async def test_build_triage_agent_input_loads_related_alerts_capped_at_five() ->
         raw_alert_snapshot={"normalized": {"risk_score": 10}},
     )
     scalar_rows = [
-        _FakeSourceRow({"title": f"alert-{index}", "gpt_tag": f"tag-{index}"})
-        for index in range(6)
+        _FakeSourceRow({"title": f"alert-{index}", "gpt_tag": f"tag-{index}"}) for index in range(6)
     ]
 
     class _FakeEventService:
