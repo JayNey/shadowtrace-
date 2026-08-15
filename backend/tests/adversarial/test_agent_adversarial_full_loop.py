@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1.deps import get_super_agent
 from app.db import models as orm
+from app.models.agent_io import ResponsePlan, ResponsePlanGeneratedBy
 from app.models.enums import EventStatus
 from app.services.context_service import EventContextStore
 from app.services.event_service import EventService
@@ -61,6 +62,65 @@ from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH,
 pytestmark = [pytest.mark.integration, pytest.mark.adversarial_audit]
 
 ARTIFACT_PATH = Path(__file__).resolve().parent / "artifacts" / "latest_full_loop_audit.json"
+_GENERATED_BY_VALUES = {item.value for item in ResponsePlanGeneratedBy}
+
+
+def _action_status_by_id(rows: list[Any]) -> dict[str, str]:
+    by_id: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        action_id = str(row.get("action_id") or "")
+        if not action_id:
+            continue
+        by_id[action_id] = str(row.get("status") or "").lower()
+    return by_id
+
+
+async def _assert_artifact_matches_action_table_and_keeps_snapshot(
+    session_factory: async_sessionmaker[AsyncSession],
+    context_store: EventContextStore,
+    event_id: str,
+    artifact_actions: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+) -> None:
+    """ISSUE-342: overlay Action-table status; do not mutate the store snapshot."""
+    snapshot_raw = await context_store.get(event_id, "response_plan")
+    if isinstance(snapshot_raw, ResponsePlan):
+        snapshot_raw = snapshot_raw.model_dump(mode="json")
+    snapshot_rows = snapshot_raw.get("actions") if isinstance(snapshot_raw, dict) else []
+    snapshot_by_id = _action_status_by_id(snapshot_rows if isinstance(snapshot_rows, list) else [])
+    artifact_by_id = _action_status_by_id(list(artifact_actions))
+    async with session_factory() as session:
+        orm_rows = list(
+            await session.scalars(select(orm.Action).where(orm.Action.event_id == event_id))
+        )
+    orm_by_id = {row.action_id: str(row.status or "").lower() for row in orm_rows}
+
+    assert artifact_by_id, "full_loop artifact must include response_plan_actions"
+    executed = [status for status in artifact_by_id.values() if status != "pending"]
+    assert executed, (
+        "ISSUE-342: artifact response_plan_actions must overlay Action-table runtime "
+        f"status after execute; got statuses={list(artifact_by_id.values())}"
+    )
+    pending_snapshots: list[str] = []
+    for action_id, artifact_status in artifact_by_id.items():
+        orm_status = orm_by_id.get(action_id)
+        assert orm_status is not None, f"ISSUE-342: missing Action row for {action_id}"
+        assert artifact_status == orm_status, (
+            f"ISSUE-342: artifact status for {action_id}={artifact_status} "
+            f"must match Action table {orm_status}"
+        )
+        if artifact_status != "pending":
+            snapshot_status = snapshot_by_id.get(action_id)
+            assert snapshot_status == "pending", (
+                "ISSUE-342: context-store ResponsePlan.actions must remain the "
+                f"generation-time snapshot; {action_id} store={snapshot_status} "
+                f"artifact={artifact_status}"
+            )
+            pending_snapshots.append(action_id)
+    assert pending_snapshots, (
+        "ISSUE-342: expected at least one executed action whose store snapshot stayed pending"
+    )
 
 
 async def _audit_status_sequence(
@@ -560,22 +620,23 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     _assert_executed_report_not_all_pending(report_sections)
     _assert_entity_writeback_not_claimed_applicable(report_sections)
     # ISSUE-342: artifact must expose plan provenance and runtime action statuses.
-    assert loop_result.response_plan_generated_by, (
+    assert loop_result.response_plan_generated_by in _GENERATED_BY_VALUES, (
         "full_loop artifact must include response_plan.generated_by for audit provenance"
     )
-    assert (
-        report["full_loop"]["response_plan_generated_by"]
-        == loop_result.response_plan_generated_by
+    assert report["full_loop"]["response_plan_generated_by"] == (
+        loop_result.response_plan_generated_by
     )
-    executed_actions = [
-        action
-        for action in loop_result.response_plan_actions
-        if isinstance(action, dict) and str(action.get("status") or "").lower() != "pending"
-    ]
-    action_statuses = [action.get("status") for action in loop_result.response_plan_actions]
-    assert executed_actions, (
-        "ISSUE-342: artifact response_plan_actions must overlay Action-table runtime status "
-        f"after execute; got statuses={action_statuses}"
+    assert loop_result.response_plan_strategy_summary, (
+        "full_loop artifact must include response_plan.strategy_summary"
+    )
+    assert report["full_loop"]["response_plan_strategy_summary"] == (
+        loop_result.response_plan_strategy_summary
+    )
+    await _assert_artifact_matches_action_table_and_keeps_snapshot(
+        session_factory,
+        context_store,
+        event_id,
+        loop_result.response_plan_actions,
     )
     assert EventStatus.EXECUTING_RESPONSE.value in status_sequence, (
         "expected audited transition through executing_response"

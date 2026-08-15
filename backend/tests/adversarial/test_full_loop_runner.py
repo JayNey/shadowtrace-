@@ -84,3 +84,32 @@ def test_build_artifact_response_plan_view_falls_back_for_invalid_payload() -> N
     assert isinstance(view, ArtifactResponsePlanView)
     assert view.generated_by is None
     assert view.actions[0]["target"] == "host-1"
+
+
+def test_build_artifact_response_plan_view_empty_orm_keeps_pending() -> None:
+    plan = ResponsePlan(
+        plan_id="plan-no-execute",
+        actions=[_response_action(action_id="act-idle", status=ActionStatus.PENDING)],
+        strategy_summary="not executed",
+        generated_by=ResponsePlanGeneratedBy.LLM,
+    )
+    view = build_artifact_response_plan_view(
+        plan.model_dump(mode="json"),
+        orm_actions=[],
+    )
+    assert view.actions[0]["status"] == ActionStatus.PENDING.value
+    assert view.generated_by == ResponsePlanGeneratedBy.LLM.value
+
+
+def test_build_artifact_response_plan_view_mismatched_orm_id_keeps_pending() -> None:
+    plan = ResponsePlan(
+        plan_id="plan-mismatch",
+        actions=[_response_action(action_id="act-plan", status=ActionStatus.PENDING)],
+        strategy_summary="id miss",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    view = build_artifact_response_plan_view(
+        plan.model_dump(mode="json"),
+        orm_actions=[_response_action(action_id="act-other", status=ActionStatus.SUCCESS)],
+    )
+    assert view.actions[0]["status"] == ActionStatus.PENDING.value

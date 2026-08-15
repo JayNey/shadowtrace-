@@ -19,7 +19,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -27,7 +26,7 @@ from app.core.auth import Principal
 from app.core.config import get_settings
 from app.db import models as orm
 from app.models.action import TERMINAL_DISPOSITION_TOOL, Action
-from app.models.agent_io import ResponsePlan, ResponsePlanGeneratedBy
+from app.models.agent_io import ResponsePlanGeneratedBy
 from app.models.enums import (
     ActionExecutionPhase,
     ActionStatus,
@@ -38,10 +37,13 @@ from app.models.enums import (
     OutboxDeliveryStatus,
     WritebackStatus,
 )
-from app.services.action_mapper import action_from_orm
 from app.services.event_service import EventService
 from app.services.investigation_guidance import record_investigation_workflow_path
-from app.services.report_input_builder import overlay_response_plan_from_orm
+from app.services.report_input_builder import (
+    _coerce_response_plan,
+    _load_actions_from_orm,
+    overlay_response_plan_from_orm,
+)
 from tests.integration.autonomous_e2e.helpers import (
     ObservabilitySnapshot,
     collect_observability,
@@ -499,17 +501,6 @@ class ArtifactResponsePlanView:
     strategy_summary: str | None
 
 
-def _coerce_response_plan_raw(raw: Any) -> ResponsePlan | None:
-    if isinstance(raw, ResponsePlan):
-        return raw
-    if isinstance(raw, dict):
-        try:
-            return ResponsePlan.model_validate(raw)
-        except ValidationError:
-            return None
-    return None
-
-
 def _normalize_action_rows(raw: Any) -> tuple[dict[str, Any], ...]:
     if not isinstance(raw, dict):
         return ()
@@ -538,7 +529,7 @@ def build_artifact_response_plan_view(
     context store while overlaying execution fields from persisted Action rows,
     matching the ISSUE-329 report builder path.
     """
-    plan = _coerce_response_plan_raw(response_plan_raw)
+    plan = _coerce_response_plan(response_plan_raw)
     if plan is None:
         return ArtifactResponsePlanView(
             actions=_normalize_action_rows(response_plan_raw),
@@ -567,15 +558,7 @@ async def _load_plan_actions_from_orm(
     if not action_ids:
         return []
     async with session_factory() as session:
-        result = await session.execute(
-            select(orm.Action)
-            .where(
-                orm.Action.event_id == event_id,
-                orm.Action.action_id.in_(action_ids),
-            )
-            .order_by(orm.Action.plan_revision, orm.Action.created_at, orm.Action.action_id)
-        )
-        return [action_from_orm(row) for row in result.scalars().all()]
+        return await _load_actions_from_orm(session, event_id, action_ids=action_ids)
 
 
 async def _resolve_artifact_response_plan_view(
@@ -583,7 +566,7 @@ async def _resolve_artifact_response_plan_view(
     event_id: str,
     response_plan_raw: Any,
 ) -> ArtifactResponsePlanView:
-    plan = _coerce_response_plan_raw(response_plan_raw)
+    plan = _coerce_response_plan(response_plan_raw)
     if plan is None:
         return build_artifact_response_plan_view(response_plan_raw)
 
