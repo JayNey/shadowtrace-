@@ -18,25 +18,7 @@
 
 Mock 栈上**稳定可验收**的官方路径需要 **Celery investigation worker**（`TASK_MODE=celery`）。默认 `make up` 使用 `TASK_MODE=background`（进程内 BackgroundTasks，重启丢任务），仅适合短路径分析演示，**不是**全闭环金路径。
 
-### 官方 Demo 栈（分析终态 + worker + observability）
-
-```bash
-# 1. 启动 core + investigation worker + scheduler + observability（Mock-only）
-make up-demo
-
-# 2. 迁移 + playbook + 三场景 seed/ingest + 自动 investigate（默认短路径剖面）
-make bootstrap-demo
-
-# 3. 冒烟：health + worker + 每场景终态（compat：analysis_only_complete 或 closed/contained；非 failed）
-make smoke-demo
-
-# 4. 打开浏览器
-#    http://localhost:3000
-```
-
-`make smoke-demo` 在事件超时未达约定终态时 **非零退出**，并打印 `event_id` 状态轨迹。建议在干净 volume 上运行（`make down-v` 后再 `up-demo`）；idempotent bootstrap 会跳过 re-seed，terminal poll 仅监控 API 返回的最新 3 条事件。
-
-### 全闭环金路径（seed → investigate → 脚本审批 → writeback → verify → CLOSED）
+### 全闭环金路径（官方主入口 — seed → investigate → 脚本审批 → writeback → verify → CLOSED）
 
 单场景 CLOSED（含 report + 脚本审批，**禁止**空等 `APPROVAL_TIMEOUT`）：
 
@@ -48,6 +30,35 @@ make demo-full-loop
 # compat 剖面（非 strict CLOSED）：make eval-full-loop
 ```
 
+分步剖面（`bootstrap-demo-full-loop` 会停在 `waiting_approval`，需脚本审批后 `eval-full-loop` 收口）：
+
+```bash
+make up-demo
+make bootstrap-demo-full-loop
+EVAL_REQUIRE_CLOSED=1 make eval-full-loop
+```
+
+### 分析种子 + compat 冒烟（非 CLOSED）
+
+`make bootstrap-demo`（别名 `bootstrap-demo-analysis`）默认 `BOOTSTRAP_INCLUDE_RESPONSE=false`：**仅分析种子**，不含 response 执行，事件**不会**到达 Approve→Execute→Verify→CLOSED。全闭环请用上一节金路径。
+
+```bash
+# 1. 启动 core + investigation worker + scheduler + observability（Mock-only）
+make up-demo
+
+# 2. 迁移 + playbook + 三场景 seed/ingest + 自动 investigate（分析剖面，非 CLOSED）
+make bootstrap-demo
+# 或：make bootstrap-demo-analysis
+
+# 3. 冒烟：health + worker + 每场景 compat 终态（analysis_only_complete 或 EventStatus closed/contained；非 strict CLOSED 金路径）
+make smoke-demo
+
+# 4. 打开浏览器
+#    http://localhost:3000
+```
+
+`make smoke-demo` 在事件超时未达约定终态时 **非零退出**，并打印 `event_id` 状态轨迹。建议在干净 volume 上运行（`make down-v` 后再 `up-demo`）；idempotent bootstrap 会跳过 re-seed，terminal poll 仅监控 API 返回的最新 3 条事件。
+
 三场景 matrix + 全局 strict CLOSED（与 `--profile-by-scenario` 互斥；Makefile 在开启 REQUIRE_CLOSED 时自动关闭 profile）：
 
 ```bash
@@ -56,12 +67,7 @@ EVAL_MATRIX_REQUIRE_CLOSED=1 make eval-full-loop-matrix
 EVAL_MATRIX_REQUIRE_CLOSED=1 EVAL_MATRIX_PROFILE_BY_SCENARIO=0 make eval-full-loop-matrix
 ```
 
-可选 full-loop bootstrap 剖面（会停在 `waiting_approval`，需脚本审批）：
-
-```bash
-make bootstrap-demo-full-loop
-python3 scripts/dynamic_eval_approve.py --event-id evt-... --decision approve
-```
+分步金路径见上文（`bootstrap-demo-full-loop` 停在 `waiting_approval`，再用 `EVAL_REQUIRE_CLOSED=1 make eval-full-loop` 收口；勿空等 `APPROVAL_TIMEOUT`）。
 
 ### 短路径分析演示（legacy — 非官方全闭环）
 
@@ -110,12 +116,16 @@ docker compose -f infra/docker-compose.yml exec backend \
 
 ### Mock 全栈 Demo（ISSUE-141）
 
-一键启动 **core + investigation worker + ingestion scheduler + observability**（Mock-only，容器内 OTEL 走 `http://otel-collector:4318`）：
+一键启动 **core + investigation worker + ingestion scheduler + observability**（Mock-only，容器内 OTEL 走 `http://otel-collector:4318`）。
+
+**CLOSED 金路径：** `make up-demo && make demo-full-loop`（见上文）。分步等价：`make up-demo` → `make bootstrap-demo-full-loop` → `EVAL_REQUIRE_CLOSED=1 make eval-full-loop`。
+
+**分析种子 + compat 冒烟（非 CLOSED）：**
 
 ```bash
 make up-demo
-make bootstrap-demo    # 或 make bootstrap
-make smoke-demo        # exit 0 并打印 URL/端口表
+make bootstrap-demo-analysis   # 同 bootstrap-demo；不含 response，非 CLOSED
+make smoke-demo                # exit 0 并打印 URL/端口表
 ```
 
 与默认路径的区别：
@@ -130,7 +140,7 @@ make smoke-demo        # exit 0 并打印 URL/端口表
 
 **停止 demo 栈：** 使用 `make up-demo` 后必须用 **`make down-demo`** 停止 worker/scheduler/observability；仅 `make down` 只会停 core，demo 容器可能残留（Makefile 会提示）。
 
-**约束：** demo profile 为 Mock-only。存在 `.env.live` 或 `ALLOW_LIVE_SIDE_EFFECTS=true` / `AUTO_*=true` / `SIMULATION_ENABLED=false` / 非 mock `SOURCE_MODE` 时 `make up-demo` / `make bootstrap-demo` / `make smoke-demo` **fail closed**。
+**约束：** demo profile 为 Mock-only。存在 `.env.live` 或 `ALLOW_LIVE_SIDE_EFFECTS=true` / `AUTO_*=true` / `SIMULATION_ENABLED=false` / 非 mock `SOURCE_MODE` 时 `make up-demo` / `make bootstrap-demo` / `make smoke-demo` **fail-closed**（安全策略，非 EventStatus CLOSED）。
 
 ---
 
@@ -146,12 +156,13 @@ make smoke-demo        # exit 0 并打印 URL/端口表
 | `make smoke-bootstrap` | bootstrap 后冒烟：health + **playbook_resources=ready** + ≥3 事件 + 前端反代（默认 **不含** 终态门禁） |
 | `SMOKE_TERMINAL_MODE=compat make smoke-bootstrap` | 同上 + 每场景 compat 终态（需 worker 栈；超时非零退出） |
 | `make up-demo` | **官方 Mock 全栈 demo**（core + worker + scheduler + observability，ISSUE-141 / ISSUE-304） |
-| `make bootstrap-demo` | 同 `make bootstrap`（demo guard + 迁移/种子） |
-| `make bootstrap-demo-full-loop` | bootstrap + `BOOTSTRAP_INCLUDE_RESPONSE=true` + `BOOTSTRAP_GENERATE_REPORT=true`（需脚本审批） |
-| `make smoke-demo` | **官方 demo 冒烟**：bootstrap 检查 + worker + scheduler + OTEL + **compat 终态门禁** |
+| `make bootstrap-demo` | 分析种子：`make bootstrap` + demo guard；默认不含 response，**非 CLOSED** |
+| `make bootstrap-demo-analysis` | `bootstrap-demo` 显式别名（同上） |
+| `make bootstrap-demo-full-loop` | bootstrap + `BOOTSTRAP_INCLUDE_RESPONSE=true` + `BOOTSTRAP_GENERATE_REPORT=true`（停 `waiting_approval`，非自动 CLOSED，需脚本审批） |
+| `make smoke-demo` | 分析剖面 compat 冒烟：bootstrap 检查 + worker + scheduler + OTEL + **compat 终态门禁**（非 CLOSED） |
 | `make demo-full-loop` | 单场景 CLOSED 金路径（`eval-full-loop` + demo guard） |
 | `make down-demo` | 停止 demo 栈（含 worker/scheduler/observability）——**up-demo 后必用** |
-| `make eval-full-loop` | **金标全闭环评测**（ISSUE-256）：mock-xdr seed → full_loop → **脚本审批** |
+| `make eval-full-loop` | **金标全闭环评测**（ISSUE-256）：mock-xdr seed → full_loop → **脚本审批**；默认 compat，strict CLOSED 需 `EVAL_REQUIRE_CLOSED=1` 或 `demo-full-loop` |
 | `make eval-full-loop-matrix` | **官方动态评测 matrix**（ISSUE-301）：每场景独立 Compose project + fresh volumes，可选 strict CLOSED |
 | `make up-observability` | 仅启动 OTEL/Prometheus/Grafana（不含 app） |
 | `make down-observability` | 停止 observability 栈 |

@@ -14,6 +14,7 @@ SCRIPTS = REPO_ROOT / "scripts"
 SMOKE_TERMINAL_PATH = SCRIPTS / "smoke_event_terminal.py"
 SMOKE_BOOTSTRAP_PATH = SCRIPTS / "smoke_bootstrap.sh"
 SMOKE_DEMO_PATH = SCRIPTS / "smoke_demo.sh"
+BOOTSTRAP_PATH = SCRIPTS / "bootstrap.sh"
 MAKEFILE_PATH = REPO_ROOT / "Makefile"
 DEPLOYMENT_DOC = REPO_ROOT / "docs" / "deployment.md"
 README = REPO_ROOT / "README.md"
@@ -343,6 +344,12 @@ def test_smoke_bootstrap_wires_terminal_mode() -> None:
     assert "SMOKE_TERMINAL_MODE" in text
     assert "ISSUE-304" in text
     assert "SMOKE_TERMINAL_MIN_EVENTS" in text
+    fail_idx = text.index("terminal acceptance failed")
+    fail_block = text[fail_idx : text.index("fi", fail_idx)]
+    assert "exit 1" in fail_block
+    assert "bootstrap-demo-analysis" in fail_block
+    assert "NOT CLOSED" in fail_block
+    assert "make demo-full-loop" in fail_block
 
 
 def test_smoke_demo_runs_worker_before_bootstrap_smoke() -> None:
@@ -355,16 +362,36 @@ def test_smoke_demo_runs_worker_before_bootstrap_smoke() -> None:
 def test_smoke_demo_defaults_compat_terminal_mode() -> None:
     text = SMOKE_DEMO_PATH.read_text(encoding="utf-8")
     assert 'SMOKE_TERMINAL_MODE="${SMOKE_TERMINAL_MODE:-compat}"' in text
+    fail_idx = text.index("bootstrap smoke failed")
+    fail_block = text[fail_idx : text.index("fi", fail_idx)]
+    assert "exit 1" in fail_block
+    assert "bootstrap-demo-analysis" in fail_block
+    assert "NOT CLOSED" in fail_block
+    assert "make demo-full-loop" in fail_block
 
 
 def test_makefile_issue_304_targets() -> None:
     text = MAKEFILE_PATH.read_text(encoding="utf-8")
     assert "bootstrap-demo-full-loop:" in text
+    assert "bootstrap-demo-analysis:" in text
     assert "demo-full-loop:" in text
     assert "test-ci-lite:" in text
     assert "test_smoke_event_terminal.py" in text
     assert "SMOKE_TERMINAL_MODE" in text
     assert "EVAL_REQUIRE_CLOSED" in text
+    phony = next(line for line in text.splitlines() if line.startswith(".PHONY:"))
+    assert "bootstrap-demo-analysis" in phony
+    assert "adversarial-closure-gates" in phony
+
+
+def test_makefile_bootstrap_demo_documents_analysis_only_profile() -> None:
+    text = MAKEFILE_PATH.read_text(encoding="utf-8")
+    block_start = text.index("# Analysis-only demo seed (ISSUE-352)")
+    block_end = text.index("bootstrap-demo-analysis:", block_start)
+    block = text[block_start:block_end]
+    assert "BOOTSTRAP_INCLUDE_RESPONSE=false" in block
+    assert "do NOT reach" in block
+    assert "$(MAKE) bootstrap BOOTSTRAP_INCLUDE_RESPONSE=false" in block.replace("\t", "")
 
 
 def test_makefile_bootstrap_demo_full_loop_sets_response_and_report() -> None:
@@ -404,15 +431,33 @@ def test_deployment_docs_official_demo_path_first() -> None:
     assert official_section < legacy_section
     official_block = text[official_section:legacy_section]
     assert "make up-demo" in official_block
+    assert "make demo-full-loop" in official_block
+    assert "make bootstrap-demo-full-loop" in official_block
+    assert "EVAL_REQUIRE_CLOSED=1 make eval-full-loop" in official_block
+    assert "bootstrap-demo-analysis" in official_block
+    assert "非 CLOSED" in official_block
     assert "make smoke-demo" in official_block
+    assert "官方 Demo 栈" not in official_block
+    assert "官方 demo 冒烟" not in text
     assert "make test-ci-lite" in text
-    assert "bootstrap-demo-full-loop" in text
-    assert "EVAL_REQUIRE_CLOSED=1 make eval-full-loop" in text
 
 
-def test_readme_points_to_up_demo_smoke_demo() -> None:
+def test_readme_points_to_closed_gold_path_first() -> None:
     text = README.read_text(encoding="utf-8")
-    assert "make up-demo && make bootstrap-demo && make smoke-demo" in text
+    demo_full_loop_idx = text.index("make up-demo && make demo-full-loop")
+    bootstrap_smoke_idx = text.index("make up-demo && make bootstrap-demo && make smoke-demo")
+    assert demo_full_loop_idx < bootstrap_smoke_idx
+    assert "bootstrap-demo-full-loop" in text
+    assert "bootstrap-demo-analysis" in text
+    assert "非 CLOSED" in text
     assert "make demo-full-loop" in text
     assert "make test-ci-lite" in text
     assert "EVAL_SCENARIO=" in text
+
+
+def test_bootstrap_footer_leads_with_closed_gold_path() -> None:
+    text = BOOTSTRAP_PATH.read_text(encoding="utf-8")
+    footer = text[text.index("演示环境已就绪") :]
+    assert footer.index("make demo-full-loop") < footer.index("make smoke-demo")
+    assert "非 CLOSED" in footer
+    assert "官方 demo" not in footer

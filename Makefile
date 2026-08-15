@@ -65,7 +65,7 @@ CELERY_SIGKILL_ARTIFACT_DIR ?= $(CURDIR)/artifacts/issue-283
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo bootstrap-demo-full-loop smoke-demo demo-full-loop demo-guard-test up-observability down-observability llm-smoke test test-ci-lite lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest autonomous-mock-e2e-worker-sigkill eval-full-loop eval-full-loop-matrix adversarial-closure-gates test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift check-migration-revisions evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
+.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo bootstrap-demo-analysis bootstrap-demo-full-loop smoke-demo demo-full-loop demo-guard-test up-observability down-observability llm-smoke test test-ci-lite lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest autonomous-mock-e2e-worker-sigkill eval-full-loop eval-full-loop-matrix adversarial-closure-gates test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift check-migration-revisions evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
@@ -176,9 +176,15 @@ up-demo:
 down-demo:
 	$(COMPOSE_DEMO) down
 
+# Analysis-only demo seed (ISSUE-352): default BOOTSTRAP_INCLUDE_RESPONSE=false — no
+# response execution; events do NOT reach Approve→Execute→Verify→CLOSED. Prefer
+# bootstrap-demo-full-loop / demo-full-loop for the official CLOSED gold path.
 bootstrap-demo:
 	@bash "$(CURDIR)/scripts/demo_mock_guard.sh"
-	@$(MAKE) bootstrap
+	@$(MAKE) bootstrap BOOTSTRAP_INCLUDE_RESPONSE=false
+
+# Explicit alias — same as bootstrap-demo (analysis seed, not CLOSED).
+bootstrap-demo-analysis: bootstrap-demo
 
 # Full-loop bootstrap profile (ISSUE-304): response + report; pauses on waiting_approval.
 # Close with ``make eval-full-loop`` / ``dynamic_eval_approve.py`` — never APPROVAL_TIMEOUT.
