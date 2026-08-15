@@ -104,10 +104,8 @@ GROUND_TRUTH: dict[str, Any] = {
         VPN_SRC_IP,
         HOST_DB,
     ],
-    # Enforced only when ADVERSARIAL_STRICT_DISPOSITION_TARGETS=1 (ISSUE-328 isolation).
-    "must_response_targets_gated": [
-        HOST_DB,
-    ],
+    # ISSUE-328: DB isolation is default-enforced. Keep the key for future deferred targets.
+    "must_response_targets_gated": [],
     "response_containment_tools": {
         ACCOUNT: "disable_account",
         HOST_WORKSTATION: "isolate_host",

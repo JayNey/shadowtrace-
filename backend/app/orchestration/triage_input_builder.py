@@ -111,10 +111,8 @@ async def _load_related_alert_hints(
     event: SecurityEvent,
 ) -> list[TriageRelatedAlertHint]:
     alert_refs = [
-        ref
-        for ref in event.source_reference_snapshots
-        if ref.source_kind is SourceObjectKind.ALERT
-    ][: _MAX_RELATED_ALERTS]
+        ref for ref in event.source_reference_snapshots if ref.source_kind is SourceObjectKind.ALERT
+    ][:_MAX_RELATED_ALERTS]
     if not alert_refs:
         return []
 

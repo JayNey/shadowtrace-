@@ -206,6 +206,7 @@ async def test_write_xdr_entity_effect_observation_projects_verify_surface() -> 
     [
         ("block_domain", "domain:example.test", "blocked"),
         ("isolate_host", "host:endpoint-1", "isolated"),
+        ("isolate_host", "host:SRV-DB-STG-02", "isolated"),
         ("quarantine_file", "file:sha256:abc123", "quarantined"),
         ("disable_account", "account:user-1", "disabled"),
     ],

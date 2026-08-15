@@ -6,11 +6,26 @@ silently degrade to ticket-only after PolicyFilter.
 ISSUE-248: evidence sufficiency — collection failed / zero-evidence
 ``evidence_limited`` must not plan L2+ high-impact actions. Evidence gate
 takes priority over containment encouragement (orthogonal concerns).
+
+ISSUE-328: containment *coverage* — any single CONTAINMENT_TOOLS item is not
+enough. When :func:`requires_threat_aligned_containment` is true, the plan
+must cover EntitySet-grounded containable entities by tool type:
+
+- account → ``disable_account``
+- host → ``isolate_host``
+- external destination IP → ``block_ip`` (ISSUE-339: not RFC1918, not ``src_ip``)
+
+Missing pairs are merged from already-filtered rule fallback when the target
+matches, otherwise synthesized from EntitySet **only if that tool was already
+admitted** (present on the LLM plan or the filtered fallback pool). Never
+expand the asset inventory; never isolate hosts that are not already in
+EntitySet; never re-introduce a tool PolicyFilter rejected.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Protocol, TypeVar
 
 from app.models.agent_io import (
@@ -19,8 +34,12 @@ from app.models.agent_io import (
     ResponsePlanGeneratedBy,
     RiskAssessment,
 )
-from app.models.entities import EntitySet
+from app.models.entities import EntitySet, IPEntity
 from app.models.enums import ActionLevel, FinalVerdict, Severity
+
+# Align with response_agent._filter_block_ip_entities (ISSUE-339). Duplicated
+# here to avoid a circular import; coverage must not require blocking VPN src.
+_BLOCK_IP_SOURCE_FIELDS = frozenset({"src_ip", "source_ip"})
 
 # Tools that materially contain/affect identified threat entities.
 CONTAINMENT_TOOLS = frozenset(
@@ -54,8 +73,182 @@ class ActionCandidateLike(Protocol):
     def tool_name(self) -> str: ...
 
 
+@dataclass(frozen=True)
+class EntityCoverageNeed:
+    """One EntitySet-grounded containment obligation (ISSUE-328)."""
+
+    tool_name: str
+    target_type: str
+    canonical_target: str
+    aliases: frozenset[str]
+
+
+def _normalized_token(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
+def _candidate_target(item: ActionCandidateLike) -> str:
+    return str(getattr(item, "target", "") or "").strip()
+
+
+def _alias_set(*values: str | None) -> frozenset[str]:
+    return frozenset(token for token in (_normalized_token(item) for item in values) if token)
+
+
+def _block_ip_coverage_entities(entities: EntitySet) -> list[IPEntity]:
+    """External exfil/C2 destinations only — same contract as ISSUE-339 rule expansion."""
+    covered: list[IPEntity] = []
+    for ip in entities.ips:
+        if ip.scope != "external":
+            continue
+        field = _normalized_token(str((ip.attributes or {}).get("normalized_field") or ""))
+        if field in _BLOCK_IP_SOURCE_FIELDS:
+            continue
+        if not (ip.address or ip.entity_id):
+            continue
+        covered.append(ip)
+    return covered
+
+
+def entity_containment_coverage_needs(entities: EntitySet) -> tuple[EntityCoverageNeed, ...]:
+    """ISSUE-328 coverage contract: EntitySet hosts/accounts/external dest IPs only.
+
+    Does **not** scan the asset inventory. A host that is not already in
+    ``entities.hosts`` (e.g. bait ``BACKUP-SRV-01``) is never required.
+    """
+    needs: list[EntityCoverageNeed] = []
+
+    def _add(need: EntityCoverageNeed) -> None:
+        if not need.canonical_target.strip() or not need.aliases:
+            return
+        for index, existing in enumerate(needs):
+            if existing.tool_name != need.tool_name:
+                continue
+            if existing.aliases & need.aliases:
+                needs[index] = EntityCoverageNeed(
+                    tool_name=existing.tool_name,
+                    target_type=existing.target_type,
+                    canonical_target=existing.canonical_target,
+                    aliases=existing.aliases | need.aliases,
+                )
+                return
+        needs.append(need)
+
+    for account in entities.accounts:
+        canonical = (account.username or account.entity_id or "").strip()
+        aliases = _alias_set(account.username, account.entity_id)
+        if canonical and aliases:
+            _add(
+                EntityCoverageNeed(
+                    tool_name="disable_account",
+                    target_type="account",
+                    canonical_target=canonical,
+                    aliases=aliases,
+                )
+            )
+    for host in entities.hosts:
+        canonical = (host.hostname or host.ip or host.entity_id or "").strip()
+        aliases = _alias_set(host.hostname, host.ip, host.entity_id)
+        if canonical and aliases:
+            _add(
+                EntityCoverageNeed(
+                    tool_name="isolate_host",
+                    target_type="host",
+                    canonical_target=canonical,
+                    aliases=aliases,
+                )
+            )
+    for ip in _block_ip_coverage_entities(entities):
+        canonical = (ip.address or ip.entity_id or "").strip()
+        aliases = _alias_set(ip.address, ip.entity_id)
+        if canonical and aliases:
+            _add(
+                EntityCoverageNeed(
+                    tool_name="block_ip",
+                    target_type="ip",
+                    canonical_target=canonical,
+                    aliases=aliases,
+                )
+            )
+    return tuple(needs)
+
+
+def _item_covers_need(item: ActionCandidateLike, need: EntityCoverageNeed) -> bool:
+    if item.tool_name != need.tool_name:
+        return False
+    return _normalized_token(_candidate_target(item)) in need.aliases
+
+
+def _build_coverage_candidate(prototype: _CandidateT, need: EntityCoverageNeed) -> _CandidateT:
+    """Construct a candidate of the same type as *prototype* for a missing need."""
+    cls = type(prototype)
+    reason = "entity coverage merge"
+    attempts: tuple[dict[str, object], ...] = (
+        {
+            "tool_name": need.tool_name,
+            "target_type": need.target_type,
+            "target": need.canonical_target,
+            "parameters": {},
+            "reason": reason,
+        },
+        {"tool_name": need.tool_name, "target": need.canonical_target},
+        {"tool_name": need.tool_name},
+    )
+    for kwargs in attempts:
+        try:
+            return cls(**kwargs)
+        except TypeError:
+            continue
+    raise TypeError(f"cannot construct coverage candidate for {need.tool_name} from {cls.__name__}")
+
+
+def _merge_entity_coverage(
+    candidates: list[_CandidateT],
+    *,
+    rule_fallback_candidates: list[_CandidateT],
+    entities: EntitySet,
+) -> tuple[list[_CandidateT], bool, bool]:
+    """Append missing EntitySet coverage; never copy fallback targets outside EntitySet.
+
+    Synthesis is allowed only for tools already admitted by PolicyFilter — present
+    on the current plan or on the filtered rule-fallback pool. This keeps
+    capability / grounding rejections intact (do not invent ``block_ip`` when
+    the manifest disabled it).
+
+    The third return flag is true when at least one EntitySet need stayed
+    uncovered because the matching tool was never admitted.
+    """
+    merged = list(candidates)
+    added = False
+    incomplete = False
+    admitted_tools = {item.tool_name for item in (*candidates, *rule_fallback_candidates)}
+    prototype = next(iter(merged or rule_fallback_candidates), None)
+    for need in entity_containment_coverage_needs(entities):
+        if any(_item_covers_need(item, need) for item in merged):
+            continue
+        match = next(
+            (item for item in rule_fallback_candidates if _item_covers_need(item, need)),
+            None,
+        )
+        if match is not None:
+            merged.append(match)
+            added = True
+            continue
+        if need.tool_name not in admitted_tools or prototype is None:
+            incomplete = True
+            continue
+        merged.append(_build_coverage_candidate(prototype, need))
+        added = True
+    return merged, added, incomplete
+
+
 def has_actionable_containment_targets(entities: EntitySet) -> bool:
-    """Return True when EntitySet exposes at least one containable target."""
+    """Return True when EntitySet exposes at least one containable target.
+
+    Broader than :func:`entity_containment_coverage_needs`: ISSUE-198 still
+    encourages grounded containment for domain/file/process-only sets.
+    ISSUE-328 coverage merge only fills account / host / external dest IP.
+    """
     if (
         entities.accounts
         or entities.hosts
@@ -261,7 +454,12 @@ def apply_containment_quality_gate(
     disposition_only: bool,
     evidence_output: EvidenceOutput | None = None,
 ) -> tuple[list[_CandidateT], ResponsePlanGeneratedBy, str]:
-    """Ensure high-confidence plans include grounded containment or rule fallback."""
+    """Ensure high-confidence plans include grounded containment *and* EntitySet coverage.
+
+    ISSUE-198: ticket-only after PolicyFilter still falls back to rule containment.
+    ISSUE-328: a plan that already has *some* containment is still merged until
+    every EntitySet account/host/external-dest IP is covered by the matching tool.
+    """
     if not requires_threat_aligned_containment(
         severity=severity,
         risk_assessment=risk_assessment,
@@ -272,33 +470,49 @@ def apply_containment_quality_gate(
     ):
         return candidates, generated_by, strategy
 
-    if _containment_candidates(candidates):
-        return candidates, generated_by, strategy
+    had_containment = bool(_containment_candidates(candidates))
+    if not had_containment:
+        rule_containment = _containment_candidates(rule_fallback_candidates)
+        if rule_containment:
+            rule_non_containment = [
+                item
+                for item in rule_fallback_candidates
+                if item.tool_name in _NON_CONTAINMENT_TOOLS
+            ]
+            rule_tool_names = {item.tool_name for item in rule_fallback_candidates}
+            preserved_notify = [
+                item
+                for item in candidates
+                if item.tool_name in _NON_CONTAINMENT_TOOLS
+                and item.tool_name not in rule_tool_names
+            ]
+            candidates = [*rule_containment, *rule_non_containment, *preserved_notify]
+            note = "containment_quality_gate: rule fallback after ungrounded LLM filter"
+            if generated_by is ResponsePlanGeneratedBy.LLM:
+                generated_by = ResponsePlanGeneratedBy.TEMPLATE
+            strategy = f"{strategy}; {note}" if strategy else note
 
-    rule_containment = _containment_candidates(rule_fallback_candidates)
-    if not rule_containment:
+    candidates, coverage_added, coverage_incomplete = _merge_entity_coverage(
+        candidates,
+        rule_fallback_candidates=rule_fallback_candidates,
+        entities=entities,
+    )
+    if coverage_added:
+        note = "containment_quality_gate: entity_coverage_merge"
+        strategy = f"{strategy}; {note}" if strategy else note
+        if not had_containment and generated_by is ResponsePlanGeneratedBy.LLM:
+            generated_by = ResponsePlanGeneratedBy.TEMPLATE
+    if coverage_incomplete:
+        note = "containment_quality_gate: entity_coverage_incomplete"
+        strategy = f"{strategy}; {note}" if strategy else note
+
+    if not _containment_candidates(candidates):
         note = "containment_quality_gate_unsatisfied: no grounded containment after PolicyFilter"
         if generated_by is ResponsePlanGeneratedBy.LLM:
             generated_by = ResponsePlanGeneratedBy.TEMPLATE
         strategy = f"{strategy}; {note}" if strategy else note
         return candidates, generated_by, strategy
-
-    rule_non_containment = [
-        item for item in rule_fallback_candidates if item.tool_name in _NON_CONTAINMENT_TOOLS
-    ]
-    rule_tool_names = {item.tool_name for item in rule_fallback_candidates}
-    preserved_notify = [
-        item
-        for item in candidates
-        if item.tool_name in _NON_CONTAINMENT_TOOLS and item.tool_name not in rule_tool_names
-    ]
-    merged = [*rule_containment, *rule_non_containment, *preserved_notify]
-
-    note = "containment_quality_gate: rule fallback after ungrounded LLM filter"
-    if generated_by is ResponsePlanGeneratedBy.LLM:
-        generated_by = ResponsePlanGeneratedBy.TEMPLATE
-    strategy = f"{strategy}; {note}" if strategy else note
-    return merged, generated_by, strategy
+    return candidates, generated_by, strategy
 
 
 def _severity_rank(severity: Severity) -> int:
@@ -315,8 +529,10 @@ __all__ = [
     "CONTAINMENT_TOOLS",
     "MAX_ACTION_LEVEL_WHEN_EVIDENCE_INSUFFICIENT",
     "RISK_CONTAINMENT_THRESHOLD",
+    "EntityCoverageNeed",
     "apply_containment_quality_gate",
     "apply_evidence_sufficiency_gate",
+    "entity_containment_coverage_needs",
     "evidence_blocks_high_impact_actions",
     "evidence_insufficiency_reason_code",
     "has_actionable_containment_targets",

@@ -102,6 +102,9 @@ DEFAULT_RESPONSE_RULES: dict[EventType, dict[Severity, list[ResponseRuleAction]]
     },
     EventType.DATA_EXFILTRATION: {
         Severity.LOW: _actions(_ticket()),
+        # Conservative MEDIUM plan has no L3. ISSUE-328 coverage still needs
+        # isolate_host / disable_account as a *pool* when containment is required;
+        # ResponseAgent lifts the fallback pool to HIGH in that case.
         Severity.MEDIUM: _actions(
             ResponseRuleAction("block_ip", 1),
             ResponseRuleAction("block_domain", 2),
@@ -109,16 +112,18 @@ DEFAULT_RESPONSE_RULES: dict[EventType, dict[Severity, list[ResponseRuleAction]]
         ),
         Severity.HIGH: _actions(
             ResponseRuleAction("disable_account", 1),
-            ResponseRuleAction("block_ip", 2),
-            _ticket(3),
-            _notify(4),
+            ResponseRuleAction("isolate_host", 2),
+            ResponseRuleAction("block_ip", 3),
+            _ticket(4),
+            _notify(5),
         ),
         Severity.CRITICAL: _actions(
             ResponseRuleAction("disable_account", 1),
-            ResponseRuleAction("block_ip", 2),
-            ResponseRuleAction("block_domain", 3),
-            _ticket(4),
-            _notify(5),
+            ResponseRuleAction("isolate_host", 2),
+            ResponseRuleAction("block_ip", 3),
+            ResponseRuleAction("block_domain", 4),
+            _ticket(5),
+            _notify(6),
         ),
     },
     EventType.INSIDER_THREAT: {

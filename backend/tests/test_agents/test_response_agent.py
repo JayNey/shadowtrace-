@@ -801,9 +801,20 @@ def test_data_exfiltration_high_rules_include_required_tools() -> None:
     actions = get_rule_actions(EventType.DATA_EXFILTRATION, Severity.HIGH)
     names = {item.tool_name for item in actions}
     assert "disable_account" in names
+    assert "isolate_host" in names
     assert "block_ip" in names
     assert "create_ticket" in names
     assert "notify_security_team" in names
+
+
+def test_data_exfiltration_medium_rules_omit_l3() -> None:
+    """MEDIUM DATA_EXFIL default plan is not the ISSUE-328 coverage pool."""
+    names = {
+        item.tool_name for item in get_rule_actions(EventType.DATA_EXFILTRATION, Severity.MEDIUM)
+    }
+    assert names == {"block_ip", "block_domain", "create_ticket"}
+    assert "isolate_host" not in names
+    assert "disable_account" not in names
 
 
 def test_other_low_medium_never_include_destructive_tools() -> None:
@@ -952,7 +963,7 @@ async def test_playbook_release_service_path_used_when_wired() -> None:
     assert llm.calls == 0
     assert any(a.tool_name == "disable_account" for a in plan.actions)
     assert plan.generated_by is ResponsePlanGeneratedBy.TEMPLATE
-    assert plan.strategy_summary == "playbook pb-a1b2c3d4@v1-test"
+    assert plan.strategy_summary.startswith("playbook pb-a1b2c3d4@v1-test")
     pinned = [a.playbook_ref for a in plan.actions if a.playbook_ref is not None]
     assert pinned
     assert all(ref.playbook_id == "pb-a1b2c3d4" for ref in pinned)
@@ -1129,7 +1140,7 @@ async def test_playbook_resolution_failure_llm_empty_uses_rule_fallback() -> Non
     plan = await agent.execute(_agent_input(event_id))
     tool_names = {a.tool_name for a in plan.actions}
     assert llm.calls == 1
-    assert "isolate_host" not in tool_names
+    assert "isolate_host" in tool_names
     assert "disable_account" in tool_names
     assert plan.generated_by is ResponsePlanGeneratedBy.TEMPLATE
     assert plan.strategy_summary == (
@@ -1184,7 +1195,7 @@ async def test_playbook_resolution_failure_llm_schema_error_uses_rule_fallback()
     plan = await agent.execute(_agent_input(event_id))
     tool_names = {a.tool_name for a in plan.actions}
     assert llm.calls == 1
-    assert "isolate_host" not in tool_names
+    assert "isolate_host" in tool_names
     assert "disable_account" in tool_names
     assert plan.generated_by is ResponsePlanGeneratedBy.TEMPLATE
     assert plan.strategy_summary == (
@@ -1973,6 +1984,8 @@ def test_expand_rule_candidates_block_ip_data_exfil_high_excludes_internal() -> 
     block_targets = {item.target for item in candidates if item.tool_name == "block_ip"}
     assert block_targets == {"198.51.100.77"}
     assert "disable_account" in {item.tool_name for item in candidates}
+    isolate_targets = {item.target for item in candidates if item.tool_name == "isolate_host"}
+    assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
 
 
 @pytest.mark.asyncio
@@ -1994,6 +2007,11 @@ async def test_rule_fallback_data_exfil_high_block_ip_external_dest_only() -> No
     assert "10.44.12.31" not in block_targets
     assert "10.44.20.88" not in block_targets
     assert "disable_account" in {action.tool_name for action in plan.actions}
+    isolate_targets = {
+        action.target for action in plan.actions if action.tool_name == "isolate_host"
+    }
+    assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
+    assert "BACKUP-SRV-01" not in isolate_targets
 
 
 @pytest.mark.asyncio
@@ -2054,6 +2072,166 @@ async def test_llm_explicit_internal_block_ip_not_dropped_by_rule_filter() -> No
     assert plan.generated_by is ResponsePlanGeneratedBy.LLM
     internal_block = next(action for action in block_actions if action.target == internal_ip)
     assert internal_block.action_level is ActionLevel.L2
+    isolate_targets = {
+        action.target for action in plan.actions if action.tool_name == "isolate_host"
+    }
+    assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
+    assert "BACKUP-SRV-01" not in isolate_targets
+
+
+@pytest.mark.asyncio
+async def test_llm_partial_containment_still_isolates_entityset_db_host() -> None:
+    """ISSUE-328: LLM isolate(WKS)+block_ip+disable_account must still isolate DB host."""
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(entities=_exfil_entity_set()))
+
+    class _PartialContainmentLLM:
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            import json
+
+            from app.core.llm.base import LLMResponse
+
+            payload = {
+                "actions": [
+                    {
+                        "tool_name": "isolate_host",
+                        "target_type": "host",
+                        "target": "WKS-DATA-031",
+                        "parameters": {},
+                        "reason": "isolate analytics workstation",
+                    },
+                    {
+                        "tool_name": "block_ip",
+                        "target_type": "ip",
+                        "target": "198.51.100.77",
+                        "parameters": {},
+                        "reason": "block upload destination",
+                    },
+                    {
+                        "tool_name": "disable_account",
+                        "target_type": "account",
+                        "target": "svc-analytics-47",
+                        "parameters": {},
+                        "reason": "disable stolen service account",
+                    },
+                ],
+                "strategy_summary": "LLM partial containment omitting DB host",
+            }
+            return LLMResponse(
+                content=json.dumps(payload),
+                model_name="mock",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            )
+
+    agent = ResponseAgent(
+        llm_client=_PartialContainmentLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    isolate_targets = {
+        action.target for action in plan.actions if action.tool_name == "isolate_host"
+    }
+    assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
+    assert "BACKUP-SRV-01" not in isolate_targets
+    assert any(action.tool_name == "disable_account" for action in plan.actions)
+    assert "entity_coverage_merge" in plan.strategy_summary
+
+
+@pytest.mark.asyncio
+async def test_data_exfil_medium_rule_fallback_does_not_isolate_without_confirmed_threat() -> None:
+    """TEMPLATE MEDIUM DATA_EXFIL must not plan L3 when containment predicate is false."""
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(
+        wm,
+        event_id,
+        triage=_triage(
+            severity=Severity.MEDIUM,
+            event_type=EventType.DATA_EXFILTRATION,
+            entities=_exfil_entity_set(),
+        ),
+    )
+    agent = ResponseAgent(
+        llm_client=_FailingLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.NONE),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(
+        ResponseAgentInput(
+            event_id=event_id,
+            risk_assessment=_risk(Severity.MEDIUM, score=40),
+            evidence_output=EvidenceOutput(
+                evidence_list=[_sample_evidence(event_id)],
+                collection_status=CollectionStatus.COMPLETED,
+                overall_confidence=0.7,
+            ),
+        )
+    )
+    assert all(action.tool_name != "isolate_host" for action in plan.actions)
+    assert all(action.tool_name != "disable_account" for action in plan.actions)
+
+
+@pytest.mark.asyncio
+async def test_data_exfil_medium_confirmed_ticket_only_covers_account_and_host() -> None:
+    """Confirmed MEDIUM DATA_EXFIL still pulls isolate_host + disable_account from HIGH pool."""
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(
+        wm,
+        event_id,
+        triage=_triage(
+            severity=Severity.MEDIUM,
+            event_type=EventType.DATA_EXFILTRATION,
+            entities=_exfil_entity_set(),
+        ),
+    )
+    agent = ResponseAgent(
+        llm_client=_UngroundedOnlyLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(
+        ResponseAgentInput(
+            event_id=event_id,
+            risk_assessment=_risk(Severity.MEDIUM, score=40),
+            evidence_output=EvidenceOutput(
+                evidence_list=[_sample_evidence(event_id)],
+                collection_status=CollectionStatus.COMPLETED,
+                overall_confidence=0.9,
+            ),
+        )
+    )
+    isolate_targets = {
+        action.target for action in plan.actions if action.tool_name == "isolate_host"
+    }
+    assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
+    assert any(action.tool_name == "disable_account" for action in plan.actions)
+    assert any(action.target == "svc-analytics-47" for action in plan.actions)
+
+
+@pytest.mark.asyncio
+async def test_empty_entityset_does_not_encourage_containment() -> None:
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(entities=EntitySet()))
+    agent = ResponseAgent(
+        llm_client=_UngroundedOnlyLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    assert all(action.tool_name != "isolate_host" for action in plan.actions)
+    assert all(action.tool_name != "disable_account" for action in plan.actions)
+    assert "containment_quality_gate" not in plan.strategy_summary
+    assert "entity_coverage_merge" not in plan.strategy_summary
 
 
 def test_infer_host_kind_skips_ambiguous_and_overbroad_names() -> None:

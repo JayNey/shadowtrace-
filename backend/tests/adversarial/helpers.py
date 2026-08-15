@@ -47,7 +47,7 @@ def _truthy_env(name: str) -> bool:
 
 
 def strict_disposition_targets_enabled() -> bool:
-    """Gate ISSUE-328 DB isolation targets until real containment lands (ISSUE-334)."""
+    """When true, also enforce ``must_response_targets_gated`` (empty after ISSUE-328)."""
     return _truthy_env("ADVERSARIAL_STRICT_DISPOSITION_TARGETS")
 
 
@@ -180,7 +180,7 @@ def _gated_response_targets(ground_truth: dict[str, object]) -> set[str]:
 
 
 def enforced_must_response_targets(ground_truth: dict[str, object]) -> list[str]:
-    """Targets that hard-fail today; gated entries wait for ISSUE-328 unless strict env is on."""
+    """Targets that hard-fail today; gated names are skipped unless strict env is on."""
     required = [
         str(item).strip()
         for item in (ground_truth.get("must_response_targets") or [])

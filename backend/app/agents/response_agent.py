@@ -792,7 +792,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             risk_assessment=input.risk_assessment,
         )
         rule_actions = get_rule_actions(event_type, severity)
-        if (
+        containment_needed = (
             not evidence_high_impact_blocked
             and requires_threat_aligned_containment(
                 severity=severity,
@@ -802,8 +802,13 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                 disposition_only=disposition_only,
                 evidence_output=input.evidence_output,
             )
-            and not any(item.tool_name in CONTAINMENT_TOOLS for item in rule_actions)
+        )
+        if containment_needed and (
+            not any(item.tool_name in CONTAINMENT_TOOLS for item in rule_actions)
+            or (event_type is EventType.DATA_EXFILTRATION and severity is Severity.MEDIUM)
         ):
+            # DATA_EXFIL MEDIUM stays conservative (no L3 on the default plan).
+            # Coverage / ticket-only fallback still needs isolate_host + disable_account.
             rule_actions = get_rule_actions(event_type, Severity.HIGH)
         rule_fallback_pool = policy_filter.filter_candidates(
             expand_rule_candidates(rule_actions, entities),
@@ -1526,8 +1531,7 @@ def _ip_summary(ip: IPEntity) -> dict[str, Any]:
 def _entities_summary(entities: EntitySet) -> dict[str, Any]:
     return {
         "accounts": [
-            {"username": entity.username or entity.entity_id}
-            for entity in entities.accounts
+            {"username": entity.username or entity.entity_id} for entity in entities.accounts
         ],
         "hosts": [_host_summary(entity) for entity in entities.hosts],
         "ips": [_ip_summary(entity) for entity in entities.ips],
