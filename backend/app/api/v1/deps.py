@@ -94,14 +94,10 @@ def _get_context_store() -> Any:
 def _get_degraded_flags() -> Any:
     global _degraded_flags
     if _degraded_flags is None:
-        from app.services.degraded_flag_service import (
-            DegradedFlagService,
-            wire_redis_context_recovery,
-        )
+        from app.services.degraded_flag_service import create_degraded_flag_service
 
         store = _get_context_store()
-        _degraded_flags = DegradedFlagService(store, _get_session_factory())
-        wire_redis_context_recovery(store, _degraded_flags)
+        _degraded_flags = create_degraded_flag_service(store, _get_session_factory())
     return _degraded_flags
 
 

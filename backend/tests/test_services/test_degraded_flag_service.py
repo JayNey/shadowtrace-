@@ -31,6 +31,7 @@ from app.services.degraded_flag_service import (
     DEGRADED_FLAG_ALLOWLIST,
     DegradedFlagService,
     apply_flag_to_list,
+    create_degraded_flag_service,
     wire_redis_context_recovery,
 )
 
@@ -150,6 +151,151 @@ def test_wire_redis_context_recovery_registers_callback() -> None:
     store.set_on_redis_recovery.assert_called_once()
     callback = store.set_on_redis_recovery.call_args[0][0]
     assert callable(callback)
+
+
+def test_create_degraded_flag_service_iterates_recovery_registry() -> None:
+    from unittest.mock import MagicMock, patch
+
+    store = MagicMock()
+    session_factory = MagicMock()
+    extra = MagicMock()
+    with patch(
+        "app.services.degraded_flag_service._DEGRADED_FLAG_RECOVERY_WIRING",
+        (wire_redis_context_recovery, extra),
+    ):
+        service = create_degraded_flag_service(store, session_factory)
+    assert isinstance(service, DegradedFlagService)
+    extra.assert_called_once_with(store, service)
+    store.set_on_redis_recovery.assert_called_once()
+
+
+def test_create_degraded_flag_service_empty_registry_skips_wiring() -> None:
+    from unittest.mock import MagicMock, patch
+
+    store = MagicMock()
+    with patch("app.services.degraded_flag_service._DEGRADED_FLAG_RECOVERY_WIRING", ()):
+        create_degraded_flag_service(store, MagicMock())
+    store.set_on_redis_recovery.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_production_promotions_calls_create_degraded_flag_service() -> None:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.evaluation.detection.production_bootstrap import bootstrap_production_promotions
+
+    artifact = MagicMock()
+    artifact.tenant_id = "tenant-353"
+    factory = MagicMock(return_value=MagicMock())
+    governance = MagicMock()
+    governance.record_decision = AsyncMock(return_value=MagicMock(decision_id="dec-353"))
+
+    with (
+        patch(
+            "app.evaluation.detection.production_bootstrap.binding_by_case_id",
+            return_value={},
+        ),
+        patch(
+            "app.evaluation.detection.production_bootstrap._candidate_ids_for_promotion",
+            return_value={"case-353": "cand-353"},
+        ),
+        patch(
+            "app.evaluation.detection.production_bootstrap.list_completed_promotions_by_candidate",
+            new_callable=AsyncMock,
+            return_value={"cand-353"},
+        ),
+        patch("app.evaluation.detection.production_bootstrap.EventContextStore"),
+        patch(
+            "app.evaluation.detection.production_bootstrap.create_degraded_flag_service",
+            factory,
+        ),
+        patch("app.evaluation.detection.production_bootstrap.EventService"),
+        patch("app.evaluation.detection.production_bootstrap.SourceIngester"),
+        patch("app.evaluation.detection.production_bootstrap.DetectionPromotionService"),
+        patch(
+            "app.evaluation.detection.production_bootstrap.DetectionGovernanceService",
+            return_value=governance,
+        ),
+    ):
+        result = await bootstrap_production_promotions(
+            MagicMock(),
+            MagicMock(),
+            phase_a_artifact=artifact,
+            binding_manifest=MagicMock(),
+            threshold_manifest_path=Path("/tmp/issue-353-threshold.json"),
+        )
+
+    factory.assert_called_once()
+    assert result.skipped_case_ids == ("case-353",)
+    assert result.promoted_case_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_create_degraded_flag_service_clears_redis_flag_on_recovery(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: RedisClient,
+) -> None:
+    """ISSUE-353: factory path (bootstrap/API/tasks) clears sticky flag after Redis rebuild."""
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.context_service import ctx_key
+
+    event_id = await _seed_ready(session_factory, store)
+    degraded = create_degraded_flag_service(store, session_factory)
+
+    await degraded.set_flag(
+        event_id,
+        "redis_context_unavailable",
+        True,
+        writer="WorkingMemory",
+    )
+    assert await degraded.has_flag(event_id, "redis_context_unavailable") is True
+
+    with patch.object(store._redis, "ping", new_callable=AsyncMock, return_value=False):
+        with patch("app.services.context_service.asyncio.sleep", new_callable=AsyncMock):
+            await degraded.set_flag(
+                event_id,
+                "disposition_writeback_blocked",
+                "capability_unknown",
+                writer="EventService",
+            )
+
+    assert await degraded.has_flag(event_id, "redis_context_unavailable") is True
+
+    await redis_client.get_client().delete(ctx_key(event_id))
+    await store.rebuild_context(event_id)
+
+    assert await degraded.has_flag(event_id, "redis_context_unavailable") is False
+    assert await degraded.has_flag(event_id, "disposition_writeback_blocked") is True
+    ctx_flags = await store.get(event_id, "degraded_flags")
+    assert "redis_context_unavailable=true" not in (ctx_flags or [])
+    assert any(str(flag).startswith("disposition_writeback_blocked=") for flag in (ctx_flags or []))
+
+
+@pytest.mark.asyncio
+async def test_direct_construction_skips_recovery_wiring(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: RedisClient,
+) -> None:
+    """Explicit no-recovery path: direct DegradedFlagService(...) keeps sticky flag."""
+    from app.services.context_service import ctx_key
+
+    event_id = await _seed_ready(session_factory, store)
+    degraded = DegradedFlagService(store, session_factory)
+
+    await degraded.set_flag(
+        event_id,
+        "redis_context_unavailable",
+        True,
+        writer="WorkingMemory",
+    )
+
+    await redis_client.get_client().delete(ctx_key(event_id))
+    await store.rebuild_context(event_id)
+
+    assert await degraded.has_flag(event_id, "redis_context_unavailable") is True
 
 
 @pytest.mark.asyncio

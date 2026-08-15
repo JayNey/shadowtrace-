@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -118,6 +119,8 @@ def apply_flag_to_list(flags: list[str], flag_name: str, value: Any) -> list[str
 
 REDIS_CONTEXT_UNAVAILABLE_FLAG = "redis_context_unavailable"
 
+RecoveryWiringFn = Callable[["EventContextStore", "DegradedFlagService"], None]
+
 
 def wire_redis_context_recovery(
     store: EventContextStore,
@@ -137,13 +140,26 @@ def wire_redis_context_recovery(
     store.set_on_redis_recovery(_on_redis_recovery)
 
 
+_DEGRADED_FLAG_RECOVERY_WIRING: tuple[RecoveryWiringFn, ...] = (
+    # Only register recoveries that can be safely probed. Business/audit flags
+    # stay manual-clear — a fake recovery would wipe a real degradation.
+    wire_redis_context_recovery,
+)
+
+
 def create_degraded_flag_service(
     store: EventContextStore,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> DegradedFlagService:
-    """Construct DegradedFlagService with redis_context_unavailable recovery wired."""
+    """Construct DegradedFlagService with allowlisted auto-recoveries wired.
+
+    API, Celery tasks, and bootstrap paths use this factory so
+    ``redis_context_unavailable`` clears after EventContextStore rebuilds Redis.
+    Direct ``DegradedFlagService(...)`` construction skips recovery wiring.
+    """
     service = DegradedFlagService(store, session_factory)
-    wire_redis_context_recovery(store, service)
+    for wire_recovery in _DEGRADED_FLAG_RECOVERY_WIRING:
+        wire_recovery(store, service)
     return service
 
 

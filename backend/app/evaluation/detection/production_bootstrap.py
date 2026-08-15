@@ -24,7 +24,7 @@ from app.models.detection_production_comparison import (
 )
 from app.models.detection_promotion import DetectionPromotionRequest
 from app.services.context_service import EventContextStore
-from app.services.degraded_flag_service import DegradedFlagService
+from app.services.degraded_flag_service import create_degraded_flag_service
 from app.services.detection_context_projector import DetectionContextProjector
 from app.services.detection_governance_service import DetectionGovernanceService
 from app.services.detection_promotion_service import DetectionPromotionService
@@ -95,7 +95,7 @@ async def bootstrap_production_promotions(
     )
 
     store = EventContextStore(redis_client, session_factory)
-    degraded = DegradedFlagService(store, session_factory)
+    degraded = create_degraded_flag_service(store, session_factory)
     events = EventService(session_factory, store, degraded_flags=degraded)
     ingester = SourceIngester(events, session_factory, source_mode="mock_xdr")
     promotion_service = DetectionPromotionService(
