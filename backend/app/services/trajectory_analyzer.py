@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 from collections import Counter
 
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.decision_trace import DecisionTraceEntry
@@ -46,21 +45,11 @@ class TrajectoryAnalyzer:
         """Produce a ``TrajectoryReport`` for *event_id*.
 
         Returns an empty report with ``insufficient_trace=True`` when the
-        decision trace is unavailable or contains too few entries.
+        decision trace contains no entries. Infrastructure failures
+        (``SQLAlchemyError`` / ``OSError``) propagate to the API as 503.
         """
         trace_service = DecisionTraceService(self._session_factory)
-        try:
-            trace = await trace_service.get_decision_trace(event_id)
-        except (SQLAlchemyError, OSError) as exc:
-            logger.warning(
-                "Failed to fetch decision trace for event=%s — returning insufficient",
-                event_id,
-                exc_info=exc,
-            )
-            return TrajectoryReport(
-                event_id=event_id,
-                insufficient_trace=True,
-            )
+        trace = await trace_service.get_decision_trace(event_id)
 
         if not trace.entries:
             logger.info("No decision trace entries for event=%s", event_id)

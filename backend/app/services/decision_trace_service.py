@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db import models as orm
@@ -25,6 +26,22 @@ from app.services.context_service import unwrap_journal_value
 logger = logging.getLogger(__name__)
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+# Connection/outage errors must not be fail-softed into an empty timeline
+# (ISSUE-341 / #984). Per-source RuntimeError and similar stay skipped.
+_INFRASTRUCTURE_ERRORS = (
+    OperationalError,
+    InterfaceError,
+    OSError,
+    ConnectionError,
+    TimeoutError,
+)
+
+
+def _reraise_if_infrastructure(exc: BaseException) -> None:
+    if isinstance(exc, _INFRASTRUCTURE_ERRORS):
+        raise
+
 
 # Fixed ordering for entries sharing the same timestamp.
 _ENTRY_TYPE_ORDER: dict[DecisionTraceEntryType, int] = {
@@ -751,12 +768,17 @@ class DecisionTraceService:
         substate_journal: list[tuple[datetime, object]] = []
 
         async with self._session_factory() as session:
+            # Force checkout so a downed Postgres raises here instead of
+            # being fail-softed into empty entries (lazy connect).
+            await session.connection()
+
             # 1. Agent traces
             agent_rows: list[orm.AgentTrace] = []
             try:
                 agent_rows = await self._fetch_agent_traces(session, event_id)
                 all_entries.extend(_normalize_agent_traces(agent_rows))
             except Exception as exc:
+                _reraise_if_infrastructure(exc)
                 logger.warning("Failed to fetch agent traces for %s: %s", event_id, exc)
                 missing.append("agent_trace")
 
@@ -766,6 +788,7 @@ class DecisionTraceService:
                 timing_by_tool = _evidence_query_timing_by_tool(agent_rows)
                 all_entries.extend(_normalize_tool_calls(tool_rows, timing_by_tool=timing_by_tool))
             except Exception as exc:
+                _reraise_if_infrastructure(exc)
                 logger.warning("Failed to fetch tool calls for %s: %s", event_id, exc)
                 missing.append("tool_call_log")
 
@@ -774,6 +797,7 @@ class DecisionTraceService:
                 llm_rows = await self._fetch_llm_calls(session, event_id)
                 all_entries.extend(_normalize_llm_calls(llm_rows))
             except Exception as exc:
+                _reraise_if_infrastructure(exc)
                 logger.warning("Failed to fetch LLM calls for %s: %s", event_id, exc)
                 missing.append("llm_call_log")
 
@@ -782,6 +806,7 @@ class DecisionTraceService:
                 audit_rows = await self._fetch_audit_logs(session, event_id)
                 all_entries.extend(_normalize_state_transitions(audit_rows))
             except Exception as exc:
+                _reraise_if_infrastructure(exc)
                 logger.warning("Failed to fetch audit logs for %s: %s", event_id, exc)
                 missing.append("event_audit_log")
 
@@ -790,6 +815,7 @@ class DecisionTraceService:
                 approval_rows = await self._fetch_approval_records(session, event_id)
                 all_entries.extend(_normalize_approval_rows(approval_rows))
             except Exception as exc:
+                _reraise_if_infrastructure(exc)
                 logger.warning("Failed to fetch approvals for %s: %s", event_id, exc)
                 missing.append("approval_record")
 
@@ -798,6 +824,7 @@ class DecisionTraceService:
                 job_rows = await self._fetch_action_jobs(session, event_id)
                 all_entries.extend(_normalize_action_executions(job_rows))
             except Exception as exc:
+                _reraise_if_infrastructure(exc)
                 logger.warning("Failed to fetch action jobs for %s: %s", event_id, exc)
                 missing.append("action_execution_job")
 
@@ -806,6 +833,7 @@ class DecisionTraceService:
                 disp_rows = await self._fetch_dispositions(session, event_id)
                 all_entries.extend(_normalize_dispositions(disp_rows))
             except Exception as exc:
+                _reraise_if_infrastructure(exc)
                 logger.warning("Failed to fetch dispositions for %s: %s", event_id, exc)
                 missing.append("disposition_outbox")
 
@@ -814,6 +842,7 @@ class DecisionTraceService:
                 wb_rows = await self._fetch_writebacks(session, event_id)
                 all_entries.extend(_normalize_writebacks(wb_rows))
             except Exception as exc:
+                _reraise_if_infrastructure(exc)
                 logger.warning("Failed to fetch writebacks for %s: %s", event_id, exc)
                 missing.append("disposition_receipt")
 
@@ -822,6 +851,7 @@ class DecisionTraceService:
                 journal_rows = await self._fetch_execution_substate_journal(session, event_id)
                 substate_journal = [(row.created_at, row.value) for row in journal_rows]
             except Exception as exc:
+                _reraise_if_infrastructure(exc)
                 # Fail-soft: approval idle still deducted; writeback idle omitted.
                 logger.warning(
                     "Failed to fetch execution_substate journal for %s: %s",

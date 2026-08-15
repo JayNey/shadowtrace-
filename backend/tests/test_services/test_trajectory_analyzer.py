@@ -71,13 +71,12 @@ class TestTrajectoryAnalyzer:
         assert report.total_steps == 0
 
     @pytest.mark.asyncio
-    async def test_db_error_returns_insufficient(self) -> None:
+    async def test_db_error_propagates(self) -> None:
         mock_dt_service = MagicMock()
         mock_dt_service.get_decision_trace = AsyncMock(side_effect=SQLAlchemyError("db down"))
 
-        report = await _analyze_with_mock(mock_dt_service, "evt-db-error")
-
-        assert report.insufficient_trace is True
+        with pytest.raises(SQLAlchemyError):
+            await _analyze_with_mock(mock_dt_service, "evt-db-error")
 
     @pytest.mark.asyncio
     async def test_redundant_tool_calls_detected(self) -> None:

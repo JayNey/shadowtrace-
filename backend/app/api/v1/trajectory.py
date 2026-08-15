@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.api.v1.deps import get_event_service
 from app.api.v1.errors import EventNotFoundError
 from app.core.auth import ReadPrincipal
+from app.core.errors import DependencyUnavailableError
 from app.models.trajectory import TrajectoryReport
 from app.services.trajectory_analyzer import TrajectoryAnalyzer
 
@@ -30,7 +31,7 @@ def _try_get_session_factory() -> async_sessionmaker[AsyncSession] | None:
 
         return _get_session_factory()
     except (ImportError, ModuleNotFoundError):
-        logger.warning("Database session factory unavailable — returning empty trajectory")
+        logger.warning("Database session factory unavailable — trajectory store down")
         return None
     except (ValueError, TypeError):
         raise
@@ -55,11 +56,19 @@ async def get_trajectory(
 
     sf = _try_get_session_factory()
     if sf is None:
-        return TrajectoryReport(event_id=event_id, insufficient_trace=True)
+        raise DependencyUnavailableError(
+            message="trajectory store unavailable",
+            error_code="dependency_unavailable",
+            details={"event_id": event_id, "dependency": "postgres"},
+        )
 
     try:
         analyzer = TrajectoryAnalyzer(sf)
         return await analyzer.analyze(event_id)
     except (SQLAlchemyError, OSError) as exc:
         logger.warning("Trajectory analysis unavailable for %s: %s", event_id, exc, exc_info=True)
-        return TrajectoryReport(event_id=event_id, insufficient_trace=True)
+        raise DependencyUnavailableError(
+            message="trajectory store unavailable",
+            error_code="dependency_unavailable",
+            details={"event_id": event_id, "dependency": "postgres"},
+        ) from exc

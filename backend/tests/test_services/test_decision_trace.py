@@ -18,6 +18,7 @@ import pytest_asyncio
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import delete
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -1511,6 +1512,27 @@ class TestDecisionTraceDegradationAndEdgeCases:
         trace = await service.get_decision_trace(event_id)
         assert "agent_trace" in trace.missing_sources
         assert any(e.entry_type == DecisionTraceEntryType.TOOL_CALL for e in trace.entries)
+
+    @pytest.mark.asyncio
+    async def test_operational_error_on_first_fetch_raises(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        event_id = _id("evt")
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+
+        async def _boom(_session: AsyncSession, _event_id: str) -> list[orm.AgentTrace]:
+            raise OperationalError("SELECT 1", {}, Exception("db down"))
+
+        monkeypatch.setattr(service, "_fetch_agent_traces", _boom)
+
+        with pytest.raises(OperationalError):
+            await service.get_decision_trace(event_id)
 
     @pytest.mark.asyncio
     async def test_agent_trace_without_timestamp_still_emits_entry(

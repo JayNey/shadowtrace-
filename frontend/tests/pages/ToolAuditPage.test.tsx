@@ -484,4 +484,47 @@ describe("EventAuditPanel degradation and realtime", () => {
     expect(await screen.findByText("block_ip 工具调用：status=success")).toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "工具" })).not.toBeInTheDocument();
   });
+
+  it("clears stale insufficient-trace alert when trajectory refresh fails", async () => {
+    mockGetDecisionTrace.mockResolvedValue({
+      data: {
+        event_id: "evt-73",
+        entries: [],
+        summary: {},
+        missing_sources: [],
+        page: 1,
+        page_size: 200,
+        total: 0,
+      },
+    });
+    mockGetEventToolCalls.mockResolvedValue({
+      data: { total: 0, page: 1, page_size: 200, items: [] },
+    });
+    mockGetTrajectory.mockResolvedValue({
+      data: {
+        event_id: "evt-73",
+        total_steps: 0,
+        agent_invocations: 0,
+        tool_calls: 0,
+        llm_calls: 0,
+        metrics: {},
+        findings: [],
+        insufficient_trace: true,
+      },
+    });
+
+    renderWithProviders(<EventAuditPanel eventId="evt-73" />);
+    expect(
+      await screen.findByText("轨迹数据不足，部分指标暂不可计算"),
+    ).toBeInTheDocument();
+
+    mockGetTrajectory.mockRejectedValue(new Error("trajectory store unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: /刷新审计/ }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText("轨迹数据不足，部分指标暂不可计算"),
+      ).not.toBeInTheDocument();
+    });
+  });
 });
