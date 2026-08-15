@@ -810,8 +810,7 @@ def test_data_exfiltration_high_rules_include_required_tools() -> None:
 def test_data_exfiltration_medium_rules_omit_l3() -> None:
     """MEDIUM DATA_EXFIL default plan is not the ISSUE-328 coverage pool."""
     names = {
-        item.tool_name
-        for item in get_rule_actions(EventType.DATA_EXFILTRATION, Severity.MEDIUM)
+        item.tool_name for item in get_rule_actions(EventType.DATA_EXFILTRATION, Severity.MEDIUM)
     }
     assert names == {"block_ip", "block_domain", "create_ticket"}
     assert "isolate_host" not in names

@@ -805,10 +805,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
         )
         if containment_needed and (
             not any(item.tool_name in CONTAINMENT_TOOLS for item in rule_actions)
-            or (
-                event_type is EventType.DATA_EXFILTRATION
-                and severity is Severity.MEDIUM
-            )
+            or (event_type is EventType.DATA_EXFILTRATION and severity is Severity.MEDIUM)
         ):
             # DATA_EXFIL MEDIUM stays conservative (no L3 on the default plan).
             # Coverage / ticket-only fallback still needs isolate_host + disable_account.
@@ -1534,8 +1531,7 @@ def _ip_summary(ip: IPEntity) -> dict[str, Any]:
 def _entities_summary(entities: EntitySet) -> dict[str, Any]:
     return {
         "accounts": [
-            {"username": entity.username or entity.entity_id}
-            for entity in entities.accounts
+            {"username": entity.username or entity.entity_id} for entity in entities.accounts
         ],
         "hosts": [_host_summary(entity) for entity in entities.hosts],
         "ips": [_ip_summary(entity) for entity in entities.ips],

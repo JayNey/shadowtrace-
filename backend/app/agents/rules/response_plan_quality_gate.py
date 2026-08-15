@@ -199,9 +199,7 @@ def _build_coverage_candidate(prototype: _CandidateT, need: EntityCoverageNeed) 
             return cls(**kwargs)  # type: ignore[misc]
         except TypeError:
             continue
-    raise TypeError(
-        f"cannot construct coverage candidate for {need.tool_name} from {cls.__name__}"
-    )
+    raise TypeError(f"cannot construct coverage candidate for {need.tool_name} from {cls.__name__}")
 
 
 def _merge_entity_coverage(
