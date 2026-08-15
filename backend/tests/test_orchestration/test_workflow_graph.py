@@ -63,6 +63,7 @@ from app.orchestration.checkpointer import (
 from app.orchestration.graph_state import InvestigationState
 from app.orchestration.replan_handler import MAX_REPLAN_COUNT
 from app.orchestration.workflow_graph import (
+    GRAPH_EXECUTABLE_AGENTS,
     NODE_APPROVAL,
     NODE_APPROVAL_WAIT,
     NODE_CLOSE,
@@ -78,6 +79,7 @@ from app.orchestration.workflow_graph import (
     NODE_RESPONSE,
     NODE_RISK,
     NODE_VERIFY,
+    P0_GRAPH_NODE_TO_AGENT,
     P0_NODE_SEQUENCE,
     ROUTE_CLOSE,
     ROUTE_CONTINUE,
@@ -1454,6 +1456,44 @@ def test_required_workflow_services_reject_none(service_name: str) -> None:
 
     with pytest.raises(ValueError, match=service_name):
         build_investigation_graph(_agents(), services)
+
+
+_ORCHESTRATION_ONLY_P0_NODES = frozenset(
+    {
+        NODE_FP_ADJUDICATION,
+        NODE_APPROVAL,
+        NODE_EXECUTE,
+        NODE_CLOSE,
+    }
+)
+
+
+def test_graph_executable_agents_match_compiled_p0_agent_nodes() -> None:
+    """ISSUE-986: mapping keys are P0 agent nodes that compile actually registers."""
+    graph = build_investigation_graph(_agents(), _services())
+    compiled_nodes = set(graph.get_graph().nodes)
+    assert set(P0_GRAPH_NODE_TO_AGENT) == set(P0_NODE_SEQUENCE) - _ORCHESTRATION_ONLY_P0_NODES
+    assert GRAPH_EXECUTABLE_AGENTS == frozenset(P0_GRAPH_NODE_TO_AGENT.values())
+    for node in P0_NODE_SEQUENCE:
+        assert node in compiled_nodes
+        if node in _ORCHESTRATION_ONLY_P0_NODES:
+            assert node not in P0_GRAPH_NODE_TO_AGENT
+        else:
+            assert P0_GRAPH_NODE_TO_AGENT[node] in GRAPH_EXECUTABLE_AGENTS
+    assert NODE_RAG not in compiled_nodes
+    assert NODE_RAG not in P0_GRAPH_NODE_TO_AGENT
+
+
+@pytest.mark.parametrize(
+    "agent_name",
+    ["triage_agent", "planner_agent", "evidence_agent", "risk_agent", "report_agent"],
+)
+def test_build_investigation_graph_rejects_missing_p0_graph_agent(agent_name: str) -> None:
+    agents = _agents()
+    agents.pop(agent_name)
+    with pytest.raises(ValueError, match="missing required P0 graph agents") as exc:
+        build_investigation_graph(agents, _services())
+    assert agent_name in str(exc.value)
 
 
 @dataclass

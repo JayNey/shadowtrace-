@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
+import textwrap
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -926,6 +929,54 @@ def test_validate_execution_plan_drops_memory_and_tool_agent_steps() -> None:
 def test_plan_step_assignable_excludes_memory_and_tool_agent() -> None:
     assert "memory_agent" not in PLAN_STEP_ASSIGNABLE_AGENTS
     assert "tool_agent" not in PLAN_STEP_ASSIGNABLE_AGENTS
+
+
+def _super_agent_plan_step_match_arms() -> frozenset[str]:
+    """String ``case`` arms of SuperAgent._execute_single_step (ISSUE-986)."""
+    from app.agents.super_agent import SuperAgent
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(SuperAgent._execute_single_step)))
+    arms: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Match):
+            continue
+        for case in node.cases:
+            pattern = case.pattern
+            if isinstance(pattern, ast.MatchValue) and isinstance(pattern.value, ast.Constant):
+                value = pattern.value.value
+                if isinstance(value, str):
+                    arms.add(value)
+    return frozenset(arms)
+
+
+def test_plan_step_assignable_agents_match_super_agent_dispatch() -> None:
+    """Assignable set must equal SuperAgent match arms, not a duplicated frozenset."""
+    assert PLAN_STEP_ASSIGNABLE_AGENTS == _super_agent_plan_step_match_arms()
+
+
+def test_graph_executable_agents_align_with_p0_node_sequence() -> None:
+    """GRAPH_EXECUTABLE_AGENTS excludes hooks and optional rag (ISSUE-986)."""
+    from app.orchestration.workflow_graph import GRAPH_EXECUTABLE_AGENTS
+
+    assert "memory_agent" not in GRAPH_EXECUTABLE_AGENTS
+    assert "tool_agent" not in GRAPH_EXECUTABLE_AGENTS
+    assert "storyline_service" not in GRAPH_EXECUTABLE_AGENTS
+    assert "react" not in GRAPH_EXECUTABLE_AGENTS
+    # Fixed graph nodes (triage/planner/verify) are not plan-step assignable.
+    assert {"triage_agent", "planner_agent", "verify_agent"}.issubset(GRAPH_EXECUTABLE_AGENTS)
+    assert {"triage_agent", "planner_agent", "verify_agent"}.isdisjoint(PLAN_STEP_ASSIGNABLE_AGENTS)
+    assert PLAN_STEP_ASSIGNABLE_AGENTS & GRAPH_EXECUTABLE_AGENTS == frozenset(
+        {
+            "evidence_agent",
+            "graph_agent",
+            "risk_agent",
+            "response_agent",
+            "report_agent",
+        }
+    )
+    # rag_agent is plan-assignable but only wired as optional post-evidence node.
+    assert "rag_agent" in PLAN_STEP_ASSIGNABLE_AGENTS
+    assert "rag_agent" not in GRAPH_EXECUTABLE_AGENTS
 
 
 def test_default_plans_only_use_assignable_agents() -> None:

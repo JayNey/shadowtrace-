@@ -168,6 +168,29 @@ P0_NODE_SEQUENCE = (
     NODE_CLOSE,
 )
 
+# P0 LangGraph nodes that invoke an Agent class (ISSUE-305 / ISSUE-986).
+# Orchestration-only nodes (approval, execute, close, fp_adjudication) are omitted.
+# ``rag_node`` is optional wiring, not in ``P0_NODE_SEQUENCE``, and is not mapped here.
+P0_GRAPH_NODE_TO_AGENT: dict[str, str] = {
+    NODE_TRIAGE: "triage_agent",
+    NODE_PLANNER: "planner_agent",
+    NODE_EVIDENCE: "evidence_agent",
+    NODE_GRAPH: "graph_agent",
+    NODE_RISK: "risk_agent",
+    NODE_RESPONSE: "response_agent",
+    NODE_VERIFY: "verify_agent",
+    NODE_REPORT: "report_agent",
+}
+
+GRAPH_EXECUTABLE_AGENTS: frozenset[str] = frozenset(
+    P0_GRAPH_NODE_TO_AGENT[node] for node in P0_NODE_SEQUENCE if node in P0_GRAPH_NODE_TO_AGENT
+)
+
+# Agents always required when assembling the investigation graph.
+_P0_REQUIRED_GRAPH_AGENTS: frozenset[str] = GRAPH_EXECUTABLE_AGENTS - frozenset(
+    {"graph_agent", "response_agent", "verify_agent"}
+)
+
 ROUTE_CLOSE = "close"
 ROUTE_MANUAL_HOLD = "manual_hold"
 ROUTE_INVESTIGATE = "investigate"
@@ -945,6 +968,10 @@ def build_investigation_graph(
     missing_services = [name for name in required_services if services.get(name) is None]
     if missing_services:
         raise ValueError(f"missing required workflow services: {', '.join(missing_services)}")
+
+    missing_agents = sorted(_P0_REQUIRED_GRAPH_AGENTS - agents.keys())
+    if missing_agents:
+        raise ValueError(f"missing required P0 graph agents: {', '.join(missing_agents)}")
 
     triage_agent = cast(_AgentLike, agents["triage_agent"])
     planner_agent = cast(PlannerAgent, agents["planner_agent"])
@@ -2650,6 +2677,8 @@ __all__ = [
     "NODE_TRIAGE",
     "NODE_VERIFY",
     "NODE_WRITEBACK_RECOVERY",
+    "GRAPH_EXECUTABLE_AGENTS",
+    "P0_GRAPH_NODE_TO_AGENT",
     "P0_NODE_SEQUENCE",
     "build_investigation_graph",
     "build_initial_investigation_state",
