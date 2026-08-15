@@ -7,7 +7,8 @@ ISSUE-203 quality gates (hard failures):
 - Terminal ``REPORTING``/``CLOSED`` with non-empty report
 - ``response_agent``/``verify_agent`` traces (snake_case agent_name)
 - Response plan covers enforced ``GROUND_TRUTH.must_response_targets`` (DB host gated)
-- Mock writeback ``CONFIRMED(readback_verified)`` + terminal outbox enqueued
+- Mock terminal writeback ``CONFIRMED`` + terminal outbox enqueued (certification language
+  exports raw ``confirmation_evidence`` / ``simulated``; see ISSUE-351)
 - ``sunset_shims_used`` must be empty; intentional adversarial DI is reported separately.
 
 Default runner timeout: ~120s (Mock). Override with ``ADVERSARIAL_FULL_LOOP_TIMEOUT_S``
@@ -42,6 +43,7 @@ from app.services.context_service import EventContextStore
 from app.services.event_service import EventService
 from tests.adversarial.audit_report import (
     AdversarialAuditChecks,
+    build_writeback_certification,
     coerce_quality_scores,
     normalize_enum,
     resolve_observed_severity,
@@ -442,6 +444,14 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         triage_ctx=triage_ctx if isinstance(triage_ctx, dict) else None,
     )
 
+    writeback_certification = build_writeback_certification(
+        confirmation_evidence=loop_result.writeback_confirmation_evidence,
+        simulated=loop_result.writeback_simulated,
+        disposition_is_mock=loop_result.disposition_is_mock,
+        receipt_status=loop_result.writeback_receipt_status,
+        mock_cert_strict=loop_result.mock_cert_strict,
+    )
+
     async with session_factory() as session:
         action_count = await session.scalar(
             select(func.count()).select_from(orm.Action).where(orm.Action.event_id == event_id)
@@ -487,6 +497,7 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         disposition_gaps=tuple(disposition_gaps_enforced),
         entity_signal_audit=entity_audit,
         indicator_signal_audit=indicator_audit,
+        writeback_certification=writeback_certification,
     )
     report = checks.to_dict()
     obs = loop_result.observability
@@ -506,6 +517,11 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         "verification_present": loop_result.verification_present,
         "verify_agent_traced": loop_result.verify_agent_traced,
         "writeback_confirmed": loop_result.writeback_confirmed,
+        "writeback_confirmation_evidence": loop_result.writeback_confirmation_evidence,
+        "writeback_simulated": loop_result.writeback_simulated,
+        "writeback_receipt_status": loop_result.writeback_receipt_status,
+        "disposition_is_mock": loop_result.disposition_is_mock,
+        "mock_cert_strict": loop_result.mock_cert_strict,
         "terminal_outbox_enqueued": loop_result.terminal_outbox_enqueued,
         "response_actions_present": int(action_count or 0) > 0,
         "tool_call_count": loop_result.tool_call_count,
@@ -618,8 +634,14 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     assert prod["tools_invoked"], "expected tool_call_log rows from evidence/verify/execute"
     assert prod["llm_invoked"], "expected llm_call_log rows from live/mock LLM agents"
     assert prod["disposition_writeback_ok"], (
-        "expected CONFIRMED+readback_verified disposition receipt on Mock path"
+        "expected CONFIRMED terminal disposition receipt on Mock path "
+        f"(certification={writeback_certification['certification_label']!r})"
     )
+    assert writeback_certification["certification_label"] != "readback_verified", (
+        "ISSUE-351: Mock scorecard must not label simulated receipts as readback_verified"
+    )
+    assert "writeback=simulated" in report["verdict_for_human"]
+    assert "readback_verified" not in report["verdict_for_human"]
     assert "AdversarialDispositionSyncService" not in loop_result.adversarial_di_overrides
     assert "AdversarialTerminalDispositionResolver" not in loop_result.adversarial_di_overrides
     assert any(note == "approval_resume: production callback" for note in loop_result.notes)

@@ -51,6 +51,11 @@ def strict_disposition_targets_enabled() -> bool:
     return _truthy_env("ADVERSARIAL_STRICT_DISPOSITION_TARGETS")
 
 
+def mock_writeback_cert_strict_enabled() -> bool:
+    """Optional mock_cert profile: enforce non-mock evidence tiers on Mock receipts (ISSUE-351)."""
+    return _truthy_env("ADVERSARIAL_MOCK_WRITEBACK_CERT_STRICT")
+
+
 def _source_object_id(ref) -> str:
     if ref is None:
         return ""

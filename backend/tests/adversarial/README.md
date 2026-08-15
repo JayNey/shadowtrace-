@@ -86,7 +86,7 @@ This suite has **two layers**:
 | Layer | Role | Pass means |
 |-------|------|------------|
 | **Plumbing** | Agents run, traces persist, tools/LLM logs exist | Wiring works — not capability proof |
-| **Quality gate** (`test_agent_adversarial_full_loop.py`, ISSUE-203) | Hard asserts on terminal status, report, disposition targets, Mock writeback, no sunset shims | Production graph reached `REPORTING`/`CLOSED` with aligned containment + readback_verified |
+| **Quality gate** (`test_agent_adversarial_full_loop.py`, ISSUE-203) | Hard asserts on terminal status, report, disposition targets, Mock writeback, no sunset shims | Production graph reached `REPORTING`/`CLOSED` with aligned containment + terminal `CONFIRMED` receipt |
 
 Mock full loop typically finishes in **~20–40s** (see artifact `elapsed_s`). Runner default
 timeout is **120s**; set ``ADVERSARIAL_FULL_LOOP_TIMEOUT_S`` for Live runs (default 600s when
@@ -154,7 +154,7 @@ test and call `build_super_agent(scenario_id=None)` from integration fixtures.
 | Test | Artifact | Terminal state |
 |------|----------|----------------|
 | `test_agent_adversarial_audit.py` | `artifacts/latest_audit.json` | `REPORTING` |
-| `test_agent_adversarial_full_loop.py` | `artifacts/latest_full_loop_audit.json` | `CLOSED` + Mock terminal writeback `CONFIRMED(readback_verified)` + aligned response targets |
+| `test_agent_adversarial_full_loop.py` | `artifacts/latest_full_loop_audit.json` | `CLOSED` + Mock terminal writeback `CONFIRMED` (raw `confirmation_evidence` / `simulated` exported; certification label `mock_simulated` or `adapter_acknowledged`, never live `readback_verified`) + aligned response targets |
 
 Full-loop artifact includes `response_plan_actions`, `sunset_shims_used` (must be
 empty), explicit `adversarial_di_overrides`, and `disposition_target_gaps`. Sunset
@@ -201,6 +201,12 @@ Scorecard mode is explicit via ``AdversarialAuditChecks.audit_mode`` (ISSUE-319)
 | **FAIL** | Mode gate failed (analysis: no reporting; full-loop: no CLOSED, or no reporting) |
 
 ``disposition_writeback_ok`` and other ``production_checks`` are separate hard gates; they do **not** override ``verdict_for_human``.
+
+### Writeback certification language (ISSUE-351)
+
+Mock adversarial scorecards export terminal receipt **raw** fields ``confirmation_evidence`` and ``simulated`` under ``writeback_certification``. Outward labels use ``mock_simulated`` or ``adapter_acknowledged`` — **never** equate Mock ``simulated=true`` receipts with live ``readback_verified`` / 「写回已验证」. Full-loop ``verdict_for_human`` annotates ``writeback=simulated`` on Mock paths.
+
+Optional strict profile (default off): set ``ADVERSARIAL_MOCK_WRITEBACK_CERT_STRICT=1`` to also require strong ``confirmation_evidence`` tiers on Mock receipts (independent of ``validate_closed_gate`` mock branch).
 
 Analysis audit (`test_agent_adversarial_audit.py`) uses ``build_analysis_pipeline(scenario_id=None)``
 (no DI override). Full-loop quality gate uses production graph wiring with

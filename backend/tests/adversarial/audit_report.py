@@ -13,7 +13,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 from app.models.agent_io import CollectionStatus
-from app.models.enums import EventStatus, EventType, FinalVerdict, ReportQuality, Severity
+from app.models.enums import (
+    ConfirmationEvidence,
+    EventStatus,
+    EventType,
+    FinalVerdict,
+    ReportQuality,
+    Severity,
+)
 from app.models.evidence import SKIP_GAP_REASONS, skipped_entity_description
 from tests.adversarial.helpers import SignalAuditResult, disposition_gap_target_label
 
@@ -22,6 +29,13 @@ AdversarialAuditMode = Literal["analysis_only", "full_loop"]
 # ISSUE-065 / ISSUE-347: informative only — never folded into scored PASS dimensions.
 OUTPUT_QUALITY_PASS_THRESHOLD = 0.75
 _EVAL_ERROR_REASON_PREFIX = "eval_error_defaulted"
+
+_STRONG_TERMINAL_CONFIRMATION_EVIDENCE = frozenset(
+    {
+        ConfirmationEvidence.READBACK_VERIFIED.value,
+        ConfirmationEvidence.MANUAL_CONFIRMED.value,
+    }
+)
 
 _ANALYSIS_SCORED_CHECKS = frozenset(
     {
@@ -85,6 +99,7 @@ class AdversarialAuditChecks:
     disposition_gaps: tuple[str, ...] = ()
     entity_signal_audit: SignalAuditResult | None = None
     indicator_signal_audit: SignalAuditResult | None = None
+    writeback_certification: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.audit_mode not in {"analysis_only", "full_loop"}:
@@ -186,6 +201,7 @@ class AdversarialAuditChecks:
                 checks,
                 audit_mode=self.audit_mode,
                 quality_unscored=quality_unscored,
+                writeback_certification=self.writeback_certification,
             ),
             "unscored": {
                 "output_quality": build_output_quality_unscored(
@@ -195,6 +211,8 @@ class AdversarialAuditChecks:
                 **quality_unscored,
             },
         }
+        if self.writeback_certification is not None:
+            payload["writeback_certification"] = self.writeback_certification
         return payload
 
     def write_json(self, path: Path) -> Path:
@@ -407,6 +425,7 @@ def _human_verdict(
     *,
     audit_mode: AdversarialAuditMode = "analysis_only",
     quality_unscored: dict[str, Any] | None = None,
+    writeback_certification: dict[str, Any] | None = None,
 ) -> str:
     side_notes = _pass_side_notes(quality_unscored or {})
     if audit_mode == "full_loop" and not checks.get("closed_reached"):
@@ -432,14 +451,131 @@ def _human_verdict(
                 "(see evidence_collection_ok)"
             )
         if audit_mode == "full_loop":
-            return (
+            return _annotate_writeback_verdict(
                 "PASS — full loop reached CLOSED with expected verdict and adequate risk score"
-                + side_notes
+                + side_notes,
+                writeback_certification,
             )
         return "PASS — agent flagged expected verdict with adequate risk score" + side_notes
     if checks.get("risk_score_at_least_minimum"):
         return "PARTIAL — high risk detected but verdict/type may differ; review report"
     return "WEAK — pipeline completed but under-scored or wrong verdict"
+
+
+def _annotate_writeback_verdict(
+    base: str,
+    writeback_certification: dict[str, Any] | None,
+) -> str:
+    """Append writeback certification language without overstating Mock receipts (ISSUE-351)."""
+    if writeback_certification is None:
+        return base
+    label = writeback_certification.get("certification_label")
+    simulated = writeback_certification.get("simulated")
+    disposition_is_mock = writeback_certification.get("disposition_is_mock")
+    if disposition_is_mock or simulated is True:
+        cert_token = label if isinstance(label, str) and label else "mock_simulated"
+        return f"{base} (writeback=simulated; certification={cert_token})"
+    if isinstance(label, str) and label:
+        return f"{base} (certification={label})"
+    return base
+
+
+def build_writeback_certification(
+    *,
+    confirmation_evidence: str | None,
+    simulated: bool | None,
+    disposition_is_mock: bool,
+    receipt_status: str | None = None,
+    mock_cert_strict: bool = False,
+) -> dict[str, Any]:
+    """Export raw terminal receipt facts and a scorecard-safe certification label."""
+    label = _writeback_certification_label(
+        confirmation_evidence=confirmation_evidence,
+        simulated=simulated,
+        disposition_is_mock=disposition_is_mock,
+    )
+    tier_ok = writeback_tier_ok(
+        confirmation_evidence=confirmation_evidence,
+        simulated=simulated,
+        disposition_is_mock=disposition_is_mock,
+        mock_cert_strict=mock_cert_strict,
+    )
+    return {
+        "confirmation_evidence": confirmation_evidence,
+        "simulated": simulated,
+        "disposition_is_mock": disposition_is_mock,
+        "receipt_status": receipt_status,
+        "certification_label": label,
+        "tier_ok": tier_ok,
+        "mock_cert_strict": mock_cert_strict,
+    }
+
+
+def _writeback_certification_label(
+    *,
+    confirmation_evidence: str | None,
+    simulated: bool | None,
+    disposition_is_mock: bool,
+) -> str:
+    """Map receipt facts to outward language — never equate Mock simulated with live verified."""
+    if disposition_is_mock or simulated is True:
+        if confirmation_evidence == ConfirmationEvidence.ADAPTER_ACKNOWLEDGED.value:
+            return "adapter_acknowledged"
+        return "mock_simulated"
+    if confirmation_evidence == ConfirmationEvidence.READBACK_VERIFIED.value:
+        return "readback_verified"
+    if confirmation_evidence == ConfirmationEvidence.MANUAL_CONFIRMED.value:
+        return "manual_confirmed"
+    if confirmation_evidence:
+        return confirmation_evidence
+    return "unknown"
+
+
+def writeback_tier_ok(
+    *,
+    confirmation_evidence: str | None,
+    simulated: bool | None,
+    disposition_is_mock: bool,
+    mock_cert_strict: bool,
+) -> bool:
+    """Optional mock_cert / live evidence-tier check (ISSUE-351).
+
+    Mock default skips enforcement. ``mock_cert_strict`` and non-mock paths
+    require strong confirmation evidence; live also rejects ``simulated is not False``.
+    """
+    if disposition_is_mock and not mock_cert_strict:
+        return True
+    if disposition_is_mock and mock_cert_strict:
+        return confirmation_evidence in _STRONG_TERMINAL_CONFIRMATION_EVIDENCE
+    if simulated is not False:
+        return False
+    return confirmation_evidence in _STRONG_TERMINAL_CONFIRMATION_EVIDENCE
+
+
+def evaluate_writeback_confirmed(
+    *,
+    terminal_delivered: bool,
+    confirmed_receipt: bool,
+    confirmation_evidence: str | None,
+    simulated: bool | None,
+    disposition_is_mock: bool,
+    mock_cert_strict: bool,
+) -> bool:
+    """Plumbing flag for ``disposition_writeback_ok`` (ISSUE-351).
+
+    Mock default: unique delivered CONFIRMED terminal is enough (CLOSED stays
+    mock-lenient). Live and ``mock_cert_strict`` also require ``writeback_tier_ok``.
+    """
+    if not (terminal_delivered and confirmed_receipt):
+        return False
+    if disposition_is_mock and not mock_cert_strict:
+        return True
+    return writeback_tier_ok(
+        confirmation_evidence=confirmation_evidence,
+        simulated=simulated,
+        disposition_is_mock=disposition_is_mock,
+        mock_cert_strict=mock_cert_strict,
+    )
 
 
 def normalize_enum(value: Any) -> str | None:

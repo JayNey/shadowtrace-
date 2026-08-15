@@ -23,14 +23,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.auth import Principal
-from app.core.config import get_settings
+from app.core.config import get_settings, is_mock_disposition_mode
 from app.db import models as orm
 from app.models.action import TERMINAL_DISPOSITION_TOOL, Action
 from app.models.agent_io import ResponsePlanGeneratedBy
 from app.models.enums import (
     ActionExecutionPhase,
     ActionStatus,
-    ConfirmationEvidence,
     DispositionIntentKind,
     EventStatus,
     ExecutionJobStatus,
@@ -44,6 +43,8 @@ from app.services.report_input_builder import (
     _load_actions_from_orm,
     overlay_response_plan_from_orm,
 )
+from tests.adversarial.audit_report import evaluate_writeback_confirmed
+from tests.adversarial.helpers import mock_writeback_cert_strict_enabled
 from tests.integration.autonomous_e2e.helpers import (
     ObservabilitySnapshot,
     collect_observability,
@@ -63,6 +64,24 @@ _REMOVED_SHIMS = (
 _DEFAULT_MOCK_TIMEOUT_S = 120.0
 _DEFAULT_LIVE_TIMEOUT_S = 600.0
 _ADVERSARIAL_DI_OVERRIDES = ("XdrManagedVerifyToolExecutor",)
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalWritebackSnapshot:
+    """Terminal EVENT_STATUS_UPDATE receipt facts for adversarial scorecards."""
+
+    writeback_confirmed: bool
+    terminal_outbox_enqueued: bool
+    confirmation_evidence: str | None
+    simulated: bool | None
+    receipt_status: str | None
+    disposition_is_mock: bool
+    mock_cert_strict: bool
+
+
+def resolve_disposition_is_mock() -> bool:
+    """Match production CLOSED projection: disposition_mode allowlist only (ISSUE-227/333/351)."""
+    return is_mock_disposition_mode(get_settings().disposition_mode)
 
 
 def resolve_full_loop_timeout_s() -> float:
@@ -86,6 +105,11 @@ class ProductionFullLoopResult:
     observability: ObservabilitySnapshot
     writeback_confirmed: bool
     terminal_outbox_enqueued: bool
+    writeback_confirmation_evidence: str | None
+    writeback_simulated: bool | None
+    writeback_receipt_status: str | None
+    disposition_is_mock: bool
+    mock_cert_strict: bool
     response_plan_present: bool
     verification_present: bool
     response_agent_traced: bool
@@ -221,10 +245,12 @@ async def _count_tool_and_llm_calls(
     return tool_count, llm_count
 
 
-async def _writeback_flags(
+async def _terminal_writeback_snapshot(
     session_factory: async_sessionmaker[AsyncSession],
     event_id: str,
-) -> tuple[bool, bool]:
+) -> TerminalWritebackSnapshot:
+    disposition_is_mock = resolve_disposition_is_mock()
+    mock_cert_strict = mock_writeback_cert_strict_enabled()
     async with session_factory() as session:
         current_revision = await session.scalar(
             select(func.max(orm.Action.plan_revision)).where(
@@ -233,32 +259,21 @@ async def _writeback_flags(
             )
         )
         if current_revision is None:
-            return False, False
+            return TerminalWritebackSnapshot(
+                writeback_confirmed=False,
+                terminal_outbox_enqueued=False,
+                confirmation_evidence=None,
+                simulated=None,
+                receipt_status=None,
+                disposition_is_mock=disposition_is_mock,
+                mock_cert_strict=mock_cert_strict,
+            )
         active_terminal_filters = (
             orm.DispositionOutbox.event_id == event_id,
             orm.DispositionOutbox.intent_kind == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
             orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
             orm.Action.plan_revision == current_revision,
             orm.Action.superseded_by_revision.is_(None),
-        )
-        confirmed_count = int(
-            await session.scalar(
-                select(func.count())
-                .select_from(orm.DispositionReceipt)
-                .join(
-                    orm.DispositionOutbox,
-                    orm.DispositionOutbox.writeback_id == orm.DispositionReceipt.writeback_id,
-                )
-                .join(orm.Action, orm.Action.action_id == orm.DispositionOutbox.action_id)
-                .where(
-                    *active_terminal_filters,
-                    orm.DispositionOutbox.delivery_status == OutboxDeliveryStatus.DELIVERED.value,
-                    orm.DispositionReceipt.status == WritebackStatus.CONFIRMED.value,
-                    orm.DispositionReceipt.confirmation_evidence
-                    == ConfirmationEvidence.READBACK_VERIFIED.value,
-                )
-            )
-            or 0
         )
         terminal_outbox_count = int(
             await session.scalar(
@@ -284,9 +299,45 @@ async def _writeback_flags(
             )
             or 0
         )
-    return (
-        confirmed_count == 1 and delivered_terminal_count == 1,
-        terminal_outbox_count == 1,
+        receipt_row = await session.scalar(
+            select(orm.DispositionReceipt)
+            .join(
+                orm.DispositionOutbox,
+                orm.DispositionOutbox.writeback_id == orm.DispositionReceipt.writeback_id,
+            )
+            .join(orm.Action, orm.Action.action_id == orm.DispositionOutbox.action_id)
+            .where(
+                *active_terminal_filters,
+                orm.DispositionOutbox.delivery_status == OutboxDeliveryStatus.DELIVERED.value,
+                orm.DispositionReceipt.status == WritebackStatus.CONFIRMED.value,
+            )
+            .order_by(
+                orm.DispositionReceipt.writeback_id,
+                orm.DispositionReceipt.sequence.desc(),
+            )
+            .limit(1)
+        )
+    confirmation_evidence = receipt_row.confirmation_evidence if receipt_row is not None else None
+    simulated = receipt_row.simulated if receipt_row is not None else None
+    receipt_status = receipt_row.status if receipt_row is not None else None
+    terminal_delivered = delivered_terminal_count == 1 and terminal_outbox_count == 1
+    confirmed_receipt = receipt_row is not None
+    writeback_confirmed = evaluate_writeback_confirmed(
+        terminal_delivered=terminal_delivered,
+        confirmed_receipt=confirmed_receipt,
+        confirmation_evidence=confirmation_evidence,
+        simulated=simulated,
+        disposition_is_mock=disposition_is_mock,
+        mock_cert_strict=mock_cert_strict,
+    )
+    return TerminalWritebackSnapshot(
+        writeback_confirmed=writeback_confirmed,
+        terminal_outbox_enqueued=terminal_outbox_count == 1,
+        confirmation_evidence=confirmation_evidence,
+        simulated=simulated,
+        receipt_status=receipt_status,
+        disposition_is_mock=disposition_is_mock,
+        mock_cert_strict=mock_cert_strict,
     )
 
 
@@ -716,7 +767,7 @@ async def run_production_full_loop(
     )
 
     observability = await collect_observability(session_factory, event_id)
-    writeback_confirmed, terminal_outbox = await _writeback_flags(session_factory, event_id)
+    writeback_snapshot = await _terminal_writeback_snapshot(session_factory, event_id)
     tool_calls, llm_calls = await _count_tool_and_llm_calls(session_factory, event_id)
 
     async with session_factory() as session:
@@ -743,8 +794,13 @@ async def run_production_full_loop(
         approval_rounds=approval_rounds,
         approved_action_ids=tuple(approved_ids),
         observability=observability,
-        writeback_confirmed=writeback_confirmed,
-        terminal_outbox_enqueued=terminal_outbox,
+        writeback_confirmed=writeback_snapshot.writeback_confirmed,
+        terminal_outbox_enqueued=writeback_snapshot.terminal_outbox_enqueued,
+        writeback_confirmation_evidence=writeback_snapshot.confirmation_evidence,
+        writeback_simulated=writeback_snapshot.simulated,
+        writeback_receipt_status=writeback_snapshot.receipt_status,
+        disposition_is_mock=writeback_snapshot.disposition_is_mock,
+        mock_cert_strict=writeback_snapshot.mock_cert_strict,
         response_plan_present=response_plan_present,
         verification_present=verification_present,
         response_agent_traced=response_agent_traced,
