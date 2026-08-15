@@ -170,13 +170,12 @@ P0_NODE_SEQUENCE = (
 
 # P0 LangGraph nodes that invoke an Agent class (ISSUE-305 / ISSUE-986).
 # Orchestration-only nodes (approval, execute, close, fp_adjudication) are omitted.
-# ``rag_node`` is optional wiring and not part of ``P0_NODE_SEQUENCE``.
+# ``rag_node`` is optional wiring, not in ``P0_NODE_SEQUENCE``, and is not mapped here.
 P0_GRAPH_NODE_TO_AGENT: dict[str, str] = {
     NODE_TRIAGE: "triage_agent",
     NODE_PLANNER: "planner_agent",
     NODE_EVIDENCE: "evidence_agent",
     NODE_GRAPH: "graph_agent",
-    NODE_RAG: "rag_agent",
     NODE_RISK: "risk_agent",
     NODE_RESPONSE: "response_agent",
     NODE_VERIFY: "verify_agent",
@@ -184,9 +183,7 @@ P0_GRAPH_NODE_TO_AGENT: dict[str, str] = {
 }
 
 GRAPH_EXECUTABLE_AGENTS: frozenset[str] = frozenset(
-    P0_GRAPH_NODE_TO_AGENT[node]
-    for node in P0_NODE_SEQUENCE
-    if node in P0_GRAPH_NODE_TO_AGENT
+    P0_GRAPH_NODE_TO_AGENT[node] for node in P0_NODE_SEQUENCE if node in P0_GRAPH_NODE_TO_AGENT
 )
 
 # Agents always required when assembling the investigation graph.

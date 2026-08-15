@@ -868,8 +868,8 @@ class ToolAgentInput(AgentInput):
 
 
 # Agents that may appear in ``ExecutionPlan.steps`` and are honored by
-# SuperAgent within the planner node. Distinct from ``GRAPH_EXECUTABLE_AGENTS``
-# in ``app.orchestration.workflow_graph`` (fixed LangGraph P0 nodes).
+# SuperAgent within the planner node. Distinct from the P0 LangGraph agent set
+# ``app.orchestration.workflow_graph.GRAPH_EXECUTABLE_AGENTS``.
 # ``memory_agent`` / ``tool_agent`` are intentionally excluded (ISSUE-305).
 PLAN_STEP_ASSIGNABLE_AGENTS: frozenset[str] = frozenset(
     {
