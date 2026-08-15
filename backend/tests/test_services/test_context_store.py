@@ -386,6 +386,89 @@ async def test_refresh_closed_snapshot_preserves_monotonic_analysis_completion(
 
 
 @pytest.mark.asyncio
+async def test_refresh_closed_snapshot_preserves_orm_report_quality(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-348: CLOSED freeze must stamp ORM report_quality onto the durable snapshot."""
+    from datetime import UTC, datetime
+
+    from app.models.ids import report_id_for_event
+
+    now = datetime.now(UTC)
+    event_id = await _seed_event(session_factory, status="closed")
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.Report(
+                    report_id=report_id_for_event(event_id),
+                    event_id=event_id,
+                    title="closed freeze quality",
+                    summary="fixture",
+                    sections=[],
+                    final_verdict="none",
+                    risk_score=0,
+                    severity="low",
+                    version=1,
+                    generated_by="test",
+                    report_quality="degraded_template",
+                    generated_at=now,
+                    updated_at=now,
+                )
+            )
+    await store.init_context(event_id, _summary(event_id, status=EventStatus.CLOSED))
+    await store.refresh_closed_snapshot(event_id)
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, event_id)
+        assert row is not None
+        assert row.event_context_snapshot is not None
+        assert row.event_context_snapshot["report_quality"] == "degraded_template"
+
+
+@pytest.mark.asyncio
+async def test_refresh_closed_snapshot_preserves_overlay_report_quality(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-348: overlay-only quality survives freeze when no report row exists."""
+    event_id = await _seed_event(
+        session_factory,
+        status="closed",
+        snapshot={"report_quality": "quick_close"},
+    )
+    await store.init_context(event_id, _summary(event_id, status=EventStatus.CLOSED))
+    await store.refresh_closed_snapshot(event_id)
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, event_id)
+        assert row is not None
+        assert row.event_context_snapshot is not None
+        assert row.event_context_snapshot["report_quality"] == "quick_close"
+
+
+@pytest.mark.asyncio
+async def test_refresh_closed_snapshot_skips_invalid_report_quality(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-348: invalid overlay grades are skipped, not rewritten as complete."""
+    event_id = await _seed_event(
+        session_factory,
+        status="closed",
+        snapshot={"report_quality": "not_a_grade"},
+    )
+    await store.init_context(event_id, _summary(event_id, status=EventStatus.CLOSED))
+    await store.refresh_closed_snapshot(event_id)
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, event_id)
+        assert row is not None
+        assert row.event_context_snapshot is not None
+        assert row.event_context_snapshot.get("report_quality") not in {
+            "complete",
+            "not_a_grade",
+        }
+
+
+@pytest.mark.asyncio
 async def test_analysis_only_complete_atomic_write_rejects_stale_false(
     store: EventContextStore,
     session_factory: async_sessionmaker[AsyncSession],

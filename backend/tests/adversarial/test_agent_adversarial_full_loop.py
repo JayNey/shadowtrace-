@@ -446,7 +446,18 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
             select(func.count()).select_from(orm.Action).where(orm.Action.event_id == event_id)
         )
         report_row = await session.scalar(select(orm.Report).where(orm.Report.event_id == event_id))
+        se_row = await session.get(orm.SecurityEvent, event_id)
+        durable_snapshot = (
+            dict(se_row.event_context_snapshot)
+            if se_row is not None and isinstance(se_row.event_context_snapshot, dict)
+            else {}
+        )
     report_sections = list(report_row.sections or []) if report_row is not None else []
+    snapshot_quality = durable_snapshot.get("report_quality")
+    orm_quality = str(report_row.report_quality) if report_row is not None else None
+    if report_row is not None:
+        assert snapshot_quality == orm_quality
+    report_quality = str(snapshot_quality) if snapshot_quality is not None else orm_quality
 
     checks = AdversarialAuditChecks(
         ground_truth=GROUND_TRUTH,
@@ -458,7 +469,7 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         entities_found=entities_found,
         indicators_found=indicators_found,
         report_excerpt=_report_excerpt(report_ctx),
-        report_quality=str(report_row.report_quality) if report_row is not None else None,
+        report_quality=report_quality,
         triage_summary=str(triage_ctx.get("decision_summary") or ""),
         evidence_collection_status=str(
             evidence_ctx.get("collection_status") or evidence_ctx.get("status") or ""

@@ -322,11 +322,9 @@ class AgentPublicationService:
         event_id: str,
         report: InvestigationReport,
     ) -> None:
-        quality = (
-            report.report_quality.value
-            if hasattr(report.report_quality, "value")
-            else str(report.report_quality or "complete")
-        )
+        from app.services.report_quality import report_quality_from_row
+
+        quality = report_quality_from_row(report.report_quality).value
         try:
             await self._event_service.merge_report_quality_context_snapshot(
                 event_id,

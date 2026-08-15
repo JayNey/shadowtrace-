@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import orjson
+import pytest
 
 from app.models.agent_io import (
     AttackStoryline,
@@ -161,6 +162,11 @@ def test_merge_report_quality_into_snapshot() -> None:
     snapshot = merge_report_quality_into_snapshot({"report_generated": True}, "degraded_template")
     assert snapshot["report_quality"] == "degraded_template"
     assert snapshot["report_generated"] is True
+
+
+def test_merge_report_quality_into_snapshot_rejects_invalid() -> None:
+    with pytest.raises(ValueError):
+        merge_report_quality_into_snapshot({}, "not_a_grade")
 
 
 def test_merge_analysis_only_complete_into_snapshot() -> None:

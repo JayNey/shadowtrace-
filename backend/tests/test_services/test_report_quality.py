@@ -622,6 +622,7 @@ def test_closed_gate_does_not_require_report_quality_complete() -> None:
     from app.models.enums import DispositionPolicy
     from app.models.workflow import TransitionContext, validate_closed_gate
 
+    assert "report_quality" not in TransitionContext.model_fields
     validate_closed_gate(
         TransitionContext(
             disposition_policy=DispositionPolicy.NOT_REQUIRED,
