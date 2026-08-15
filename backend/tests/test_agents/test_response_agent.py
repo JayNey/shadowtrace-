@@ -1959,6 +1959,7 @@ def test_resolve_entity_targets_block_ip_include_internal_ip_opt_in() -> None:
     entities = _exfil_entity_set()
     pairs = resolve_entity_targets("block_ip", entities, include_internal_ip=True)
     targets = {target for _type, target in pairs}
+    assert "198.51.100.77" in targets
     assert "10.44.12.31" in targets
     assert "10.44.20.88" in targets
     assert "198.51.100.44" not in targets
@@ -1972,6 +1973,27 @@ def test_expand_rule_candidates_block_ip_data_exfil_high_excludes_internal() -> 
     block_targets = {item.target for item in candidates if item.tool_name == "block_ip"}
     assert block_targets == {"198.51.100.77"}
     assert "disable_account" in {item.tool_name for item in candidates}
+
+
+@pytest.mark.asyncio
+async def test_rule_fallback_data_exfil_high_block_ip_external_dest_only() -> None:
+    """ISSUE-339: agent.execute rule fallback must not emit RFC1918 or VPN src block_ip."""
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(entities=_exfil_entity_set()))
+    agent = ResponseAgent(
+        llm_client=_FailingLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    block_targets = {action.target for action in plan.actions if action.tool_name == "block_ip"}
+    assert block_targets == {"198.51.100.77"}
+    assert "198.51.100.44" not in block_targets
+    assert "10.44.12.31" not in block_targets
+    assert "10.44.20.88" not in block_targets
+    assert "disable_account" in {action.tool_name for action in plan.actions}
 
 
 @pytest.mark.asyncio
@@ -2026,9 +2048,12 @@ async def test_llm_explicit_internal_block_ip_not_dropped_by_rule_filter() -> No
         capability_manifest=build_mock_capability_manifest(),
     )
     plan = await agent.execute(_agent_input(event_id))
-    block_targets = {action.target for action in plan.actions if action.tool_name == "block_ip"}
+    block_actions = [action for action in plan.actions if action.tool_name == "block_ip"]
+    block_targets = {action.target for action in block_actions}
     assert internal_ip in block_targets
     assert plan.generated_by is ResponsePlanGeneratedBy.LLM
+    internal_block = next(action for action in block_actions if action.target == internal_ip)
+    assert internal_block.action_level is ActionLevel.L2
 
 
 def test_infer_host_kind_skips_ambiguous_and_overbroad_names() -> None:
