@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from app.models.enums import ExecutionSubstate
 from app.services.disposition_sync_service import DispositionSyncService
+
+
+class _ResumeIntent:
+    def __init__(self, intent_id: str) -> None:
+        self.intent_id = intent_id
 
 
 @pytest.mark.asyncio
@@ -41,10 +48,62 @@ async def test_baseline_maybe_resume_skips_manual_resolution_when_unwired() -> N
 
 
 @pytest.mark.asyncio
-async def test_maybe_resume_manual_resolution_enqueues_durable_intent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_maybe_resume_manual_resolution_enqueues_durable_intent() -> None:
     """Wired path must enqueue durable intent instead of calling _resume."""
+    resume_calls: list[str] = []
+    created: list[str] = []
+    scheduled: list[str | None] = []
+
+    async def _resume(event_id: str) -> None:
+        resume_calls.append(event_id)
+
+    class _Manual:
+        async def create_or_replay_resume_intent(self, event_id: str, **_kwargs: object):
+            created.append(event_id)
+            return _ResumeIntent(f"intent-{event_id}")
+
+        def schedule_dispatch(
+            self,
+            *,
+            event_id: str | None = None,
+            intent_id: str | None = None,
+            trigger: str = "unspecified",
+        ) -> None:
+            del event_id, trigger
+            scheduled.append(intent_id)
+
+    class _Session:
+        async def scalar(self, _stmt):  # noqa: ANN001
+            return ExecutionSubstate.MANUAL_RESOLUTION.value
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class _Factory:
+        def __call__(self):
+            return _Session()
+
+    svc = DispositionSyncService(
+        _Factory(),  # type: ignore[arg-type]
+        context_store=None,
+        adapter_registry={},
+        resume_investigation=_resume,
+        manual_resolution=_Manual(),  # type: ignore[arg-type]
+    )
+    await svc._maybe_resume("evt-manual-wired")
+    assert resume_calls == []
+    assert created == ["evt-manual-wired"]
+    assert scheduled == ["intent-evt-manual-wired"]
+
+
+@pytest.mark.asyncio
+async def test_maybe_resume_manual_resolution_requires_intent_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Missing intent_id on resume intent must not silently schedule dispatch."""
     resume_calls: list[str] = []
     created: list[str] = []
     scheduled: list[str] = []
@@ -54,6 +113,7 @@ async def test_maybe_resume_manual_resolution_enqueues_durable_intent(
 
     class _Manual:
         async def create_or_replay_resume_intent(self, event_id: str, **_kwargs: object):
+            del _kwargs
             created.append(event_id)
             return object()
 
@@ -88,7 +148,16 @@ async def test_maybe_resume_manual_resolution_enqueues_durable_intent(
         resume_investigation=_resume,
         manual_resolution=_Manual(),  # type: ignore[arg-type]
     )
-    await svc._maybe_resume("evt-manual-wired")
+    with caplog.at_level(logging.WARNING, logger="app.services.disposition_sync_service"):
+        await svc._maybe_resume("evt-manual-missing-intent")
+    assert created == ["evt-manual-missing-intent"]
     assert resume_calls == []
-    assert created == ["evt-manual-wired"]
-    assert scheduled == ["yes"]
+    assert scheduled == []
+    assert any(
+        "failed to enqueue durable graph resume intent" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        record.exc_info is not None and record.exc_info[0] is AttributeError
+        for record in caplog.records
+    )

@@ -187,8 +187,9 @@ async def _seed_event_and_intent(
     event_id: str,
     intent_id: str,
     intent_status: InvestigationIntentStatus = InvestigationIntentStatus.ENQUEUED,
-    broker_task_id: str = "task-current",
-) -> None:
+    broker_task_id: str | None = None,
+) -> str:
+    resolved_broker_task_id = broker_task_id or f"task-seed-{uuid4().hex[:12]}"
     await _seed_security_event(
         session_factory,
         event_id=event_id,
@@ -206,9 +207,10 @@ async def _seed_event_and_intent(
                     status=intent_status.value,
                     revision=1,
                     attempt=0,
-                    broker_task_id=broker_task_id,
+                    broker_task_id=resolved_broker_task_id,
                 )
             )
+    return resolved_broker_task_id
 
 
 def _wire_super_agent_mock(monkeypatch: pytest.MonkeyPatch, *, calls: dict[str, int]) -> None:

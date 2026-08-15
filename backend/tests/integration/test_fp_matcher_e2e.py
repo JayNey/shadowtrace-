@@ -251,7 +251,7 @@ async def test_fp_matcher_account_anomaly_fp_post_evidence_close(
 ) -> None:
     """account_anomaly_fp closes after evidence + org baseline (ISSUE-114)."""
     from app.data_generators.scenarios import build_scenario
-    from app.data_generators.scenarios.account_anomaly_fp import SCENARIO_ID
+    from app.data_generators.scenarios.account_anomaly_fp import OPS_ACCOUNT, SCENARIO_ID
     from app.mock_xdr.api import create_app
     from app.mock_xdr.state import MockXDRState
 
@@ -276,7 +276,7 @@ async def test_fp_matcher_account_anomaly_fp_post_evidence_close(
         row = (
             await session.scalars(
                 select(orm.SecurityEvent).where(
-                    orm.SecurityEvent.title == "Bulk login by ops account during change window"
+                    orm.SecurityEvent.title == f"Bulk login by {OPS_ACCOUNT} during change window"
                 )
             )
         ).first()
