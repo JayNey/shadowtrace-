@@ -25,7 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.auth import Principal
 from app.core.config import get_settings
 from app.db import models as orm
-from app.models.action import TERMINAL_DISPOSITION_TOOL
+from app.models.action import TERMINAL_DISPOSITION_TOOL, Action
+from app.models.agent_io import ResponsePlanGeneratedBy
 from app.models.enums import (
     ActionExecutionPhase,
     ActionStatus,
@@ -38,6 +39,11 @@ from app.models.enums import (
 )
 from app.services.event_service import EventService
 from app.services.investigation_guidance import record_investigation_workflow_path
+from app.services.report_input_builder import (
+    _coerce_response_plan,
+    _load_actions_from_orm,
+    overlay_response_plan_from_orm,
+)
 from tests.integration.autonomous_e2e.helpers import (
     ObservabilitySnapshot,
     collect_observability,
@@ -91,6 +97,8 @@ class ProductionFullLoopResult:
     resume_attempts: int
     elapsed_s: float
     response_plan_actions: tuple[dict[str, Any], ...]
+    response_plan_generated_by: str | None
+    response_plan_strategy_summary: str | None
     sunset_shims_used: tuple[str, ...]
     adversarial_di_overrides: tuple[str, ...]
     notes: list[str] = field(default_factory=list)
@@ -484,6 +492,15 @@ async def _drain_disposition_outboxes(
     return int(delivered)
 
 
+@dataclass(frozen=True)
+class ArtifactResponsePlanView:
+    """Audit-facing response plan projection for full-loop artifacts (ISSUE-342)."""
+
+    actions: tuple[dict[str, Any], ...]
+    generated_by: str | None
+    strategy_summary: str | None
+
+
 def _normalize_action_rows(raw: Any) -> tuple[dict[str, Any], ...]:
     if not isinstance(raw, dict):
         return ()
@@ -495,6 +512,70 @@ def _normalize_action_rows(raw: Any) -> tuple[dict[str, Any], ...]:
         if isinstance(item, dict):
             rows.append(dict(item))
     return tuple(rows)
+
+
+def _actions_to_rows(actions: list[Action]) -> tuple[dict[str, Any], ...]:
+    return tuple(action.model_dump(mode="json") for action in actions[:50])
+
+
+def build_artifact_response_plan_view(
+    response_plan_raw: Any,
+    *,
+    orm_actions: list[Action] | None = None,
+) -> ArtifactResponsePlanView:
+    """Project generation snapshot + runtime Action statuses for audit artifacts.
+
+    Preserves ``ResponsePlan.actions`` generation-time snapshot semantics in the
+    context store while overlaying execution fields from persisted Action rows,
+    matching the ISSUE-329 report builder path.
+    """
+    plan = _coerce_response_plan(response_plan_raw)
+    if plan is None:
+        return ArtifactResponsePlanView(
+            actions=_normalize_action_rows(response_plan_raw),
+            generated_by=None,
+            strategy_summary=None,
+        )
+
+    generated_by = plan.generated_by.value
+    strategy_summary = plan.strategy_summary or None
+    if orm_actions is not None and plan.generated_by is not ResponsePlanGeneratedBy.RECOVERED:
+        plan = overlay_response_plan_from_orm(plan, orm_actions)
+
+    return ArtifactResponsePlanView(
+        actions=_actions_to_rows(plan.actions),
+        generated_by=generated_by,
+        strategy_summary=strategy_summary,
+    )
+
+
+async def _load_plan_actions_from_orm(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    *,
+    action_ids: set[str],
+) -> list[Action]:
+    if not action_ids:
+        return []
+    async with session_factory() as session:
+        return await _load_actions_from_orm(session, event_id, action_ids=action_ids)
+
+
+async def _resolve_artifact_response_plan_view(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    response_plan_raw: Any,
+) -> ArtifactResponsePlanView:
+    plan = _coerce_response_plan(response_plan_raw)
+    if plan is None:
+        return build_artifact_response_plan_view(response_plan_raw)
+
+    orm_actions = await _load_plan_actions_from_orm(
+        session_factory,
+        event_id,
+        action_ids={action.action_id for action in plan.actions},
+    )
+    return build_artifact_response_plan_view(response_plan_raw, orm_actions=orm_actions)
 
 
 async def run_production_full_loop(
@@ -647,7 +728,11 @@ async def run_production_full_loop(
 
     response_plan_raw = await context_store.get(event_id, "response_plan")
     response_plan_present = bool(response_plan_raw)
-    response_plan_actions = _normalize_action_rows(response_plan_raw)
+    response_plan_view = await _resolve_artifact_response_plan_view(
+        session_factory,
+        event_id,
+        response_plan_raw,
+    )
     verification_present = await _context_flag(context_store, event_id, "verification_result")
     response_agent_traced = "response_agent" in trace_names
     verify_agent_traced = "verify_agent" in trace_names
@@ -670,7 +755,9 @@ async def run_production_full_loop(
         execution_ran=observability.execution_job_count > 0,
         resume_attempts=resume_attempts,
         elapsed_s=elapsed,
-        response_plan_actions=response_plan_actions,
+        response_plan_actions=response_plan_view.actions,
+        response_plan_generated_by=response_plan_view.generated_by,
+        response_plan_strategy_summary=response_plan_view.strategy_summary,
         sunset_shims_used=tuple(sunset_shims_used),
         adversarial_di_overrides=_ADVERSARIAL_DI_OVERRIDES,
         notes=notes,
