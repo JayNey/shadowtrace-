@@ -102,14 +102,13 @@ DEFAULT_RESPONSE_RULES: dict[EventType, dict[Severity, list[ResponseRuleAction]]
     },
     EventType.DATA_EXFILTRATION: {
         Severity.LOW: _actions(_ticket()),
-        # ISSUE-328: isolate_host is a fallback *pool* for EntitySet hosts.
-        # Coverage merge in apply_containment_quality_gate is still required —
-        # adding the tool here is not sufficient when LLM already has other containment.
+        # Conservative MEDIUM plan has no L3. ISSUE-328 coverage still needs
+        # isolate_host / disable_account as a *pool* when containment is required;
+        # ResponseAgent lifts the fallback pool to HIGH in that case.
         Severity.MEDIUM: _actions(
-            ResponseRuleAction("isolate_host", 1),
-            ResponseRuleAction("block_ip", 2),
-            ResponseRuleAction("block_domain", 3),
-            _ticket(4),
+            ResponseRuleAction("block_ip", 1),
+            ResponseRuleAction("block_domain", 2),
+            _ticket(3),
         ),
         Severity.HIGH: _actions(
             ResponseRuleAction("disable_account", 1),

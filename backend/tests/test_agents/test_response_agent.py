@@ -807,6 +807,17 @@ def test_data_exfiltration_high_rules_include_required_tools() -> None:
     assert "notify_security_team" in names
 
 
+def test_data_exfiltration_medium_rules_omit_l3() -> None:
+    """MEDIUM DATA_EXFIL default plan is not the ISSUE-328 coverage pool."""
+    names = {
+        item.tool_name
+        for item in get_rule_actions(EventType.DATA_EXFILTRATION, Severity.MEDIUM)
+    }
+    assert names == {"block_ip", "block_domain", "create_ticket"}
+    assert "isolate_host" not in names
+    assert "disable_account" not in names
+
+
 def test_other_low_medium_never_include_destructive_tools() -> None:
     destructive = {"block_ip", "disable_account", "isolate_host", "quarantine_file"}
     for severity in (Severity.LOW, Severity.MEDIUM):
@@ -2130,6 +2141,98 @@ async def test_llm_partial_containment_still_isolates_entityset_db_host() -> Non
     assert "BACKUP-SRV-01" not in isolate_targets
     assert any(action.tool_name == "disable_account" for action in plan.actions)
     assert "entity_coverage_merge" in plan.strategy_summary
+
+
+@pytest.mark.asyncio
+async def test_data_exfil_medium_rule_fallback_does_not_isolate_without_confirmed_threat() -> None:
+    """TEMPLATE MEDIUM DATA_EXFIL must not plan L3 when containment predicate is false."""
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(
+        wm,
+        event_id,
+        triage=_triage(
+            severity=Severity.MEDIUM,
+            event_type=EventType.DATA_EXFILTRATION,
+            entities=_exfil_entity_set(),
+        ),
+    )
+    agent = ResponseAgent(
+        llm_client=_FailingLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.NONE),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(
+        ResponseAgentInput(
+            event_id=event_id,
+            risk_assessment=_risk(Severity.MEDIUM, score=40),
+            evidence_output=EvidenceOutput(
+                evidence_list=[_sample_evidence(event_id)],
+                collection_status=CollectionStatus.COMPLETED,
+                overall_confidence=0.7,
+            ),
+        )
+    )
+    assert all(action.tool_name != "isolate_host" for action in plan.actions)
+    assert all(action.tool_name != "disable_account" for action in plan.actions)
+
+
+@pytest.mark.asyncio
+async def test_data_exfil_medium_confirmed_ticket_only_covers_account_and_host() -> None:
+    """Confirmed MEDIUM DATA_EXFIL still pulls isolate_host + disable_account from HIGH pool."""
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(
+        wm,
+        event_id,
+        triage=_triage(
+            severity=Severity.MEDIUM,
+            event_type=EventType.DATA_EXFILTRATION,
+            entities=_exfil_entity_set(),
+        ),
+    )
+    agent = ResponseAgent(
+        llm_client=_UngroundedOnlyLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(
+        ResponseAgentInput(
+            event_id=event_id,
+            risk_assessment=_risk(Severity.MEDIUM, score=40),
+            evidence_output=EvidenceOutput(
+                evidence_list=[_sample_evidence(event_id)],
+                collection_status=CollectionStatus.COMPLETED,
+                overall_confidence=0.9,
+            ),
+        )
+    )
+    isolate_targets = {
+        action.target for action in plan.actions if action.tool_name == "isolate_host"
+    }
+    assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
+    assert any(action.tool_name == "disable_account" for action in plan.actions)
+    assert any(action.target == "svc-analytics-47" for action in plan.actions)
+
+
+@pytest.mark.asyncio
+async def test_empty_entityset_does_not_encourage_containment() -> None:
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(entities=EntitySet()))
+    agent = ResponseAgent(
+        llm_client=_UngroundedOnlyLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    assert all(action.tool_name != "isolate_host" for action in plan.actions)
+    assert all(action.tool_name != "disable_account" for action in plan.actions)
+    assert "containment_quality_gate" not in plan.strategy_summary
+    assert "entity_coverage_merge" not in plan.strategy_summary
 
 
 def test_infer_host_kind_skips_ambiguous_and_overbroad_names() -> None:

@@ -21,7 +21,7 @@ from app.models.agent_io import (
     RiskAssessment,
     ScoringMode,
 )
-from app.models.entities import AccountEntity, EntitySet, HostEntity, IPEntity
+from app.models.entities import AccountEntity, DomainEntity, EntitySet, HostEntity, IPEntity
 from app.models.enums import ActionLevel, EvidenceSource, FinalVerdict, Severity
 from app.models.evidence import Evidence
 
@@ -517,7 +517,9 @@ def test_apply_gate_does_not_synthesize_tool_absent_from_plan_and_fallback() -> 
     tool_names = {item.tool_name for item in merged}
     assert tool_names == {"disable_account"}
     assert generated_by is ResponsePlanGeneratedBy.LLM
-    assert strategy == "LLM ok"
+    assert "entity_coverage_incomplete" in strategy
+    assert "isolate_host" not in tool_names
+    assert "block_ip" not in tool_names
 
 
 def test_apply_gate_skips_coverage_when_evidence_insufficient() -> None:
@@ -543,6 +545,43 @@ def test_apply_gate_skips_coverage_when_evidence_insufficient() -> None:
     assert merged == llm_filtered
     assert generated_by is ResponsePlanGeneratedBy.LLM
     assert strategy == "LLM ok"
+
+
+def test_coverage_needs_merges_host_alias_split_across_entity_rows() -> None:
+    """Same host listed as hostname row + IP row must not emit two isolate needs."""
+    entities = EntitySet(
+        hosts=[
+            HostEntity(entity_id="10.44.20.88", hostname="SRV-DB-STG-02"),
+            HostEntity(entity_id="host-db-ip", hostname=None, ip="10.44.20.88"),
+        ]
+    )
+    needs = entity_containment_coverage_needs(entities)
+    isolate = [item for item in needs if item.tool_name == "isolate_host"]
+    assert len(isolate) == 1
+    assert "srv-db-stg-02" in isolate[0].aliases
+    assert "10.44.20.88" in isolate[0].aliases
+
+    merged, _, strategy = apply_containment_quality_gate(
+        candidates=[_Candidate("isolate_host", "SRV-DB-STG-02")],
+        rule_fallback_candidates=[_Candidate("isolate_host", "10.44.20.88")],
+        generated_by=ResponsePlanGeneratedBy.LLM,
+        strategy="LLM ok",
+        severity=Severity.HIGH,
+        risk_assessment=_risk(),
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        entities=entities,
+        disposition_only=False,
+    )
+    isolate_targets = [item.target for item in merged if item.tool_name == "isolate_host"]
+    assert isolate_targets == ["SRV-DB-STG-02"]
+    assert "entity_coverage_merge" not in strategy
+
+
+def test_has_actionable_includes_domains_but_coverage_needs_ignore_them() -> None:
+    """ISSUE-198 encouragement is broader than ISSUE-328 coverage merge."""
+    entities = EntitySet(domains=[DomainEntity(entity_id="dom-1", fqdn="evil.example")])
+    assert has_actionable_containment_targets(entities) is True
+    assert entity_containment_coverage_needs(entities) == ()
 
 
 def test_apply_gate_noop_on_empty_entityset() -> None:

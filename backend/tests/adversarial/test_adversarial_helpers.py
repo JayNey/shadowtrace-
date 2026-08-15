@@ -35,6 +35,7 @@ from tests.adversarial.helpers import (
 from tests.adversarial.scenario_credential_db_staging_exfil import (
     ACCOUNT,
     GROUND_TRUTH,
+    HOST_BACKUP_NOISE,
     HOST_DB,
     HOST_WORKSTATION,
     VPN_SRC_IP,
@@ -163,7 +164,7 @@ def test_missing_response_targets_default_enforces_db_isolation() -> None:
     db_gap = format_disposition_gap("isolate_host", HOST_DB)
     assert db_gap in enforced
     assert enforced == all_gaps
-    assert HOST_DB not in enforced
+    assert format_disposition_gap("isolate_host", HOST_BACKUP_NOISE) not in enforced
 
 
 def test_text_understanding_rejects_prompt_echo_only() -> None:

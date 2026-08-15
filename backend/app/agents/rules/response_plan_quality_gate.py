@@ -117,13 +117,21 @@ def entity_containment_coverage_needs(entities: EntitySet) -> tuple[EntityCovera
     ``entities.hosts`` (e.g. bait ``BACKUP-SRV-01``) is never required.
     """
     needs: list[EntityCoverageNeed] = []
-    seen: set[tuple[str, str]] = set()
 
     def _add(need: EntityCoverageNeed) -> None:
-        key = (need.tool_name, _normalized_token(need.canonical_target))
-        if key in seen or not need.canonical_target.strip():
+        if not need.canonical_target.strip() or not need.aliases:
             return
-        seen.add(key)
+        for index, existing in enumerate(needs):
+            if existing.tool_name != need.tool_name:
+                continue
+            if existing.aliases & need.aliases:
+                needs[index] = EntityCoverageNeed(
+                    tool_name=existing.tool_name,
+                    target_type=existing.target_type,
+                    canonical_target=existing.canonical_target,
+                    aliases=existing.aliases | need.aliases,
+                )
+                return
         needs.append(need)
 
     for account in entities.accounts:
@@ -191,10 +199,9 @@ def _build_coverage_candidate(prototype: _CandidateT, need: EntityCoverageNeed) 
             return cls(**kwargs)  # type: ignore[misc]
         except TypeError:
             continue
-    try:
-        return cls(need.tool_name, need.canonical_target)  # type: ignore[misc]
-    except TypeError:
-        return cls(need.tool_name)  # type: ignore[misc]
+    raise TypeError(
+        f"cannot construct coverage candidate for {need.tool_name} from {cls.__name__}"
+    )
 
 
 def _merge_entity_coverage(
@@ -202,16 +209,20 @@ def _merge_entity_coverage(
     *,
     rule_fallback_candidates: list[_CandidateT],
     entities: EntitySet,
-) -> tuple[list[_CandidateT], bool]:
+) -> tuple[list[_CandidateT], bool, bool]:
     """Append missing EntitySet coverage; never copy fallback targets outside EntitySet.
 
     Synthesis is allowed only for tools already admitted by PolicyFilter — present
     on the current plan or on the filtered rule-fallback pool. This keeps
     capability / grounding rejections intact (do not invent ``block_ip`` when
     the manifest disabled it).
+
+    The third return flag is true when at least one EntitySet need stayed
+    uncovered because the matching tool was never admitted.
     """
     merged = list(candidates)
     added = False
+    incomplete = False
     admitted_tools = {item.tool_name for item in (*candidates, *rule_fallback_candidates)}
     prototype = next(iter(merged or rule_fallback_candidates), None)
     for need in entity_containment_coverage_needs(entities):
@@ -226,14 +237,20 @@ def _merge_entity_coverage(
             added = True
             continue
         if need.tool_name not in admitted_tools or prototype is None:
+            incomplete = True
             continue
         merged.append(_build_coverage_candidate(prototype, need))
         added = True
-    return merged, added
+    return merged, added, incomplete
 
 
 def has_actionable_containment_targets(entities: EntitySet) -> bool:
-    """Return True when EntitySet exposes at least one containable target."""
+    """Return True when EntitySet exposes at least one containable target.
+
+    Broader than :func:`entity_containment_coverage_needs`: ISSUE-198 still
+    encourages grounded containment for domain/file/process-only sets.
+    ISSUE-328 coverage merge only fills account / host / external dest IP.
+    """
     if (
         entities.accounts
         or entities.hosts
@@ -477,7 +494,7 @@ def apply_containment_quality_gate(
                 generated_by = ResponsePlanGeneratedBy.TEMPLATE
             strategy = f"{strategy}; {note}" if strategy else note
 
-    candidates, coverage_added = _merge_entity_coverage(
+    candidates, coverage_added, coverage_incomplete = _merge_entity_coverage(
         candidates,
         rule_fallback_candidates=rule_fallback_candidates,
         entities=entities,
@@ -487,6 +504,9 @@ def apply_containment_quality_gate(
         strategy = f"{strategy}; {note}" if strategy else note
         if not had_containment and generated_by is ResponsePlanGeneratedBy.LLM:
             generated_by = ResponsePlanGeneratedBy.TEMPLATE
+    if coverage_incomplete:
+        note = "containment_quality_gate: entity_coverage_incomplete"
+        strategy = f"{strategy}; {note}" if strategy else note
 
     if not _containment_candidates(candidates):
         note = "containment_quality_gate_unsatisfied: no grounded containment after PolicyFilter"
