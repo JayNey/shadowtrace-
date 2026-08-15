@@ -1,4 +1,8 @@
-"""Build human-readable adversarial audit reports."""
+"""Build human-readable adversarial audit reports.
+
+Dynamic ``adversarial_audit`` pytest modules are excluded by pyproject addopts;
+run them with ``-m adversarial_audit -o addopts=``.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from app.models.agent_io import CollectionStatus
 from app.models.enums import EventStatus, EventType, FinalVerdict, Severity
+from app.models.evidence import SKIP_GAP_REASONS, skipped_entity_description
 
 AdversarialAuditMode = Literal["analysis_only", "full_loop"]
 
@@ -21,7 +27,11 @@ _ANALYSIS_SCORED_CHECKS = frozenset(
         "reached_reporting",
     }
 )
-_FULL_LOOP_SCORED_CHECKS = _ANALYSIS_SCORED_CHECKS | frozenset({"closed_reached"})
+_FULL_LOOP_SCORED_CHECKS = _ANALYSIS_SCORED_CHECKS | frozenset(
+    {"closed_reached", "evidence_collection_ok"}
+)
+
+_GENERIC_QUERY_DNS_SKIP_DESCRIPTION = skipped_entity_description("query_dns")
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +44,13 @@ class AdversarialAuditChecks:
 
     In ``full_loop`` mode, ``closed_reached`` is a scored dimension and
     ``verdict_for_human`` cannot be release-grade PASS until CLOSED (ISSUE-319).
+
+    ``evidence_collection_ok`` is scored in ``full_loop`` only (ISSUE-346).
+    Analysis-only keeps it unscored but annotates PARTIAL when collection is
+    incomplete (failure-or-footnote, not a silent PASS). Surfaces
+    ``collection_status=failed`` and mandatory ``query_dns`` skips at the
+    certification layer without coupling ``MIN_EVIDENCE_SOURCES`` into
+    ``validate_closed_gate`` (ISSUE-312).
     """
 
     ground_truth: dict[str, Any]
@@ -49,6 +66,7 @@ class AdversarialAuditChecks:
     status_sequence: list[str]
     triage_severity: str | None = None
     audit_mode: AdversarialAuditMode = "analysis_only"
+    evidence_gaps: list[dict[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         if self.audit_mode not in {"analysis_only", "full_loop"}:
@@ -73,6 +91,10 @@ class AdversarialAuditChecks:
         indicator_hits = [i for i in required_indicators if i in self.indicators_found]
 
         closed_reached = EventStatus.CLOSED.value in self.status_sequence
+        evidence_ok, evidence_detail = evaluate_evidence_collection_ok(
+            collection_status=self.evidence_collection_status,
+            gaps=self.evidence_gaps,
+        )
         checks = {
             "event_type_acceptable": (
                 self.event_type in acceptable_types if self.event_type else False
@@ -85,6 +107,8 @@ class AdversarialAuditChecks:
             "indicators_identified": indicator_hits,
             "indicators_missing": [i for i in required_indicators if i not in indicator_hits],
             "reached_reporting": EventStatus.REPORTING.value in self.status_sequence,
+            "evidence_collection_ok": evidence_ok,
+            "evidence_collection_detail": evidence_detail,
         }
         if self.audit_mode == "full_loop":
             checks["closed_reached"] = closed_reached
@@ -111,6 +135,7 @@ class AdversarialAuditChecks:
                 "status_sequence": self.status_sequence,
                 "triage_summary": self.triage_summary,
                 "evidence_collection_status": self.evidence_collection_status,
+                "evidence_gaps": list(self.evidence_gaps or []),
                 "report_excerpt": self.report_excerpt,
                 "entities_found": self.entities_found,
                 "indicators_found": self.indicators_found,
@@ -135,6 +160,66 @@ class AdversarialAuditChecks:
         return path
 
 
+def evaluate_evidence_collection_ok(
+    *,
+    collection_status: str | None,
+    gaps: list[dict[str, Any]] | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """Certification-layer evidence floor (ISSUE-346).
+
+    Independent of ``validate_closed_gate`` / ``MIN_EVIDENCE_SOURCES`` (ISSUE-312).
+    """
+    status = (collection_status or "").strip().lower()
+    gap_list = list(gaps or [])
+    dns_skips = _query_dns_skip_gaps(gap_list)
+    expected_skips = [gap for gap in dns_skips if _is_expected_query_dns_skip(gap)]
+    mandatory_skips = [gap for gap in dns_skips if gap not in expected_skips]
+
+    failure_reasons: list[str] = []
+    if status == CollectionStatus.FAILED.value:
+        failure_reasons.append("collection_status_failed")
+    if mandatory_skips:
+        failure_reasons.append("mandatory_query_dns_skipped")
+
+    ok = not failure_reasons
+    return ok, {
+        "collection_status": status or None,
+        "query_dns_skips": dns_skips,
+        "expected_query_dns_skips": expected_skips,
+        "mandatory_query_dns_skips": mandatory_skips,
+        "failure_reasons": failure_reasons,
+    }
+
+
+def _query_dns_skip_gaps(gaps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    hits: list[dict[str, Any]] = []
+    for gap in gaps:
+        detail = gap.get("detail") if isinstance(gap.get("detail"), dict) else {}
+        tool_name = str(detail.get("tool_name") or gap.get("tool_name") or "")
+        if tool_name != "query_dns":
+            continue
+        reason = str(gap.get("reason") or "")
+        if reason not in SKIP_GAP_REASONS:
+            continue
+        hits.append(
+            {
+                "reason": reason,
+                "missing_source": gap.get("missing_source"),
+                "detail": detail,
+            }
+        )
+    return hits
+
+
+def _is_expected_query_dns_skip(gap: dict[str, Any]) -> bool:
+    """ISSUE-338: IP-only / no FQDN inputs should not fail the scorecard."""
+    if gap.get("reason") != "source_skipped":
+        return False
+    detail = gap.get("detail") if isinstance(gap.get("detail"), dict) else {}
+    description = str(detail.get("description") or "").strip()
+    return description == _GENERIC_QUERY_DNS_SKIP_DESCRIPTION
+
+
 def _human_verdict(
     checks: dict[str, Any],
     *,
@@ -149,7 +234,19 @@ def _human_verdict(
         return "FAIL — full loop did not reach CLOSED"
     if not checks.get("reached_reporting"):
         return "FAIL — investigation did not reach reporting or missed critical signals"
+    if audit_mode == "full_loop" and not checks.get("evidence_collection_ok", True):
+        if checks.get("closed_reached") and checks.get("risk_score_at_least_minimum"):
+            return (
+                "FAIL — full loop reached CLOSED but evidence collection incomplete; "
+                "not release-grade"
+            )
+        return "FAIL — evidence collection incomplete"
     if checks.get("verdict_matches_expected") and checks.get("risk_score_at_least_minimum"):
+        if not checks.get("evidence_collection_ok", True):
+            return (
+                "PARTIAL — expected verdict but evidence collection incomplete "
+                "(see evidence_collection_ok)"
+            )
         if audit_mode == "full_loop":
             return "PASS — full loop reached CLOSED with expected verdict and adequate risk score"
         return "PASS — agent flagged expected verdict with adequate risk score"

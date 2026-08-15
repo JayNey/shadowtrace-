@@ -69,3 +69,13 @@ class EvidenceGap(BaseModel):
     missing_source: EvidenceSource
     reason: str
     detail: dict[str, Any] = Field(default_factory=dict)
+
+
+SKIP_GAP_REASONS: frozenset[str] = frozenset(
+    {"source_skipped", "invalid_entity", "triage_degraded"}
+)
+
+
+def skipped_entity_description(tool_name: str) -> str:
+    """Default EvidenceAgent skip text when a required entity is missing or invalid."""
+    return f"required entity missing or invalid for {tool_name}"
