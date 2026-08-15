@@ -1894,6 +1894,52 @@ async def test_close_rejected_when_non_mock_and_simulated_terminal_receipt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("spoof_mode", ["mockish", "not_mock"])
+async def test_close_rejected_when_substring_mock_mode_and_simulated_terminal_receipt(
+    state_machine: StateMachineService,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    monkeypatch: pytest.MonkeyPatch,
+    spoof_mode: str,
+) -> None:
+    """ISSUE-344: mockish/not_mock must not inherit the Mock CLOSED wide gate."""
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("DISPOSITION_MODE", spoof_mode)
+    get_settings.cache_clear()
+    try:
+        event_id = await _create_event(
+            session_factory,
+            store,
+            disposition_policy=DispositionPolicy.REQUIRED.value,
+            severity=Severity.LOW.value,
+        )
+        await _walk_to_reporting(state_machine, event_id)
+        await _add_report(session_factory, event_id)
+        await _seed_applicable_confirmed_writeback_action(session_factory, event_id)
+        await _seed_terminal_writeback_fixture(
+            session_factory,
+            event_id,
+            approved=SourceDisposition.CONTAINED,
+            target_disposition=SourceDisposition.CONTAINED,
+            receipt_simulated=True,
+        )
+
+        with pytest.raises(
+            InvalidStateTransitionError, match="non-simulated terminal receipt"
+        ) as exc:
+            await state_machine.transition(
+                event_id,
+                EventStatus.CLOSED,
+                operator="SuperAgent",
+                reason="simulated terminal in spoof mock mode",
+            )
+        assert exc.value.error_code == "closed_simulated_receipt_rejected"
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
 async def test_close_succeeds_when_mock_xdr_and_simulated_terminal_receipt(
     state_machine: StateMachineService,
     session_factory: async_sessionmaker[AsyncSession],

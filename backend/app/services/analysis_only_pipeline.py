@@ -27,7 +27,7 @@ from app.agents.evidence_agent import EvidenceAgent
 from app.agents.report_agent import ReportAgent
 from app.agents.risk_agent import RiskAgent
 from app.agents.triage_agent import TriageAgent
-from app.core.config import Settings, get_settings
+from app.core.config import Settings, get_settings, is_mock_disposition_mode, is_mock_source_mode
 from app.core.errors import (
     ConfigurationError,
     DependencyUnavailableError,
@@ -136,9 +136,9 @@ def assert_analysis_only_mode(settings: Settings | None = None) -> None:
                 "allow_xdr_writeback": cfg.allow_xdr_writeback,
             },
         )
-    source = (cfg.source_mode or "").strip().lower()
-    disposition = (cfg.disposition_mode or "").strip().lower()
-    if "mock" not in source or "mock" not in disposition:
+    if not is_mock_source_mode(cfg.source_mode) or not is_mock_disposition_mode(
+        cfg.disposition_mode
+    ):
         raise ConfigurationError(
             "AnalysisOnlyPipeline requires SOURCE_MODE and DISPOSITION_MODE mock modes",
             error_code="configuration_error",

@@ -107,3 +107,16 @@ def test_policy_rejects_non_new_status() -> None:
     )
     assert decision.eligible is False
     assert decision.reason == "status_not_new"
+
+
+def test_policy_rejects_mockish_source_product_provenance() -> None:
+    policy = AutoInvestigatePolicyService(
+        Settings(AUTO_INVESTIGATE_ENABLED=True, SOURCE_MODE="mock_xdr")
+    )
+    decision = policy.evaluate(
+        _event(source_product="mockish"),
+        link_role="primary",
+        source_product="mockish",
+    )
+    assert decision.eligible is False
+    assert decision.reason == "untrusted_provenance"

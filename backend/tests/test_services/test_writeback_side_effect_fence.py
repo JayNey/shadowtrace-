@@ -49,6 +49,25 @@ def test_xdr_writeback_fence_allows_mock_mode() -> None:
     )
 
 
+@pytest.mark.parametrize("disposition_mode", ["mockish", "not_mock"])
+def test_xdr_writeback_fence_blocks_substring_mock_mode_without_flag(
+    disposition_mode: str,
+) -> None:
+    """ISSUE-344: mockish/not_mock must not inherit the mock writeback exemption."""
+    settings = Settings.model_validate(
+        {
+            "DISPOSITION_MODE": disposition_mode,
+            "ALLOW_XDR_WRITEBACK": False,
+        }
+    )
+    with pytest.raises(ValidationError, match="xdr writeback is not enabled"):
+        assert_xdr_writeback_allowed(
+            settings=settings,
+            action_id="act-test",
+            execution_owner=ExecutionOwner.XDR_MANAGED,
+        )
+
+
 def test_xdr_writeback_fence_skips_direct_tool() -> None:
     settings = Settings.model_validate(
         {

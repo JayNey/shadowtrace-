@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from app.core.config import Settings, TaskMode, is_mock_disposition_mode
+from app.core.config import Settings, TaskMode, is_mock_disposition_mode, is_mock_source_mode
 from app.core.errors import ConfigurationError
 
 
@@ -330,9 +330,30 @@ def test_is_mock_disposition_mode_uses_explicit_allowlist(mode: str, expected: b
     assert is_mock_disposition_mode(mode) is expected
 
 
+@pytest.mark.parametrize(
+    "mode,expected",
+    [
+        ("mock_xdr", True),
+        (" MOCK_XDR ", True),
+        ("live", False),
+        ("not_mock", False),
+        ("mockish", False),
+    ],
+)
+def test_is_mock_source_mode_uses_explicit_allowlist(mode: str, expected: bool) -> None:
+    """ISSUE-344: source mock identity must not substring-match arbitrary values."""
+    assert is_mock_source_mode(mode) is expected
+
+
 def test_production_does_not_reject_disposition_mode_with_mock_substring_only() -> None:
     """ISSUE-344: ``not_mock`` is not a documented mock disposition mode."""
     settings = Settings(**_base_kwargs(DISPOSITION_MODE="not_mock"))
+    assert settings.production_fail_closed_violations() == []
+
+
+def test_production_does_not_reject_mockish_disposition_mode() -> None:
+    """ISSUE-344: ``mockish`` is not a documented mock disposition mode."""
+    settings = Settings(**_base_kwargs(DISPOSITION_MODE="mockish"))
     assert settings.production_fail_closed_violations() == []
 
 
@@ -344,4 +365,15 @@ def test_auto_response_rejects_mockish_disposition_mode() -> None:
             SOURCE_MODE="mock_xdr",
             TOOL_MODE="mock",
             DISPOSITION_MODE="mockish",
+        )
+
+
+def test_auto_response_rejects_not_mock_disposition_mode_at_construction() -> None:
+    """ISSUE-344: auto-response fail-closed rejects non-allowlisted mock substring."""
+    with pytest.raises(ConfigurationError, match="disposition_mode=not_mock"):
+        Settings(
+            AUTO_RESPONSE_ENABLED=True,
+            SOURCE_MODE="mock_xdr",
+            TOOL_MODE="mock",
+            DISPOSITION_MODE="not_mock",
         )

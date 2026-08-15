@@ -42,6 +42,11 @@ def is_mock_disposition_mode(value: str) -> bool:
     return _normalize_mode_value(value) in _MOCK_MODE_VALUES["disposition_mode"]
 
 
+def is_mock_source_mode(value: str) -> bool:
+    """Return True when *value* is an explicit mock source mode or product."""
+    return _normalize_mode_value(value) in _MOCK_MODE_VALUES["source_mode"]
+
+
 def is_mock_tool_mode(value: str) -> bool:
     """Return True when *value* is an explicit mock tool mode."""
     return _normalize_mode_value(value) in _MOCK_MODE_VALUES["tool_mode"]

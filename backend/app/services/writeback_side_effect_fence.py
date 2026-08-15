@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings, get_settings, is_mock_disposition_mode
 from app.core.errors import ValidationError
 from app.models.enums import ExecutionOwner
 
@@ -36,8 +36,7 @@ def assert_xdr_writeback_allowed(
     if execution_owner is not ExecutionOwner.XDR_MANAGED:
         return
     resolved = settings or get_settings()
-    disposition_mode = resolved.disposition_mode.strip().lower()
-    if "mock" not in disposition_mode and not resolved.allow_xdr_writeback:
+    if not is_mock_disposition_mode(resolved.disposition_mode) and not resolved.allow_xdr_writeback:
         details: dict[str, object] = {"disposition_mode": resolved.disposition_mode}
         if action_id is not None:
             details["action_id"] = action_id

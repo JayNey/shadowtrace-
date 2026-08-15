@@ -1125,6 +1125,22 @@ class TestOrchestrationModeGate:
         # Should not raise.
         assert_analysis_only_mode(settings)
 
+    @pytest.mark.parametrize("spoof_mode", ["mockish", "not_mock"])
+    async def test_analysis_only_mode_rejects_substring_mock_modes(self, spoof_mode: str) -> None:
+        """ISSUE-344: analysis-only must not treat mockish/not_mock as mock."""
+        from app.core.config import Settings
+        from app.core.errors import ConfigurationError
+        from app.services.analysis_only_pipeline import assert_analysis_only_mode
+
+        settings = Settings(
+            SOURCE_MODE=spoof_mode,
+            DISPOSITION_MODE=spoof_mode,
+            ALLOW_LIVE_SIDE_EFFECTS="false",
+            ALLOW_XDR_WRITEBACK="false",
+        )
+        with pytest.raises(ConfigurationError, match="mock modes"):
+            assert_analysis_only_mode(settings)
+
     async def test_graph_mode_ok_without_react(self) -> None:
         """graph mode with REACT_ENABLED=false passes startup gate."""
         from app.core.config import Settings
