@@ -127,6 +127,12 @@ def _looks_like_ip(value: str) -> bool:
 def containment_tool_for_target(target: str, ground_truth: dict[str, object]) -> str:
     """Map a GROUND_TRUTH target to its required containment tool (tool×target contract)."""
     target_key = target.strip().lower()
+    mapped = ground_truth.get("response_containment_tools")
+    if isinstance(mapped, dict):
+        for raw_key, raw_tool in mapped.items():
+            tool = str(raw_tool or "").strip().lower()
+            if tool and str(raw_key).strip().lower() == target_key:
+                return tool
     entities = [
         str(item).strip()
         for item in (ground_truth.get("must_identify_entities") or [])

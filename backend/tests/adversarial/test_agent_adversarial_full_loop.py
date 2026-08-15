@@ -53,6 +53,7 @@ from tests.adversarial.helpers import (
     block_ip_reason_destination_mislabels,
     build_alert_corpus,
     build_narrative_corpus,
+    format_disposition_gap,
     ingest_true_positive_event,
     missing_response_targets,
     opaque_scorecard_tokens,
@@ -600,12 +601,14 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         )
     else:
         plan_tool_targets = response_plan_tool_targets(list(loop_result.response_plan_actions))
+        db_gap = format_disposition_gap("isolate_host", HOST_DB)
         if ("isolate_host", HOST_DB.lower()) not in plan_tool_targets:
-            assert HOST_DB in disposition_gaps_all, (
+            assert db_gap in disposition_gaps_all, (
                 "ISSUE-334: missing DB isolation must be an explicit gap until ISSUE-328; "
                 f"all_gaps={disposition_gaps_all}"
             )
-            assert HOST_DB not in disposition_gaps_enforced
+            assert db_gap not in disposition_gaps_enforced
+            assert HOST_DB not in disposition_gaps_all
     assert_opaque_alert_quality(
         alert_corpus=alert_corpus,
         entity_audit=entity_audit,
@@ -685,3 +688,6 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     assert quality_bucket["blocking_profile"] is False
     assert quality_bucket["summary"]["agents_evaluated"] >= 1
     assert "output_quality" not in report["checks"]
+    assert report["unscored"]["text_understanding"]["entities"]["hits"] == 0
+    assert "understanding entities" in report["verdict_for_human"]
+    assert "quality_unscored" not in report

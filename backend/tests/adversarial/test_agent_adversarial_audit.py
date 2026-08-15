@@ -43,6 +43,7 @@ from tests.adversarial.helpers import (
     audit_required_signals,
     build_alert_corpus,
     build_narrative_corpus,
+    format_disposition_gap,
     ingest_true_positive_event,
     missing_response_targets,
     opaque_scorecard_tokens,
@@ -170,14 +171,13 @@ async def test_adversarial_credential_db_staging_exfil_audit(
     response_plan_actions = (
         report_ctx.get("response_plan_actions") if isinstance(report_ctx, dict) else None
     )
-    disposition_gaps: tuple[str, ...] = ()
-    if isinstance(response_plan_actions, list):
-        disposition_gaps = tuple(
-            missing_response_targets(
-                ground_truth=GROUND_TRUTH,
-                actions=response_plan_actions,
-            )
+    # Missing plan is an empty action list — not "coverage complete" (ISSUE-349).
+    disposition_gaps = tuple(
+        missing_response_targets(
+            ground_truth=GROUND_TRUTH,
+            actions=response_plan_actions if isinstance(response_plan_actions, list) else [],
         )
+    )
 
     outward_severity, triage_severity = resolve_observed_severity(
         risk_ctx=risk_ctx if isinstance(risk_ctx, dict) else None,
@@ -265,6 +265,14 @@ async def test_adversarial_credential_db_staging_exfil_audit(
     assert quality_bucket["blocking_profile"] is False
     assert quality_bucket["summary"]["agents_evaluated"] >= 1
     assert "output_quality" not in report["checks"]
+    assert report["unscored"]["text_understanding"]["entities"]["hits"] == 0
+    assert "understanding entities" in report["verdict_for_human"]
+    assert (
+        format_disposition_gap("isolate_host", "WKS-DATA-031")
+        in report["unscored"]["disposition_coverage_gaps"]
+    )
+    assert "coverage GAP:" in report["verdict_for_human"]
+    assert "quality_unscored" not in report
 
     # Soft assertion: pipeline must at least reach reporting for the audit to be meaningful.
     assert EventStatus.REPORTING.value in report["observed"]["status_sequence"], (

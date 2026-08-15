@@ -60,8 +60,9 @@ class AdversarialAuditChecks:
     ``output_quality`` lives in the ``unscored`` bucket (ISSUE-347): visibility
     only, never a scored dimension and never wired into ``validate_closed_gate``.
 
-    ``quality_unscored`` and PASS side-notes disclose coverage / understanding
-    gaps without changing scored dimensions or CLOSED (ISSUE-349).
+    Coverage / understanding / echo buckets also live in ``unscored``
+    (ISSUE-349) and only annotate PASS strings — they do not change scored
+    dimensions or CLOSED.
     """
 
     ground_truth: dict[str, Any]
@@ -172,7 +173,6 @@ class AdversarialAuditChecks:
                 "indicators_found": self.indicators_found,
             },
             "checks": checks,
-            "quality_unscored": quality_unscored,
             "score": {
                 "passed": scored_passed,
                 "scored_dimensions": scored_passed,
@@ -192,6 +192,7 @@ class AdversarialAuditChecks:
                     self.quality_scores,
                     output_quality_blocking=self.output_quality_blocking,
                 ),
+                **quality_unscored,
             },
         }
         return payload

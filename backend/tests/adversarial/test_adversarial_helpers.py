@@ -14,6 +14,7 @@ from tests.adversarial.helpers import (
     build_alert_corpus,
     build_narrative_corpus,
     containment_tool_for_target,
+    disposition_gap_target_label,
     format_disposition_gap,
     missing_response_targets,
     opaque_scorecard_tokens,
@@ -25,6 +26,7 @@ from tests.adversarial.scenario_credential_db_staging_exfil import (
     ACCOUNT,
     GROUND_TRUTH,
     HOST_DB,
+    HOST_WORKSTATION,
     VPN_SRC_IP,
 )
 
@@ -89,6 +91,24 @@ def test_containment_tool_for_target_maps_ground_truth_entities() -> None:
     assert containment_tool_for_target(VPN_SRC_IP, GROUND_TRUTH) == "block_ip"
 
 
+def test_containment_tool_explicit_map_survives_entity_reorder() -> None:
+    reordered = {
+        **GROUND_TRUTH,
+        "must_identify_entities": [HOST_WORKSTATION, ACCOUNT, HOST_DB],
+    }
+    assert containment_tool_for_target(HOST_WORKSTATION, reordered) == "isolate_host"
+    assert containment_tool_for_target(ACCOUNT, reordered) == "disable_account"
+
+
+def test_disposition_gap_target_label_roundtrip() -> None:
+    gap = format_disposition_gap("isolate_host", "WKS-DATA-031")
+    assert gap == "isolate_host×WKS-DATA-031"
+    assert disposition_gap_target_label(gap) == "WKS-DATA-031"
+    assert disposition_gap_target_label(HOST_DB) == HOST_DB
+    assert "×" in gap
+    assert "isolate_hostxWKS-DATA-031" != gap
+
+
 def test_missing_response_targets_reports_gaps(monkeypatch) -> None:
     monkeypatch.delenv("ADVERSARIAL_STRICT_DISPOSITION_TARGETS", raising=False)
     actions = [{"tool_name": "disable_account", "target": "svc-analytics-47"}]
@@ -128,6 +148,7 @@ def test_missing_response_targets_all_includes_gated_db() -> None:
     )
     assert enforced == []
     assert format_disposition_gap("isolate_host", HOST_DB) in all_gaps
+    assert HOST_DB not in all_gaps
 
 
 def test_text_understanding_rejects_prompt_echo_only() -> None:
@@ -497,10 +518,16 @@ def test_full_loop_pass_annotates_coverage_and_understanding_gaps() -> None:
     assert report["verdict_for_human"].startswith("PASS")
     assert "coverage GAP: WKS-DATA-031" in report["verdict_for_human"]
     assert "understanding entities 0/3" in report["verdict_for_human"]
-    assert report["quality_unscored"]["disposition_coverage_gaps"] == [
+    assert report["score"]["passed"] == 7
+    assert report["score"]["total_dimensions"] == 7
+    assert "disposition_targets_aligned" not in report["checks"]
+    assert "text_understanding" not in report["checks"]
+    assert report["unscored"]["disposition_coverage_gaps"] == [
         format_disposition_gap("isolate_host", "WKS-DATA-031")
     ]
-    assert report["quality_unscored"]["text_understanding"]["entities"]["hits"] == 0
+    assert report["unscored"]["text_understanding"]["entities"]["hits"] == 0
+    assert report["unscored"]["output_quality"]["present"] is False
+    assert "quality_unscored" not in report
 
 
 def test_analysis_only_pass_annotates_understanding_without_closed_gate() -> None:
@@ -517,6 +544,17 @@ def test_analysis_only_pass_annotates_understanding_without_closed_gate() -> Non
     assert report["verdict_for_human"].startswith("PASS")
     assert "understanding entities 0/3" in report["verdict_for_human"]
     assert "closed_reached" not in report["checks"]
+    assert report["score"]["total_dimensions"] == 5
+
+
+def test_analysis_only_missing_plan_discloses_enforced_coverage_gaps() -> None:
+    gaps = missing_response_targets(ground_truth=GROUND_TRUTH, actions=[])
+    assert format_disposition_gap("isolate_host", "WKS-DATA-031") in gaps
+    report = _analysis_pass_checks(disposition_gaps=tuple(gaps)).to_dict()
+    assert report["verdict_for_human"].startswith("PASS")
+    assert "coverage GAP:" in report["verdict_for_human"]
+    assert "WKS-DATA-031" in report["verdict_for_human"]
+    assert report["score"]["total_dimensions"] == 5
 
 
 def test_full_loop_pass_requires_closed() -> None:
