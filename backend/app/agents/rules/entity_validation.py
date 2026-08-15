@@ -314,12 +314,31 @@ def _valid_ip_literal(value: str) -> bool:
     return True
 
 
+def is_ip_literal(value: str) -> bool:
+    """Return True when *value* parses as an IP address literal."""
+    return _valid_ip_literal(value.strip())
+
+
+def fqdn_if_valid(item: str) -> str | None:
+    """Return *item* when it validates as an FQDN (never an IP literal)."""
+    text = item.strip()
+    if not text or is_ip_literal(text):
+        return None
+    domain_result = validate_entity_set(
+        EntitySet(domains=[DomainEntity(entity_id="ioc-check", fqdn=text)]),
+        provenance="llm",
+    )
+    return next((d.fqdn for d in domain_result.entity_set.domains if d.fqdn), None)
+
+
 __all__ = [
     "EntityProvenance",
     "EntityRejection",
     "EntityValidationResult",
     "HOST_CONTEXTUAL_PATTERN",
     "HOST_CONTEXT_PREFIX",
+    "fqdn_if_valid",
+    "is_ip_literal",
     "is_plausible_regex_hostname",
     "validate_entity_set",
     "validate_host_entity",

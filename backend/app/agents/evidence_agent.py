@@ -8,7 +8,6 @@ force conflict field sync.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import os
 import time
@@ -31,6 +30,8 @@ from app.agents.evidence_tools import EVIDENCE_QUERY_ORDER
 from app.agents.rules.entity_validation import (
     EntityRejection,
     EntityValidationResult,
+    fqdn_if_valid,
+    is_ip_literal,
     validate_entity_set,
 )
 from app.db import models as orm
@@ -259,33 +260,13 @@ def _indicator_is_valid(indicator: str) -> bool:
     text = indicator.strip()
     if not text:
         return False
-    return _is_ip_literal(text) or _fqdn_if_valid(text) is not None
-
-
-def _is_ip_literal(value: str) -> bool:
-    try:
-        ipaddress.ip_address(value.strip())
-    except ValueError:
-        return False
-    return True
-
-
-def _fqdn_if_valid(item: str) -> str | None:
-    """Return *item* when it validates as an FQDN (never an IP literal)."""
-    text = item.strip()
-    if not text or _is_ip_literal(text):
-        return None
-    domain_result = validate_entity_set(
-        EntitySet(domains=[DomainEntity(entity_id="ioc-check", fqdn=text)]),
-        provenance="llm",
-    )
-    return next((d.fqdn for d in domain_result.entity_set.domains if d.fqdn), None)
+    return is_ip_literal(text) or fqdn_if_valid(text) is not None
 
 
 def _fqdn_from_ioc_list(iocs: list[str]) -> str | None:
     """Return the first IOC that validates as an FQDN (never an IP literal)."""
     for raw in iocs:
-        fqdn = _fqdn_if_valid(raw)
+        fqdn = fqdn_if_valid(raw)
         if fqdn:
             return fqdn
     return None
@@ -295,7 +276,7 @@ def _dns_domain_keys(entities: EntitySet, iocs: list[str]) -> set[str]:
     """Domain keys usable for query_dns from entities plus FQDN IOCs."""
     keys = {d.fqdn for d in entities.domains if d.fqdn}
     for raw in iocs:
-        fqdn = _fqdn_if_valid(raw)
+        fqdn = fqdn_if_valid(raw)
         if fqdn:
             keys.add(fqdn)
     return keys

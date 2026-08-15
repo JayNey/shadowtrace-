@@ -1312,6 +1312,20 @@ async def test_build_params_query_dns_prefers_entity_domain_over_ioc() -> None:
     assert params == {"domain": "entity.example", "time_range": time_range}
 
 
+async def test_build_params_query_dns_from_entity_when_ioc_ip_only() -> None:
+    """ISSUE-338: entity FQDN still builds query_dns when ioc_list is IP-only."""
+    agent = EvidenceAgent(llm_client=None, tool_executor=None)
+    time_range = {"start": "2024-01-01T00:00:00Z", "end": "2024-01-02T00:00:00Z"}
+    entities = EntitySet(domains=[DomainEntity(entity_id="d1", fqdn="storage-sync-cdn.example")])
+    params = agent._build_params(
+        "query_dns",
+        entities,
+        time_range,
+        ioc_list=["198.51.100.44"],
+    )
+    assert params == {"domain": "storage-sync-cdn.example", "time_range": time_range}
+
+
 async def test_collection_partial_done_floor_matches_min_evidence_sources() -> None:
     """MIN_EVIDENCE_SOURCES is the PARTIAL_DONE floor; keep the two constants equal."""
     from app.agents.evidence_agent import _COLLECTION_STATUS_PARTIAL_DONE
@@ -1394,9 +1408,7 @@ async def test_execute_query_dns_ip_only_ioc_source_skipped_not_invalid_entity(
     assert len(dns_gaps) == 1
     assert dns_gaps[0].reason == "source_skipped"
     assert EvidenceSource.DNS.value in output.failed_sources
-    dns_timing = next(
-        row for row in agent.last_query_timings if row["tool_name"] == "query_dns"
-    )
+    dns_timing = next(row for row in agent.last_query_timings if row["tool_name"] == "query_dns")
     assert dns_timing["tool_outcome"] == "source_skipped"
 
 

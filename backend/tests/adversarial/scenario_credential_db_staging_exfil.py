@@ -413,6 +413,7 @@ def build_adversarial_credential_db_staging_exfil(
             "secondary_host": HOST_DB,
             "src_ip": VPN_SRC_IP,
             "internal_ip": INTERNAL_WKS_IP,
+            "domain": UPLOAD_DOMAIN,
             "scenario": SCENARIO_ID,
             "description": (
                 "Correlated medium alerts across identity, endpoint, network volume, "

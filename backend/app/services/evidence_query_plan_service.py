@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agents.evidence_tools import EVIDENCE_QUERY_ORDER, SEVEN_EVIDENCE_TOOLS
+from app.agents.rules.entity_validation import fqdn_if_valid
 from app.models.agent_io import ExecutionPlan, PlanBudget, TriageResult
 from app.models.enums import EventType, ToolCategory
 from app.services.evidence_projection import EvidenceQueryScope
@@ -92,10 +93,14 @@ def resolve_mandatory_baseline(triage: TriageResult) -> frozenset[str]:
         mandatory.update({"query_edr_process", "query_asset_info"})
     if any(ip.address for ip in entities.ips):
         mandatory.add("query_network_flow")
-    if any(domain.fqdn for domain in entities.domains) or any(
-        item.strip() for item in triage.ioc_list
-    ):
-        mandatory.update({"query_dns", "query_threat_intel"})
+
+    has_entity_fqdn = any(fqdn_if_valid(domain.fqdn or "") for domain in entities.domains)
+    has_fqdn_ioc = any(fqdn_if_valid(item) for item in triage.ioc_list)
+    has_any_ioc = any(item.strip() for item in triage.ioc_list)
+    if has_entity_fqdn or has_fqdn_ioc:
+        mandatory.add("query_dns")
+    if has_entity_fqdn or has_fqdn_ioc or has_any_ioc:
+        mandatory.add("query_threat_intel")
 
     mandatory.update(resolve_event_type_floor(triage))
     return frozenset(mandatory & _ALLOWED_EVIDENCE_QUERY_TOOLS)

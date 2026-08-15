@@ -13,7 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.source.base import BaseSourceAdapter, SourcePage
 from app.db import models as orm
-from app.ingestion.source_ingester import CheckpointConflictError, SourceIngester
+from app.ingestion.source_ingester import (
+    CheckpointConflictError,
+    SourceIngester,
+    _supporting_projection,
+)
 from app.models.enums import (
     CapabilityState,
     ConnectorCapability,
@@ -814,3 +818,209 @@ async def test_persist_supporting_object_refreshes_on_stale_skip(
     assert event_after is not None
     hostnames = {h.hostname for h in event_after.entities.hosts if h.hostname}
     assert "DEV-WKS-012" in hostnames
+
+
+def test_supporting_projection_promotes_domain_from_raw_payload() -> None:
+    """ISSUE-338: raw_payload.domain must land in projected normalized for enricher."""
+    ref = _ref(
+        SourceObjectKind.LOG,
+        "LOG-domain-338",
+        "conn-log",
+        updated_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+    )
+    projected = _supporting_projection(
+        SourceLog(
+            reference=ref,
+            device_source="nfw",
+            raw_payload={"domain": "storage-sync-cdn.example", "bytes_out": 934_281_600},
+        )
+    )
+    assert projected["domain"] == "storage-sync-cdn.example"
+
+
+def test_supporting_projection_prefers_normalized_domain_over_raw_payload() -> None:
+    ref = _ref(
+        SourceObjectKind.LOG,
+        "LOG-domain-pref",
+        "conn-log",
+        updated_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+    )
+    projected = _supporting_projection(
+        SourceLog(
+            reference=ref,
+            normalized={"domain": "entity.example"},
+            raw_payload={"domain": "raw.example"},
+        )
+    )
+    assert projected["domain"] == "entity.example"
+
+
+def test_supporting_projection_promotes_fqdn_from_raw_payload() -> None:
+    ref = _ref(
+        SourceObjectKind.LOG,
+        "LOG-fqdn-338",
+        "conn-log",
+        updated_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+    )
+    projected = _supporting_projection(
+        SourceLog(
+            reference=ref,
+            device_source="nfw",
+            raw_payload={"fqdn": "storage-sync-cdn.example"},
+        )
+    )
+    assert projected["fqdn"] == "storage-sync-cdn.example"
+    assert "domain" not in projected
+
+
+def test_supporting_projection_skips_non_fqdn_raw_payload_domain() -> None:
+    ref = _ref(
+        SourceObjectKind.LOG,
+        "LOG-domain-skip",
+        "conn-log",
+        updated_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+    )
+    projected = _supporting_projection(
+        SourceLog(
+            reference=ref,
+            device_source="nfw",
+            raw_payload={
+                "domain": "203.0.113.10",
+                "fqdn": {"nested": True},
+                "bytes_out": 1,
+            },
+        )
+    )
+    assert "domain" not in projected
+    assert "fqdn" not in projected
+
+
+def test_supporting_projection_blank_normalized_promotes_raw_fqdn() -> None:
+    ref = _ref(
+        SourceObjectKind.LOG,
+        "LOG-domain-blank",
+        "conn-log",
+        updated_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+    )
+    projected = _supporting_projection(
+        SourceLog(
+            reference=ref,
+            normalized={"domain": "   "},
+            raw_payload={"domain": "storage-sync-cdn.example"},
+        )
+    )
+    assert projected["domain"] == "storage-sync-cdn.example"
+
+
+def test_supporting_projection_garbage_domain_still_promotes_valid_fqdn() -> None:
+    ref = _ref(
+        SourceObjectKind.LOG,
+        "LOG-domain-garbage",
+        "conn-log",
+        updated_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+    )
+    projected = _supporting_projection(
+        SourceLog(
+            reference=ref,
+            device_source="nfw",
+            raw_payload={
+                "domain": "203.0.113.10",
+                "fqdn": "storage-sync-cdn.example",
+            },
+        )
+    )
+    assert "domain" not in projected
+    assert projected["fqdn"] == "storage-sync-cdn.example"
+
+
+def test_raw_payload_domain_projection_enriches_entity_set() -> None:
+    """ISSUE-338: projected log normalized must seed EntitySet.domains."""
+    from app.services.source_entity_enricher import enrich_entities_from_source
+
+    ref = _ref(
+        SourceObjectKind.LOG,
+        "LOG-domain-enrich",
+        "conn-log",
+        updated_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+    )
+    projected = _supporting_projection(
+        SourceLog(
+            reference=ref,
+            device_source="nfw",
+            raw_payload={"domain": "storage-sync-cdn.example", "bytes_out": 934_281_600},
+        )
+    )
+    enrichment = enrich_entities_from_source([(ref, projected)])
+    domains = {domain.fqdn for domain in enrichment.entity_set.domains if domain.fqdn}
+    assert "storage-sync-cdn.example" in domains
+
+
+@pytest.mark.asyncio
+async def test_raw_payload_domain_persist_enriches_parent_event_domains(
+    ingestion_source_ingester: SourceIngester,
+    ingestion_event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-338: persist projected domain onto SourceObject and parent EventSet."""
+    suffix = _suffix()
+    adapter_name = f"adapter-domain-{suffix}"
+    incident_conn = f"conn-inc-{suffix}"
+    log_conn = f"conn-log-{suffix}"
+    incident_id = f"INC-{suffix}"
+    log_id = f"LOG-{suffix}"
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    tenant = "tenant-ingestion"
+
+    incident_ref = SourceReference(
+        source_kind=SourceObjectKind.INCIDENT,
+        source_product="mock_xdr",
+        source_tenant_id=tenant,
+        connector_id=incident_conn,
+        source_object_id=incident_id,
+        ingested_at=datetime.now(UTC),
+    )
+    inc = await ingestion_event_service.ingest_source_object(
+        IngestableSource(
+            reference=incident_ref,
+            title="incident without domain",
+            event_type=EventType.DATA_EXFILTRATION,
+            severity=Severity.HIGH,
+            source_type="mock_xdr",
+        )
+    )
+    assert inc.event_id
+
+    log_ref = SourceReference(
+        source_kind=SourceObjectKind.LOG,
+        source_product="mock_xdr",
+        source_tenant_id=tenant,
+        connector_id=log_conn,
+        source_object_id=log_id,
+        parent_source_object_id=incident_id,
+        source_updated_at=now,
+        source_concurrency_token="token-v1",
+        schema_version="1",
+    )
+    summary, _ = await ingestion_source_ingester.ingest_items(
+        [
+            SourceLog(
+                reference=log_ref,
+                device_source="nfw",
+                raw_payload={"domain": "storage-sync-cdn.example", "bytes_out": 934_281_600},
+            )
+        ],
+        source_type=adapter_name,
+    )
+    assert summary.accepted == 1
+
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(orm.SourceObject).where(orm.SourceObject.source_object_id == log_id)
+        )
+    assert row is not None
+    assert (row.normalized or {}).get("domain") == "storage-sync-cdn.example"
+
+    event = await ingestion_event_service.get_event(inc.event_id)
+    assert event is not None
+    domains = {domain.fqdn for domain in event.entities.domains if domain.fqdn}
+    assert "storage-sync-cdn.example" in domains
