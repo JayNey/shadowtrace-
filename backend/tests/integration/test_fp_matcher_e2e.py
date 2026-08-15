@@ -276,8 +276,7 @@ async def test_fp_matcher_account_anomaly_fp_post_evidence_close(
         row = (
             await session.scalars(
                 select(orm.SecurityEvent).where(
-                    orm.SecurityEvent.title
-                    == f"Bulk login by {OPS_ACCOUNT} during change window"
+                    orm.SecurityEvent.title == f"Bulk login by {OPS_ACCOUNT} during change window"
                 )
             )
         ).first()

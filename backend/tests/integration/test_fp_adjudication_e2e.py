@@ -74,8 +74,7 @@ async def test_not_required_post_evidence_fp_closes_without_scenario_dependency(
         row = (
             await session.scalars(
                 select(orm.SecurityEvent).where(
-                    orm.SecurityEvent.title
-                    == f"Bulk login by {OPS_ACCOUNT} during change window"
+                    orm.SecurityEvent.title == f"Bulk login by {OPS_ACCOUNT} during change window"
                 )
             )
         ).first()
@@ -215,8 +214,7 @@ async def test_required_post_evidence_fp_adjudication_from_pipeline_without_jour
         row = (
             await session.scalars(
                 select(orm.SecurityEvent).where(
-                    orm.SecurityEvent.title
-                    == f"Bulk login by {OPS_ACCOUNT} during change window"
+                    orm.SecurityEvent.title == f"Bulk login by {OPS_ACCOUNT} during change window"
                 )
             )
         ).first()

@@ -45,6 +45,7 @@ from app.services.analysis_only_pipeline import (
     run_rag_stage,
 )
 from tests.integration.rag_scenario_fixtures import (
+    FakeContextStore,
     FakeEventService,
     FakeWorkingMemory,
     main_evidence,
@@ -382,6 +383,7 @@ async def test_pipeline_wires_rag_between_evidence_and_risk() -> None:
         risk_agent=risk_agent,
         report_agent=_StubAgent(report),
         event_service=event_service,
+        context_store=FakeContextStore(),
     )
     result = await pipeline.run(event_id)
     assert result.rag_output == rag_output
@@ -415,6 +417,7 @@ async def test_pipeline_rag_failure_degrades_without_blocking() -> None:
         risk_agent=risk_agent,
         report_agent=_StubAgent(report),
         event_service=event_service,
+        context_store=FakeContextStore(),
     )
     result = await pipeline.run(event_id)
     assert result.rag_output is None
@@ -447,6 +450,7 @@ async def test_pipeline_real_rag_agent_writes_wm_and_passes_output() -> None:
         risk_agent=risk_agent,
         report_agent=_StubAgent(report),
         event_service=event_service,
+        context_store=FakeContextStore(),
     )
     result = await pipeline.run(event_id)
 
@@ -511,6 +515,7 @@ async def test_pipeline_rag_fail_still_uses_false_positive_match() -> None:
             )
         ),
         event_service=event_service,
+        context_store=FakeContextStore(),
     )
     result = await pipeline.run(event_id)
 
