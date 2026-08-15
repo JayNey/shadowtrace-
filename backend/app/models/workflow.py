@@ -607,9 +607,9 @@ class TransitionContext(BaseModel):
     # machine's pre-transition side effects for CONTAINED / FAILED.
     escalated: bool = False
     # Whether the active disposition adapter is mock (ISSUE-227 CLOSED gate).
-    # Default True preserves existing Mock behaviour; StateMachineService sets
-    # this from disposition_mode at transition time.
-    disposition_is_mock: bool = True
+    # Default False is fail-closed for direct validate_closed_gate callers;
+    # StateMachineService sets this from disposition_mode at transition time.
+    disposition_is_mock: bool = False
     # ISSUE-302: gate-applicable vs background side-effect convergence projection.
     side_effect_convergence: SideEffectConvergenceSummary | None = None
 
