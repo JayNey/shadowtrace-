@@ -181,7 +181,7 @@ down-demo:
 # bootstrap-demo-full-loop / demo-full-loop for the official CLOSED gold path.
 bootstrap-demo:
 	@bash "$(CURDIR)/scripts/demo_mock_guard.sh"
-	@$(MAKE) bootstrap
+	@$(MAKE) bootstrap BOOTSTRAP_INCLUDE_RESPONSE=false
 
 # Explicit alias — same as bootstrap-demo (analysis seed, not CLOSED).
 bootstrap-demo-analysis: bootstrap-demo

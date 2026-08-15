@@ -81,7 +81,7 @@ if ! BACKEND_PORT="${BACKEND_PORT}" FRONTEND_PORT="${FRONTEND_PORT}" MOCK_XDR_PO
   SMOKE_TERMINAL_MIN_EVENTS="${SMOKE_TERMINAL_MIN_EVENTS:-3}" \
   SMOKE_TERMINAL_POLL_S="${SMOKE_TERMINAL_POLL_S:-5}" \
   bash "${ROOT}/scripts/smoke_bootstrap.sh"; then
-  echo "[smoke-demo] ERROR: bootstrap smoke failed — run: make bootstrap-demo-analysis" >&2
+  echo "[smoke-demo] ERROR: bootstrap smoke failed — analysis seed: make bootstrap-demo-analysis (NOT CLOSED); CLOSED gold path: make demo-full-loop" >&2
   exit 1
 fi
 

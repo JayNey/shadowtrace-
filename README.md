@@ -27,7 +27,7 @@ EVAL_REQUIRE_CLOSED=1 make eval-full-loop
 ```bash
 make up-demo && make bootstrap-demo && make smoke-demo
 # 浏览器：http://localhost:3000
-# smoke-demo 验证 compat 终态（analysis_only_complete 或 closed/contained）；失败即非零退出
+# smoke-demo 验证 compat 终态（analysis_only_complete 或 EventStatus closed/contained；非 strict CLOSED 金路径）；失败即非零退出
 ```
 
 详见 [docs/deployment.md](docs/deployment.md)。

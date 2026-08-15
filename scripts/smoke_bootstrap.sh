@@ -90,8 +90,8 @@ if [[ "${SMOKE_TERMINAL_MODE}" != "off" ]]; then
     --min-events "${SMOKE_TERMINAL_MIN_EVENTS}" \
     --poll-s "${SMOKE_TERMINAL_POLL_S}"; then
     echo "[smoke] ERROR: terminal acceptance failed (mode=${SMOKE_TERMINAL_MODE})" >&2
-    echo "[smoke] Hint: official demo path requires Celery worker — use:" >&2
-    echo "[smoke]   make up-demo && make bootstrap-demo && make smoke-demo" >&2
+    echo "[smoke] Hint: analysis+compat smoke (NOT CLOSED) requires Celery worker — use:" >&2
+    echo "[smoke]   make up-demo && make bootstrap-demo-analysis && make smoke-demo" >&2
     echo "[smoke] Strict CLOSED gold path:" >&2
     echo "[smoke]   make demo-full-loop   # EVAL_REQUIRE_CLOSED=1 make eval-full-loop" >&2
     exit 1
