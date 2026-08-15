@@ -302,6 +302,21 @@ def merge_report_generated_into_snapshot(
     return merged
 
 
+def merge_report_quality_into_snapshot(
+    snapshot: dict[str, Any] | None,
+    report_quality: str,
+) -> dict[str, Any]:
+    """Mirror honest ``report_quality`` onto the durable snapshot (ISSUE-348).
+
+    Graph / ReportAgent upserts stamp grades here; HTTP POST gate is separate.
+    """
+    from app.models.enums import ReportQuality
+
+    merged = dict(snapshot) if isinstance(snapshot, dict) else {}
+    merged["report_quality"] = ReportQuality(str(report_quality)).value
+    return merged
+
+
 def merge_analysis_only_complete_into_snapshot(
     snapshot: dict[str, Any] | None,
     complete: bool,
@@ -460,6 +475,7 @@ __all__ = [
     "merge_analysis_only_complete_into_snapshot",
     "merge_evidence_summary_into_snapshot",
     "merge_report_generated_into_snapshot",
+    "merge_report_quality_into_snapshot",
     "merge_storyline_summary_into_snapshot",
     "project_snapshot_for_api",
 ]

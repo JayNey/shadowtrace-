@@ -322,7 +322,7 @@ class FakeStateMachine:
 class FakeEventService:
     def __init__(self) -> None:
         self.verdicts: list[FinalVerdict] = []
-        self.context_snapshots: dict[str, dict[str, bool]] = {}
+        self.context_snapshots: dict[str, dict[str, Any]] = {}
 
     async def set_final_verdict(
         self,
@@ -340,6 +340,13 @@ class FakeEventService:
         generated: bool,
     ) -> None:
         self.context_snapshots.setdefault(event_id, {})["report_generated"] = generated
+
+    async def merge_report_quality_context_snapshot(
+        self,
+        event_id: str,
+        report_quality: str,
+    ) -> None:
+        self.context_snapshots.setdefault(event_id, {})["report_quality"] = report_quality
 
     async def merge_analysis_only_complete_context_snapshot(
         self,
@@ -2346,6 +2353,65 @@ async def test_report_node_loads_verification_result_from_context() -> None:
         report_agent.calls[0].verification_result.overall_status
         is VerificationOverallStatus.SUCCESS
     )
+
+
+@pytest.mark.asyncio
+async def test_report_node_publishes_report_quality_onto_event_context() -> None:
+    """ISSUE-348: graph ReportAgent publication stamps EventContext overlay."""
+
+    class PublishingReportAgent:
+        def __init__(self, event_service: FakeEventService) -> None:
+            self._event_service = event_service
+
+        async def execute(self, input: ReportAgentInput) -> SimpleNamespace:
+            await self._event_service.merge_report_quality_context_snapshot(
+                input.event_id,
+                "degraded_template",
+            )
+            return SimpleNamespace(report_id="rpt-quality")
+
+    store = FakeContextStore()
+    services = _services()
+    services["context_store"] = store
+    event_service = services["event_service"]
+    graph = build_investigation_graph(
+        _agents_with_verify_and_report(
+            StubAgent(
+                VerificationResult(
+                    overall_status=VerificationOverallStatus.SUCCESS,
+                    verification_phase=VerificationPhase.EFFECT,
+                    wm_persisted=True,
+                )
+            ),
+            PublishingReportAgent(event_service),
+        ),
+        services,
+    )
+    evidence = EvidenceOutput(collection_status=CollectionStatus.COMPLETED)
+    risk = RiskAssessment(
+        risk_score=60,
+        severity=Severity.MEDIUM,
+        confidence=0.7,
+        scoring_mode=ScoringMode.RULE_ONLY,
+    )
+    event_id = "evt-report-quality-overlay"
+    state = _base_state(
+        event_id=event_id,
+        event_status=EventStatus.VERIFYING.value,
+        evidence_output=evidence.model_dump(mode="json"),
+        risk_assessment=risk.model_dump(mode="json"),
+        response_plan=ResponsePlan(
+            plan_id="pln-report-quality",
+            actions=[],
+            strategy_summary="",
+            generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+        ).model_dump(mode="json"),
+    )
+    config = {"configurable": {"thread_id": event_id}}
+    final = await graph.ainvoke(state, config)
+    assert NODE_REPORT in final["node_trace"]
+    assert event_service.context_snapshots[event_id]["report_quality"] == "degraded_template"
+    assert event_service.context_snapshots[event_id]["report_generated"] is True
 
 
 @pytest.mark.asyncio

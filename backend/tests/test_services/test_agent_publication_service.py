@@ -61,6 +61,7 @@ class _RecordingEventService:
         self.verdict_events: list[Any] = []
         self.summary_syncs: list[Any] = []
         self.report_generated_flags: list[tuple[str, bool]] = []
+        self.report_quality_flags: list[tuple[str, str]] = []
 
     async def publish_risk_assessment(
         self,
@@ -114,6 +115,13 @@ class _RecordingEventService:
         generated: bool,
     ) -> None:
         self.report_generated_flags.append((event_id, generated))
+
+    async def merge_report_quality_context_snapshot(
+        self,
+        event_id: str,
+        report_quality: str,
+    ) -> None:
+        self.report_quality_flags.append((event_id, report_quality))
 
 
 def _triage() -> TriageResult:
@@ -474,6 +482,7 @@ async def test_report_publication_emits_report_generated() -> None:
     assert await wm.read(event_id, "report") is not None
     assert any(item[1] == "report_generated" for item in bus_events)
     assert store.values.get((event_id, "report_generated")) is True
+    assert event_service.report_quality_flags == [(event_id, "degraded_template")]
 
 
 @pytest.mark.asyncio

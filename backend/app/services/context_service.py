@@ -772,10 +772,15 @@ class EventContextStore:
                     raise KeyError(f"security_event not found: {event_id}")
 
                 ctx = await self._rebuild_from_journal(session, event_id)
-                snapshot_complete = (
-                    (se.event_context_snapshot or {}).get("analysis_only_complete") is True
-                    if isinstance(se.event_context_snapshot, dict)
-                    else False
+                prior_snapshot = (
+                    se.event_context_snapshot if isinstance(se.event_context_snapshot, dict) else {}
+                )
+                snapshot_complete = prior_snapshot.get("analysis_only_complete") is True
+                overlay_report_quality = prior_snapshot.get("report_quality")
+                persisted_report_quality = await session.scalar(
+                    select(orm.Report.report_quality)
+                    .where(orm.Report.event_id == event_id)
+                    .limit(1)
                 )
                 if snapshot_complete and not ctx.analysis_only_complete:
                     version = await self._upsert_version(
@@ -810,6 +815,27 @@ class EventContextStore:
                 snapshot["writeback_summary"] = (
                     writeback.model_dump(mode="json") if writeback is not None else None
                 )
+                quality_raw = (
+                    persisted_report_quality
+                    if persisted_report_quality not in (None, "")
+                    else overlay_report_quality
+                )
+                if quality_raw not in (None, ""):
+                    from app.services.event_context_snapshot_projection import (
+                        merge_report_quality_into_snapshot,
+                    )
+
+                    try:
+                        snapshot = merge_report_quality_into_snapshot(
+                            snapshot,
+                            str(quality_raw),
+                        )
+                    except ValueError:
+                        logger.warning(
+                            "closed snapshot skipped invalid report_quality event=%s value=%r",
+                            event_id,
+                            quality_raw,
+                        )
                 se.event_context_snapshot = snapshot
                 versions = await self._load_field_versions(session, event_id)
                 await session.flush()

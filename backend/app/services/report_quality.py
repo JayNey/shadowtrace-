@@ -7,7 +7,8 @@ HTTP quality gate is **POST /report only**:
 - ``incomplete_placeholder`` → 422 unless ``force=true`` (when enforced)
 - complete→degraded overwrite → 409 unless ``confirm_downgrade=true``
 
-Graph / ReportAgent upserts stamp honest grades and are not HTTP-gated.
+Graph / ReportAgent upserts stamp honest grades, mirror ``report_quality`` onto
+EventContext snapshot, and are not HTTP-gated.
 """
 
 from __future__ import annotations

@@ -2026,6 +2026,34 @@ async def test_merge_report_generated_snapshot_flag(
 
 
 @pytest.mark.asyncio
+async def test_merge_report_quality_snapshot_flag(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-348: report_quality is mirrored onto durable snapshot at graph publish."""
+    sfx = _sfx()
+    created = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=_ref(kind=SourceObjectKind.INCIDENT, object_id=f"INC-rpt348-{sfx}"),
+            title="snapshot-report-quality",
+            event_type=EventType.MALICIOUS_PROCESS,
+            severity=Severity.LOW,
+            source_type="mock_xdr",
+        )
+    )
+    assert created.event_id
+    await event_service.merge_report_quality_context_snapshot(
+        created.event_id,
+        "degraded_template",
+    )
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, created.event_id)
+        assert row is not None
+        snap = dict(row.event_context_snapshot or {})
+    assert snap.get("report_quality") == "degraded_template"
+
+
+@pytest.mark.asyncio
 async def test_merge_analysis_only_complete_snapshot_flag(
     event_service: EventService,
     session_factory: async_sessionmaker[AsyncSession],

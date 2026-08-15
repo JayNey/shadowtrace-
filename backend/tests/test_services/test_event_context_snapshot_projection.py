@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import orjson
+import pytest
 
 from app.models.agent_io import (
     AttackStoryline,
@@ -19,6 +20,7 @@ from app.services.event_context_snapshot_projection import (
     build_storyline_snapshot_summary,
     merge_evidence_summary_into_snapshot,
     merge_report_generated_into_snapshot,
+    merge_report_quality_into_snapshot,
     merge_storyline_summary_into_snapshot,
     project_snapshot_for_api,
 )
@@ -154,6 +156,17 @@ def test_merge_report_generated_into_snapshot() -> None:
     snapshot = merge_report_generated_into_snapshot({"risk_assessment": {}}, True)
     assert snapshot["report_generated"] is True
     assert "risk_assessment" in snapshot
+
+
+def test_merge_report_quality_into_snapshot() -> None:
+    snapshot = merge_report_quality_into_snapshot({"report_generated": True}, "degraded_template")
+    assert snapshot["report_quality"] == "degraded_template"
+    assert snapshot["report_generated"] is True
+
+
+def test_merge_report_quality_into_snapshot_rejects_invalid() -> None:
+    with pytest.raises(ValueError):
+        merge_report_quality_into_snapshot({}, "not_a_grade")
 
 
 def test_merge_analysis_only_complete_into_snapshot() -> None:
