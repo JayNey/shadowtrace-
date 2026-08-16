@@ -6,6 +6,7 @@ from app.models.action import Action
 from app.models.agent_io import ResponsePlan, ResponsePlanGeneratedBy
 from app.models.enums import ActionCategory, ActionLevel, ActionStatus, ExecutionOwner
 from tests.adversarial.full_loop_runner import (
+    IMMEDIATE_CONTAINMENT_TOOLS,
     ArtifactResponsePlanView,
     build_artifact_response_plan_view,
 )
@@ -113,3 +114,13 @@ def test_build_artifact_response_plan_view_mismatched_orm_id_keeps_pending() -> 
         orm_actions=[_response_action(action_id="act-other", status=ActionStatus.SUCCESS)],
     )
     assert view.actions[0]["status"] == ActionStatus.PENDING.value
+
+
+def test_immediate_containment_wait_includes_block_domain() -> None:
+    assert "block_domain" in IMMEDIATE_CONTAINMENT_TOOLS
+    assert {
+        "block_ip",
+        "block_domain",
+        "disable_account",
+        "isolate_host",
+    } <= set(IMMEDIATE_CONTAINMENT_TOOLS)

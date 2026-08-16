@@ -136,3 +136,12 @@ def test_insider_scenario_goldens_are_internally_consistent() -> None:
 def test_adversarial_scenario_golden_exists(prompt_key: str) -> None:
     path = default_golden_root() / prompt_key / "adversarial_credential_db_staging_exfil.json"
     assert path.is_file(), f"missing adversarial golden for {prompt_key}"
+
+
+def test_adversarial_report_golden_recommends_dest_not_vpn_src() -> None:
+    payload = _load_golden("report_generate", "adversarial_credential_db_staging_exfil.json")
+    sections = payload["content"]["sections"]
+    recommendations = sections["recommendations"]
+    assert "198.51.100.44" not in recommendations
+    assert "198.51.100.77" in recommendations
+    assert "storage-sync-cdn.example" in recommendations

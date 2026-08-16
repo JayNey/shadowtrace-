@@ -101,16 +101,18 @@ GROUND_TRUTH: dict[str, Any] = {
     "must_response_targets": [
         ACCOUNT,
         HOST_WORKSTATION,
-        VPN_SRC_IP,
         HOST_DB,
+        UPLOAD_IP,
+        UPLOAD_DOMAIN,
     ],
     # ISSUE-328: DB isolation is default-enforced. Keep the key for future deferred targets.
     "must_response_targets_gated": [],
+    # ISSUE-361/1039: VPN/source egress (VPN_SRC_IP) is identified but not block_ip by default.
     "response_containment_tools": {
         ACCOUNT: "disable_account",
         HOST_WORKSTATION: "isolate_host",
         HOST_DB: "isolate_host",
-        VPN_SRC_IP: "block_ip",
+        UPLOAD_IP: "block_ip",
         UPLOAD_DOMAIN: "block_domain",
     },
     "key_processes": [PROC_NTDS, PROC_MYSQL, PROC_RCLONE],

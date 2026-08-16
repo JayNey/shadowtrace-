@@ -6,7 +6,8 @@ Does **not** inject APPROVED actions via ``run_full_response_chain`` or verify-t
 ISSUE-203 quality gates (hard failures):
 - Terminal ``REPORTING``/``CLOSED`` with non-empty report
 - ``response_agent``/``verify_agent`` traces (snake_case agent_name)
-- Response plan covers enforced ``GROUND_TRUTH.must_response_targets`` (ISSUE-328: DB host included)
+- Response plan covers enforced ``GROUND_TRUTH.must_response_targets`` (ISSUE-328: DB host included;
+  ISSUE-361/1039: VPN source egress must not be block_ip by default)
 - Mock terminal writeback ``CONFIRMED`` + terminal outbox enqueued (certification language
   exports raw ``confirmation_evidence`` / ``simulated``; see ISSUE-351)
 - ``sunset_shims_used`` must be empty; intentional adversarial DI is reported separately.
@@ -65,6 +66,7 @@ from tests.adversarial.scenario_credential_db_staging_exfil import (
     GROUND_TRUTH,
     HOST_BACKUP_NOISE,
     HOST_DB,
+    VPN_SRC_IP,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.adversarial_audit]
@@ -622,6 +624,10 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     assert ("isolate_host", HOST_DB.lower()) in plan_tool_targets, (
         "ISSUE-328: EntitySet DB host must be isolated; "
         f"plan={plan_tool_targets}, all_gaps={disposition_gaps_all}"
+    )
+    assert ("block_ip", VPN_SRC_IP.lower()) not in plan_tool_targets, (
+        "ISSUE-361/1039: response plan must not block VPN/source egress IP by default; "
+        f"plan={plan_tool_targets}"
     )
     assert ("isolate_host", HOST_BACKUP_NOISE.lower()) not in plan_tool_targets
     assert_opaque_alert_quality(

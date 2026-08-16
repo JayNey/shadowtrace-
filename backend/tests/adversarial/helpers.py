@@ -129,8 +129,12 @@ def _looks_like_ip(value: str) -> bool:
     return len(parts) == 4 and all(part.isdigit() for part in parts)
 
 
-def containment_tool_for_target(target: str, ground_truth: dict[str, object]) -> str:
-    """Map a GROUND_TRUTH target to its required containment tool (tool×target contract)."""
+def containment_tool_for_target(target: str, ground_truth: dict[str, object]) -> str | None:
+    """Map a GROUND_TRUTH target to its required containment tool (tool×target contract).
+
+    Identify-only indicators (listed in ``must_identify_indicators`` but not in
+    ``must_response_targets``) return None — identify ≠ block (ISSUE-361/365).
+    """
     target_key = target.strip().lower()
     mapped = ground_truth.get("response_containment_tools")
     if isinstance(mapped, dict):
@@ -148,11 +152,18 @@ def containment_tool_for_target(target: str, ground_truth: dict[str, object]) ->
         for item in (ground_truth.get("must_identify_indicators") or [])
         if str(item).strip()
     ]
+    response_keys = {
+        str(item).strip().lower()
+        for item in (ground_truth.get("must_response_targets") or [])
+        if str(item).strip()
+    }
     if entities and target_key == entities[0].lower():
         return "disable_account"
     if target_key in {item.lower() for item in entities[1:]}:
         return "isolate_host"
     if target_key in {item.lower() for item in indicators}:
+        if target_key not in response_keys:
+            return None
         indicator = next(item for item in indicators if item.lower() == target_key)
         return "block_ip" if _looks_like_ip(indicator) else "block_domain"
     return "isolate_host"
@@ -228,7 +239,7 @@ def missing_response_targets(
     present = response_plan_tool_targets(actions)
     gaps: list[str] = []
     for item in required:
-        tool = containment_tool_for_target(item, ground_truth)
+        tool = containment_tool_for_target(item, ground_truth) or "isolate_host"
         if (tool, item.strip().lower()) not in present:
             gaps.append(format_disposition_gap(tool, item))
     return gaps
