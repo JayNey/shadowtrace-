@@ -217,4 +217,29 @@ def test_response_prompt_confirmed_threat_requires_entityset_host_isolation() ->
     assert "entities.hosts" in system
     assert "isolate_host" in system
     assert "must not claim a host remains online" in system
+    assert "not asset inventory or decoys" in system
     assert payload["final_verdict"] == FinalVerdict.CONFIRMED_THREAT.value
+
+
+def test_response_prompt_non_confirmed_threat_omits_entityset_isolation_mandate() -> None:
+    triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        reasoning="",
+        decision_summary="Needs more evidence.",
+    )
+    for verdict in (None, FinalVerdict.NONE, FinalVerdict.FALSE_POSITIVE):
+        messages = build_response_plan_messages(
+            triage_result=triage,
+            risk_assessment=_risk(),
+            evidence_output=None,
+            available_tools=["isolate_host", "create_ticket"],
+            entities_summary={"hosts": [{"hostname": "SRV-DB-STG-02"}]},
+            final_verdict=verdict,
+        )
+        system = messages[0].content
+        payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
+        assert "plan isolate_host for every host listed in entities.hosts" not in system
+        expected = None if verdict is None else verdict.value
+        assert payload["final_verdict"] == expected
