@@ -125,6 +125,15 @@ def test_shared_dispatch_builders_include_generate_report() -> None:
     }
 
 
+def test_dispatch_builders_reject_lease_acquired_without_owner_id() -> None:
+    with pytest.raises(ValueError, match="owner_id is required"):
+        build_investigation_dispatch_kwargs(lease_acquired=True)
+    with pytest.raises(ValueError, match="owner_id is required"):
+        build_investigation_dispatch_kwargs(owner_id="  ", lease_acquired=True)
+    with pytest.raises(ValueError, match="owner_id is required"):
+        build_analysis_only_dispatch_kwargs(lease_acquired=True)
+
+
 @pytest.mark.asyncio
 async def test_test_doubles_accept_production_execute_kwargs() -> None:
     captured: dict[str, object] = {}
