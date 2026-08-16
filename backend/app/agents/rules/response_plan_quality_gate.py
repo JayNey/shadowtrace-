@@ -20,6 +20,10 @@ matches, otherwise synthesized from EntitySet **only if that tool was already
 admitted** (present on the LLM plan or the filtered fallback pool). Never
 expand the asset inventory; never isolate hosts that are not already in
 EntitySet; never re-introduce a tool PolicyFilter rejected.
+
+ISSUE-359: identity containment dedup — same account must not stack
+``disable_account`` + ``force_logout`` + ``revoke_token``. Collapse to the
+highest-priority identity tool per account; never cap ``isolate_host`` count.
 """
 
 from __future__ import annotations
@@ -58,6 +62,25 @@ CONTAINMENT_TOOLS = frozenset(
 )
 
 _NON_CONTAINMENT_TOOLS = frozenset({"create_ticket", "notify_security_team"})
+
+# ISSUE-359: identity containment chain — one account should not stack disable +
+# force_logout + revoke_token (L4). Priority keeps disable_account; redundant
+# siblings on the same account target are dropped after PolicyFilter / coverage merge.
+IDENTITY_CONTAINMENT_TOOLS = frozenset(
+    {
+        "disable_account",
+        "force_logout",
+        "reset_password",
+        "revoke_token",
+    }
+)
+
+_IDENTITY_CONTAINMENT_PRIORITY: dict[str, int] = {
+    "disable_account": 0,
+    "force_logout": 1,
+    "reset_password": 2,
+    "revoke_token": 3,
+}
 
 # Align with HIGH severity floor in RiskAgent / intro defaults.
 RISK_CONTAINMENT_THRESHOLD = 70
@@ -593,6 +616,69 @@ def requires_threat_aligned_containment(
     return int(risk_assessment.risk_score) >= RISK_CONTAINMENT_THRESHOLD
 
 
+def deduplicate_identity_containment(
+    candidates: list[_CandidateT],
+) -> tuple[list[_CandidateT], bool]:
+    """Collapse redundant identity tools on the same account target (ISSUE-359).
+
+    Per account, keeps the highest-priority identity tool only:
+    ``disable_account`` > ``force_logout`` > ``reset_password`` > ``revoke_token``.
+    Does not cap ``isolate_host`` count or total plan size.
+    """
+    if not candidates:
+        return candidates, False
+
+    identity_by_account: dict[str, list[tuple[int, _CandidateT]]] = {}
+    for index, item in enumerate(candidates):
+        if item.tool_name not in IDENTITY_CONTAINMENT_TOOLS:
+            continue
+        account = _normalized_token(_candidate_target(item))
+        if not account:
+            continue
+        identity_by_account.setdefault(account, []).append((index, item))
+
+    if not identity_by_account:
+        return candidates, False
+
+    drop_indices: set[int] = set()
+    for entries in identity_by_account.values():
+        if len(entries) <= 1:
+            continue
+        ranked = sorted(
+            entries,
+            key=lambda pair: (
+                _IDENTITY_CONTAINMENT_PRIORITY.get(pair[1].tool_name, 99),
+                pair[0],
+            ),
+        )
+        for index, _ in ranked[1:]:
+            drop_indices.add(index)
+
+    if not drop_indices:
+        return candidates, False
+    return [item for index, item in enumerate(candidates) if index not in drop_indices], True
+
+
+def apply_identity_containment_dedup_gate(
+    *,
+    candidates: list[_CandidateT],
+    generated_by: ResponsePlanGeneratedBy,
+    strategy: str,
+    disposition_only: bool,
+) -> tuple[list[_CandidateT], ResponsePlanGeneratedBy, str]:
+    """Drop redundant identity containment tools on the same account (ISSUE-359)."""
+    if disposition_only:
+        return candidates, generated_by, strategy
+    deduped, removed = deduplicate_identity_containment(candidates)
+    if not removed:
+        return candidates, generated_by, strategy
+    note = "identity_containment_dedup: redundant account identity tools collapsed"
+    strategy = f"{strategy}; {note}" if strategy else note
+    if generated_by is ResponsePlanGeneratedBy.LLM:
+        generated_by = ResponsePlanGeneratedBy.TEMPLATE
+    return deduped, generated_by, strategy
+
+
 def apply_containment_quality_gate(
     *,
     candidates: list[_CandidateT],
@@ -685,11 +771,14 @@ def _severity_rank(severity: Severity) -> int:
 
 __all__ = [
     "CONTAINMENT_TOOLS",
+    "IDENTITY_CONTAINMENT_TOOLS",
     "MAX_ACTION_LEVEL_WHEN_EVIDENCE_INSUFFICIENT",
     "RISK_CONTAINMENT_THRESHOLD",
     "EntityCoverageNeed",
     "apply_containment_quality_gate",
     "apply_evidence_sufficiency_gate",
+    "apply_identity_containment_dedup_gate",
+    "deduplicate_identity_containment",
     "entity_containment_coverage_needs",
     "evidence_blocks_high_impact_actions",
     "evidence_insufficiency_reason_code",

@@ -27,6 +27,7 @@ from app.agents.response_agent import (
     resolve_entity_targets,
 )
 from app.agents.rules.default_response_rules import DEFAULT_RESPONSE_RULES, get_rule_actions
+from app.agents.rules.response_plan_quality_gate import IDENTITY_CONTAINMENT_TOOLS
 from app.core.llm.base import InMemoryLLMCallAuditRecorder
 from app.core.llm.mock_client import MockLLMClient
 from app.models.action import TERMINAL_DISPOSITION_TOOL
@@ -44,6 +45,7 @@ from app.models.entities import (
     AccountEntity,
     DomainEntity,
     EntitySet,
+    FileEntity,
     HostEntity,
     IPEntity,
 )
@@ -2396,6 +2398,148 @@ async def test_llm_partial_containment_still_isolates_entityset_db_host() -> Non
     assert "entity_coverage_merge" in plan.strategy_summary
     assert "remains online" not in plan.strategy_summary.lower()
     assert "isolated hosts: WKS-DATA-031, SRV-DB-STG-02" in plan.strategy_summary
+
+
+@pytest.mark.asyncio
+async def test_identity_triple_execute_keeps_wks_db_isolate_and_non_identity() -> None:
+    """ISSUE-359 live 12-action shape: collapse identity triple, keep 328 isolates."""
+    dest_ip = "198.51.100.77"
+    domain = "storage-sync-cdn.example"
+    file_path = "/tmp/exfil-staging.bin"
+    event_id = f"evt-{uuid4().hex[:8]}"
+    entities = _exfil_entity_set().model_copy(
+        update={
+            "domains": [
+                DomainEntity(entity_id="dom-cdn", fqdn=domain, source_refs=[_ref()]),
+            ],
+            "files": [
+                FileEntity(entity_id="file-1", path=file_path, source_refs=[_ref()]),
+            ],
+        }
+    )
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(entities=entities))
+
+    class _TwelveActionLLM:
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            import json
+
+            from app.core.llm.base import LLMResponse
+
+            payload = {
+                "actions": [
+                    {
+                        "tool_name": "disable_account",
+                        "target_type": "account",
+                        "target": "svc-analytics-47",
+                        "parameters": {},
+                        "reason": "disable stolen service account",
+                    },
+                    {
+                        "tool_name": "force_logout",
+                        "target_type": "account",
+                        "target": "svc-analytics-47",
+                        "parameters": {},
+                        "reason": "force logout",
+                    },
+                    {
+                        "tool_name": "revoke_token",
+                        "target_type": "account",
+                        "target": "svc-analytics-47",
+                        "parameters": {},
+                        "reason": "revoke session token",
+                    },
+                    {
+                        "tool_name": "isolate_host",
+                        "target_type": "host",
+                        "target": "WKS-DATA-031",
+                        "parameters": {},
+                        "reason": "isolate analytics workstation",
+                    },
+                    {
+                        "tool_name": "scan_host_for_virus",
+                        "target_type": "host",
+                        "target": "WKS-DATA-031",
+                        "parameters": {},
+                        "reason": "scan workstation",
+                    },
+                    {
+                        "tool_name": "scan_host_for_virus",
+                        "target_type": "host",
+                        "target": "SRV-DB-STG-02",
+                        "parameters": {},
+                        "reason": "scan database host",
+                    },
+                    {
+                        "tool_name": "quarantine_file",
+                        "target_type": "file",
+                        "target": file_path,
+                        "parameters": {},
+                        "reason": "quarantine staging payload",
+                    },
+                    {
+                        "tool_name": "block_domain",
+                        "target_type": "domain",
+                        "target": domain,
+                        "parameters": {},
+                        "reason": "block upload domain",
+                    },
+                    {
+                        "tool_name": "block_ip",
+                        "target_type": "ip",
+                        "target": dest_ip,
+                        "parameters": {},
+                        "reason": "block exfil destination",
+                    },
+                    {
+                        "tool_name": "create_ticket",
+                        "target_type": "ticket",
+                        "target": "ticket",
+                        "parameters": {"title": "track", "description": "track"},
+                        "reason": "track response",
+                    },
+                ],
+                "strategy_summary": (
+                    "Disable account, force logout, revoke token; isolate workstation only"
+                ),
+            }
+            return LLMResponse(
+                content=json.dumps(payload),
+                model_name="mock",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            )
+
+    agent = ResponseAgent(
+        llm_client=_TwelveActionLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    identity_tools = [
+        action.tool_name
+        for action in plan.actions
+        if action.tool_name in IDENTITY_CONTAINMENT_TOOLS
+    ]
+    isolate_targets = {
+        action.target for action in plan.actions if action.tool_name == "isolate_host"
+    }
+    scan_targets = {
+        action.target for action in plan.actions if action.tool_name == "scan_host_for_virus"
+    }
+    assert identity_tools == ["disable_account"]
+    assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
+    assert "BACKUP-SRV-01" not in isolate_targets
+    assert scan_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
+    assert any(action.tool_name == "quarantine_file" for action in plan.actions)
+    assert any(
+        action.tool_name == "block_domain" and action.target == domain for action in plan.actions
+    )
+    assert dest_ip in {action.target for action in plan.actions if action.tool_name == "block_ip"}
+    assert "identity_containment_dedup" in plan.strategy_summary
+    assert plan.generated_by is ResponsePlanGeneratedBy.TEMPLATE
 
 
 @pytest.mark.asyncio
