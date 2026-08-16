@@ -118,7 +118,11 @@ async def test_ten_concurrent_events_reach_terminal_state_without_cross_talk(
         )
         try:
             with bind_evidence_projection(EvidenceProjection(session_factory)):
-                await agent.investigate(event_id, lease_acquired=True)
+                await agent.investigate(
+                    event_id,
+                    owner_id=owner_id,
+                    lease_acquired=True,
+                )
         finally:
             await lease.release(event_id, owner_id)
         return event_id
