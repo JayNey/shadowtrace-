@@ -25,6 +25,7 @@ from app.adapters.disposition.error_classification import (
 )
 from app.adapters.registry import DispositionAdapterRegistry
 from app.core.config import get_settings
+from app.core.db_retry import run_with_db_retry
 from app.core.errors import (
     DependencyUnavailableError,
     EventNotFoundError,
@@ -262,6 +263,17 @@ class DispositionSyncService:
                 plan_revision=command.closure_cycle,
             )
         await self._guard.validate(command, ctx)
+
+        event_row = await session.get(
+            orm.SecurityEvent,
+            event_id,
+            with_for_update=True,
+        )
+        if event_row is None:
+            raise ValidationError(
+                "security_event not found for outbox enqueue",
+                details={"event_id": event_id},
+            )
 
         source_row = await session.get(
             orm.SourceObject,
@@ -1147,7 +1159,10 @@ class DispositionSyncService:
         Exists so that EventDispositionService can trigger same-turn
         delivery without reaching into the private ``_deliver_outbox``.
         """
-        await self._deliver_outbox(outbox_id)
+        async def _run() -> None:
+            await self._deliver_outbox(outbox_id)
+
+        await run_with_db_retry(_run, operation="deliver_outbox")
 
     async def _deliver_outbox(self, outbox_id: str) -> None:
         command: DispositionCommand
@@ -1157,6 +1172,17 @@ class DispositionSyncService:
         receipt_job_projection: ActionExecutionJob | None = None
         async with self._session_factory() as session:
             async with session.begin():
+                outbox_event_id = await session.scalar(
+                    select(orm.DispositionOutbox.event_id).where(
+                        orm.DispositionOutbox.outbox_id == outbox_id
+                    )
+                )
+                if outbox_event_id is not None:
+                    await session.get(
+                        orm.SecurityEvent,
+                        outbox_event_id,
+                        with_for_update=True,
+                    )
                 outbox = await session.scalar(
                     select(orm.DispositionOutbox)
                     .where(orm.DispositionOutbox.outbox_id == outbox_id)

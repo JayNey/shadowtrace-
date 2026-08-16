@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.core.errors import DependencyUnavailableError
 from app.orchestration.lease import EventLease
 
 _OWNER = "worker-test"
@@ -258,6 +259,37 @@ async def test_renew_loop_exits_on_first_exception_with_threshold_zero() -> None
         try:
             await asyncio.wait_for(renewal_failed.wait(), timeout=2.0)
             assert renewal_failed.is_set()
+        finally:
+            await _cancel_renew_task(task)
+
+
+@pytest.mark.asyncio
+async def test_renew_redis_unavailable_raises_dependency_error() -> None:
+    """Redis unavailable during renew must not return False (lease theft signal)."""
+    lease = EventLease(None)
+    with pytest.raises(DependencyUnavailableError):
+        await lease.renew("evt-test", _OWNER)
+
+
+@pytest.mark.asyncio
+async def test_renew_redis_unavailable_single_attempt_below_threshold() -> None:
+    """First Redis-unavailable renew must not set on_renewal_failed (ISSUE-355)."""
+    lease = EventLease(None)
+
+    renewal_failed = asyncio.Event()
+    async with _fast_renew_loop():
+        task = await lease.start_renewal(
+            "evt-test",
+            _OWNER,
+            on_renewal_failed=renewal_failed,
+            max_renew_failures=2,
+        )
+        try:
+            await asyncio.sleep(0.01)
+            assert not renewal_failed.is_set(), (
+                "renewal_failed set on first Redis-unavailable renew"
+            )
+            assert not task.done()
         finally:
             await _cancel_renew_task(task)
 

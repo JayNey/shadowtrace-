@@ -127,10 +127,23 @@ class EventLease:
         Returns ``True`` when the lease was successfully renewed.  Returns
         ``False`` when the key is absent (lease lost / expired / released by
         another party) or the owner no longer matches.
+
+        Raises :class:`~app.core.errors.DependencyUnavailableError` when Redis
+        is unavailable so :meth:`start_renewal` can count consecutive errors
+        instead of treating a blip as lease theft (ISSUE-355).
         """
         redis = self._raw_redis()
         if redis is None:
-            return False
+            logger.warning(
+                "EventLease.renew: Redis unavailable for event=%s owner=%s",
+                event_id,
+                owner_id,
+            )
+            raise DependencyUnavailableError(
+                message="event lease store unavailable",
+                error_code="dependency_unavailable",
+                details={"event_id": event_id, "dependency": "redis", "operation": "renew"},
+            )
         key = _lease_key(event_id)
         current = await redis.get(key)
         if current is None:
@@ -238,9 +251,10 @@ class EventLease:
                 try:
                     ok = await self.renew(event_id, owner_id)
                     if not ok:
+                        # False only means key absent or owner mismatch — real loss.
                         logger.error(
                             "EventLease: renewal failed for event=%s owner=%s "
-                            "- lease may have been stolen",
+                            "- lease lost (key absent or owner mismatch)",
                             event_id,
                             owner_id,
                         )
