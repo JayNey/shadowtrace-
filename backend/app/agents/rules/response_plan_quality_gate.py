@@ -24,6 +24,7 @@ EntitySet; never re-introduce a tool PolicyFilter rejected.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, TypeVar
@@ -200,6 +201,159 @@ def _build_coverage_candidate(prototype: _CandidateT, need: EntityCoverageNeed) 
         except TypeError:
             continue
     raise TypeError(f"cannot construct coverage candidate for {need.tool_name} from {cls.__name__}")
+
+
+def _isolate_host_targets(candidates: list[_CandidateT]) -> list[str]:
+    """Collect ``isolate_host`` targets from final candidates (stable order, deduped)."""
+    seen: set[str] = set()
+    targets: list[str] = []
+    for item in candidates:
+        if item.tool_name != "isolate_host":
+            continue
+        target = str(getattr(item, "target", "") or "").strip()
+        if not target:
+            continue
+        key = _normalized_token(target)
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(target)
+    return targets
+
+
+_ONLINE_CLAIM_VERBS = re.compile(
+    r"(?i)\b(?:remain(?:s|ing)?|leave|leaving|keep|keeping|stay|stays|still)\b"
+)
+_ONLINE_WORD = re.compile(r"(?i)\bonline\b")
+_CLAUSE_SPLIT = re.compile(r"\s*;\s*|(?<=\.)\s+")
+_AND_OR_SPLIT = re.compile(r"\s+(?:and|or)\s+", re.IGNORECASE)
+
+
+def _host_token_in_text(text: str, host: str) -> bool:
+    if not host:
+        return False
+    return (
+        re.search(
+            rf"(?i)(?<![A-Za-z0-9_]){re.escape(host)}(?![A-Za-z0-9_])",
+            text,
+        )
+        is not None
+    )
+
+
+def _is_online_claim(clause: str) -> bool:
+    return bool(_ONLINE_WORD.search(clause) and _ONLINE_CLAIM_VERBS.search(clause))
+
+
+def _isolated_host_match_tokens(
+    candidates: list[_CandidateT],
+    entities: EntitySet,
+) -> list[str]:
+    """Candidate isolate targets plus EntitySet hostname/IP aliases (ISSUE-357)."""
+    tokens = _isolate_host_targets(candidates)
+    seen = {_normalized_token(item) for item in tokens}
+    isolated = set(seen)
+    for need in entity_containment_coverage_needs(entities):
+        if need.tool_name != "isolate_host":
+            continue
+        if not (need.aliases & isolated):
+            continue
+        for alias in need.aliases:
+            if alias not in seen:
+                seen.add(alias)
+                tokens.append(alias)
+        canonical = need.canonical_target.strip()
+        key = _normalized_token(canonical)
+        if canonical and key not in seen:
+            seen.add(key)
+            tokens.append(canonical)
+    return tokens
+
+
+def _isolate_host_display_targets(
+    candidates: list[_CandidateT],
+    entities: EntitySet,
+) -> list[str]:
+    """Prefer EntitySet canonical hostnames in the approval appendix."""
+    display: list[str] = []
+    seen: set[str] = set()
+    for target in _isolate_host_targets(candidates):
+        label = target
+        key = _normalized_token(target)
+        for need in entity_containment_coverage_needs(entities):
+            if need.tool_name != "isolate_host":
+                continue
+            if key in need.aliases or key == _normalized_token(need.canonical_target):
+                label = need.canonical_target
+                key = _normalized_token(label)
+                break
+        if key in seen:
+            continue
+        seen.add(key)
+        display.append(label)
+    return display
+
+
+def _clause_mentions_isolated_host(clause: str, isolated_tokens: list[str]) -> bool:
+    return any(_host_token_in_text(clause, token) for token in isolated_tokens if token)
+
+
+def _strip_online_claims_for_isolated_hosts(
+    strategy: str,
+    isolated_tokens: list[str],
+) -> str:
+    """Drop clauses that claim an isolated host remains/leave/keep/stays online."""
+    if not strategy or not isolated_tokens:
+        return strategy
+    kept: list[str] = []
+    for clause in _CLAUSE_SPLIT.split(strategy):
+        clause = clause.strip(" .;")
+        if not clause:
+            continue
+        fragments = (
+            _AND_OR_SPLIT.split(clause) if _ONLINE_WORD.search(clause) else [clause]
+        )
+        kept_fragments = [
+            fragment.strip()
+            for fragment in fragments
+            if fragment.strip()
+            and not (
+                _is_online_claim(fragment)
+                and _clause_mentions_isolated_host(fragment, isolated_tokens)
+            )
+        ]
+        if kept_fragments:
+            kept.append("; ".join(kept_fragments))
+    text = "; ".join(kept)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip(" ;")
+
+
+def _append_isolated_hosts_note(strategy: str, isolated_hosts: list[str]) -> str:
+    if not isolated_hosts:
+        return strategy
+    note = f"isolated hosts: {', '.join(isolated_hosts)}"
+    if note in strategy:
+        return strategy
+    return f"{strategy}; {note}" if strategy else note
+
+
+def _reconcile_strategy_after_coverage_merge(
+    strategy: str,
+    candidates: list[_CandidateT],
+    *,
+    entities: EntitySet,
+    force_note: bool = False,
+) -> str:
+    """Align approval narrative with final ``isolate_host`` targets (ISSUE-357)."""
+    isolated_hosts = _isolate_host_display_targets(candidates, entities)
+    if not isolated_hosts:
+        return strategy
+    tokens = _isolated_host_match_tokens(candidates, entities)
+    stripped = _strip_online_claims_for_isolated_hosts(strategy, tokens)
+    if stripped == strategy and not force_note:
+        return strategy
+    return _append_isolated_hosts_note(stripped, isolated_hosts)
 
 
 def _merge_entity_coverage(
@@ -505,6 +659,12 @@ def apply_containment_quality_gate(
     if coverage_incomplete:
         note = "containment_quality_gate: entity_coverage_incomplete"
         strategy = f"{strategy}; {note}" if strategy else note
+    strategy = _reconcile_strategy_after_coverage_merge(
+        strategy,
+        candidates,
+        entities=entities,
+        force_note=coverage_added,
+    )
 
     if not _containment_candidates(candidates):
         note = "containment_quality_gate_unsatisfied: no grounded containment after PolicyFilter"

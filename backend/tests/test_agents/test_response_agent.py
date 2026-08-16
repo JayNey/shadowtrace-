@@ -2116,7 +2116,9 @@ async def test_llm_partial_containment_still_isolates_entityset_db_host() -> Non
                         "reason": "disable stolen service account",
                     },
                 ],
-                "strategy_summary": "LLM partial containment omitting DB host",
+                "strategy_summary": (
+                    "Isolate workstation; SRV-DB-STG-02 remains online pending investigation"
+                ),
             }
             return LLMResponse(
                 content=json.dumps(payload),
@@ -2140,6 +2142,8 @@ async def test_llm_partial_containment_still_isolates_entityset_db_host() -> Non
     assert "BACKUP-SRV-01" not in isolate_targets
     assert any(action.tool_name == "disable_account" for action in plan.actions)
     assert "entity_coverage_merge" in plan.strategy_summary
+    assert "remains online" not in plan.strategy_summary.lower()
+    assert "isolated hosts: WKS-DATA-031, SRV-DB-STG-02" in plan.strategy_summary
 
 
 @pytest.mark.asyncio

@@ -994,6 +994,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                     input=input,
                     triage=triage,
                     entities=entities,
+                    final_verdict=ctx.get("final_verdict"),
                 )
                 if llm_candidates:
                     summary = (strategy_summary or "").strip() or "LLM proposed candidate actions"
@@ -1031,6 +1032,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
         input: ResponseAgentInput,
         triage: TriageResult,
         entities: EntitySet,
+        final_verdict: FinalVerdict | str | None = None,
     ) -> tuple[list[ActionCandidate], str]:
         assert self.llm_client is not None
         source_snapshot: dict[str, Any] | None = None
@@ -1081,6 +1083,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             evidence_output=input.evidence_output,
             available_tools=available,
             entities_summary=_entities_summary(entities),
+            final_verdict=final_verdict,
         )
         response = await self.llm_client.chat(
             messages,

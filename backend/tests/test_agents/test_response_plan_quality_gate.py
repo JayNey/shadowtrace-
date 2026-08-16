@@ -461,7 +461,9 @@ def test_apply_gate_merges_uncovered_db_host_without_isolating_bait() -> None:
         candidates=llm_filtered,
         rule_fallback_candidates=rule_filtered,
         generated_by=ResponsePlanGeneratedBy.LLM,
-        strategy="LLM partial containment",
+        strategy=(
+            "Isolate workstation; SRV-DB-STG-02 remains online pending investigation"
+        ),
         severity=Severity.HIGH,
         risk_assessment=_risk(),
         final_verdict=FinalVerdict.CONFIRMED_THREAT,
@@ -475,6 +477,131 @@ def test_apply_gate_merges_uncovered_db_host_without_isolating_bait() -> None:
     assert any(item.target == "198.51.100.77" for item in merged if item.tool_name == "block_ip")
     assert generated_by is ResponsePlanGeneratedBy.LLM
     assert "entity_coverage_merge" in strategy
+    assert "remains online" not in strategy.lower()
+    assert "isolated hosts: WKS-DATA-031, SRV-DB-STG-02" in strategy
+
+
+def test_apply_gate_reconciles_leave_host_online_clause() -> None:
+    llm_filtered = [_Candidate("isolate_host", "WKS-DATA-031")]
+    rule_filtered = [_Candidate("isolate_host", "SRV-DB-STG-02")]
+    _, _, strategy = apply_containment_quality_gate(
+        candidates=llm_filtered,
+        rule_fallback_candidates=rule_filtered,
+        generated_by=ResponsePlanGeneratedBy.LLM,
+        strategy="Contain WKS; leave SRV-DB-STG-02 online for monitoring",
+        severity=Severity.HIGH,
+        risk_assessment=_risk(),
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        entities=_exfil_coverage_entities(),
+        disposition_only=False,
+    )
+    assert "leave SRV-DB-STG-02 online" not in strategy.lower()
+    assert "isolated hosts: WKS-DATA-031, SRV-DB-STG-02" in strategy
+
+
+def test_apply_gate_reconciles_keep_and_stays_and_leave_the_db_clauses() -> None:
+    llm_filtered = [_Candidate("isolate_host", "WKS-DATA-031")]
+    rule_filtered = [_Candidate("isolate_host", "SRV-DB-STG-02")]
+    variants = (
+        "keep SRV-DB-STG-02 online",
+        "SRV-DB-STG-02 stays online",
+        "leave the DB SRV-DB-STG-02 online",
+    )
+    for original in variants:
+        _, _, strategy = apply_containment_quality_gate(
+            candidates=llm_filtered,
+            rule_fallback_candidates=rule_filtered,
+            generated_by=ResponsePlanGeneratedBy.LLM,
+            strategy=original,
+            severity=Severity.HIGH,
+            risk_assessment=_risk(),
+            final_verdict=FinalVerdict.CONFIRMED_THREAT,
+            entities=_exfil_coverage_entities(),
+            disposition_only=False,
+        )
+        lowered = strategy.lower()
+        assert "keep srv-db-stg-02 online" not in lowered
+        assert "stays online" not in lowered
+        assert "leave the db srv-db-stg-02 online" not in lowered
+        assert "isolated hosts: WKS-DATA-031, SRV-DB-STG-02" in strategy
+
+
+def test_apply_gate_preserves_non_isolated_host_online_clause() -> None:
+    llm_filtered = [_Candidate("isolate_host", "WKS-DATA-031")]
+    rule_filtered = [_Candidate("isolate_host", "SRV-DB-STG-02")]
+    _, _, strategy = apply_containment_quality_gate(
+        candidates=llm_filtered,
+        rule_fallback_candidates=rule_filtered,
+        generated_by=ResponsePlanGeneratedBy.LLM,
+        strategy=(
+            "BACKUP-SRV-01 remains online; SRV-DB-STG-02 remains online pending investigation"
+        ),
+        severity=Severity.HIGH,
+        risk_assessment=_risk(),
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        entities=_exfil_coverage_entities(),
+        disposition_only=False,
+    )
+    assert "BACKUP-SRV-01 remains online" in strategy
+    assert "SRV-DB-STG-02 remains online" not in strategy
+    assert "isolated hosts: WKS-DATA-031, SRV-DB-STG-02" in strategy
+
+
+def test_apply_gate_reconciles_when_coverage_already_complete() -> None:
+    """ISSUE-357: contradictory strategy is fixed even when merge adds nothing."""
+    both_hosts = [
+        _Candidate("isolate_host", "WKS-DATA-031"),
+        _Candidate("isolate_host", "SRV-DB-STG-02"),
+        _Candidate("disable_account", "svc-analytics-47"),
+        _Candidate("block_ip", "198.51.100.77"),
+    ]
+    merged, _, strategy = apply_containment_quality_gate(
+        candidates=both_hosts,
+        rule_fallback_candidates=both_hosts,
+        generated_by=ResponsePlanGeneratedBy.LLM,
+        strategy="Isolate workstation; SRV-DB-STG-02 remains online pending investigation",
+        severity=Severity.HIGH,
+        risk_assessment=_risk(),
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        entities=_exfil_coverage_entities(),
+        disposition_only=False,
+    )
+    isolate_targets = {item.target for item in merged if item.tool_name == "isolate_host"}
+    assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
+    assert "entity_coverage_merge" not in strategy
+    assert "remains online" not in strategy.lower()
+    assert "isolated hosts: WKS-DATA-031, SRV-DB-STG-02" in strategy
+
+
+def test_apply_gate_strips_hostname_when_isolate_target_is_ip() -> None:
+    entities = EntitySet(
+        hosts=[
+            HostEntity(entity_id="host-wks", hostname="WKS-DATA-031"),
+            HostEntity(
+                entity_id="host-db",
+                hostname="SRV-DB-STG-02",
+                ip="10.44.20.88",
+            ),
+        ]
+    )
+    merged, _, strategy = apply_containment_quality_gate(
+        candidates=[
+            _Candidate("isolate_host", "WKS-DATA-031"),
+            _Candidate("isolate_host", "10.44.20.88"),
+        ],
+        rule_fallback_candidates=[_Candidate("isolate_host", "SRV-DB-STG-02")],
+        generated_by=ResponsePlanGeneratedBy.LLM,
+        strategy="SRV-DB-STG-02 remains online pending investigation",
+        severity=Severity.HIGH,
+        risk_assessment=_risk(),
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        entities=entities,
+        disposition_only=False,
+    )
+    isolate_targets = {item.target for item in merged if item.tool_name == "isolate_host"}
+    assert isolate_targets == {"WKS-DATA-031", "10.44.20.88"}
+    assert "remains online" not in strategy.lower()
+    assert "isolated hosts: WKS-DATA-031, SRV-DB-STG-02" in strategy
 
 
 def test_apply_gate_synthesizes_isolate_when_rules_omit_host() -> None:
@@ -498,6 +625,7 @@ def test_apply_gate_synthesizes_isolate_when_rules_omit_host() -> None:
     assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
     assert "BACKUP-SRV-01" not in isolate_targets
     assert "entity_coverage_merge" in strategy
+    assert "isolated hosts: WKS-DATA-031, SRV-DB-STG-02" in strategy
 
 
 def test_apply_gate_does_not_synthesize_tool_absent_from_plan_and_fallback() -> None:
