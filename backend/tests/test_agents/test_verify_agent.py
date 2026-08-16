@@ -4123,6 +4123,7 @@ class TestIssue060ReviewFixes:
 class TestIssue362Fix011WeakEvidenceRouting:
     """VerifyAgent demotes non-mock weak confirmation evidence before CLOSED."""
 
+    @pytest.mark.asyncio(False)
     @pytest.mark.parametrize(
         ("evidence_raw", "disposition_is_mock", "expect_recovery"),
         [
@@ -4162,8 +4163,11 @@ class TestIssue362Fix011WeakEvidenceRouting:
             assert detail == "writeback_confirmed"
         if evidence_raw is None:
             assert tier is None
-        elif evidence_raw in ConfirmationEvidence._value2member_map_:
-            assert tier == evidence_raw
+        else:
+            try:
+                assert tier == ConfirmationEvidence(evidence_raw).value
+            except ValueError:
+                assert tier == evidence_raw
 
     async def test_non_mock_status_queried_terminal_routes_recovery(
         self, monkeypatch: pytest.MonkeyPatch
