@@ -789,6 +789,41 @@ class TestLeaseExpiryRecovery:
         assert events[_EVENT_ID_2]["status"] == EventStatus.REPORTING
 
 
+class TestLeaseAcquiredOwnerValidation:
+    """ISSUE-366: lease_acquired=True requires an explicit owner_id (fail-closed)."""
+
+    async def test_lease_acquired_without_owner_id_raises_validation_error(self) -> None:
+        lease = _InMemoryEventLease()
+        owner = generate_owner_id()
+        assert await lease.acquire(_EVENT_ID, owner) is True
+        agent = _build_super_agent(
+            lease=lease,
+            event_service=_MockEventService({_EVENT_ID: {"status": EventStatus.NEW}}),
+        )
+        with pytest.raises(ValidationError) as exc:
+            await agent.investigate(_EVENT_ID, lease_acquired=True)
+        assert exc.value.error_code == "validation_error"
+        assert "owner_id" in exc.value.message
+
+    async def test_lease_acquired_with_owner_id_still_fails_on_stolen_lease(self) -> None:
+        """True owner mismatch during renewal remains InvestigationLeaseLostError."""
+        lease = _RenewalFailLease(steal_after_s=0.02)
+        owner = generate_owner_id()
+        assert await lease.acquire(_EVENT_ID, owner) is True
+        triage_started = asyncio.Event()
+        agent = _build_super_agent(
+            lease=lease,
+            event_service=_MockEventService({_EVENT_ID: {"status": EventStatus.NEW}}),
+        )
+        agent.triage_agent = _BlockingTriageAgent(started=triage_started)  # type: ignore[assignment]
+
+        with pytest.raises(InvestigationLeaseLostError) as exc:
+            await agent.investigate(_EVENT_ID, owner_id=owner, lease_acquired=True)
+
+        assert exc.value.error_code == "investigation_lease_lost"
+        assert triage_started.is_set()
+
+
 class TestRenewalFailure:
     """ISSUE-182: lease renewal failure must stop orchestration without poisoning."""
 

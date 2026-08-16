@@ -38,6 +38,7 @@ from app.core.errors import (
     InvestigationInProgressError,
     InvestigationLeaseLostError,
     ShadowTraceError,
+    ValidationError,
     is_retryable,
 )
 from app.models.agent_io import (
@@ -384,6 +385,12 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             raise RuntimeError("SuperAgent requires TriageAgent and EvidenceAgent")
         if self.risk_agent is None or self.report_agent is None:
             raise RuntimeError("SuperAgent requires RiskAgent and ReportAgent")
+
+        if lease_acquired and not owner_id:
+            raise ValidationError(
+                "owner_id is required when lease_acquired is True",
+                details={"event_id": event_id},
+            )
 
         resolved_owner = owner_id or generate_owner_id()
         acquired = lease_acquired
