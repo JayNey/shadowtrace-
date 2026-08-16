@@ -1,0 +1,370 @@
+{
+  "aggregates": {
+    "case_count": 2,
+    "error_count": 2,
+    "fail_count": 0,
+    "pass_count": 0,
+    "pass_rate": 0.0,
+    "required_scorer_error_count": 2,
+    "unevaluable_count": 0
+  },
+  "approval_note": "Not a governance approval; consume via #630 only.",
+  "artifact_hash": "5a09bb53aac49c8678f40bbf8ce5bab32225470e01e5342437806096c1cc43c0",
+  "case_results": [
+    {
+      "candidate_refs": {
+        "detection_scope_id": "dscope-b7c8ae649dd2",
+        "feature_contract_version": "1.0",
+        "model_release_hash": "923939d28bfaf57522062ab98194eb020e55efb36cec11f5c33e1d0b3f892d66",
+        "model_release_id": "mock-account-mad-v1",
+        "package_content_hash": "98c1ac1fbbc34a1d7e2f3621cc8f0ee388ea08f5466c42767b17fdc41c82a95d",
+        "package_id": "drpkg-det-cold-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-cold-anomaly"
+        ],
+        "scope_revision_id": "dscope-rev-1dcae5f6"
+      },
+      "case_id": "threat_cold_start_insufficient_history",
+      "case_status": "failed",
+      "observation": {
+        "candidates": [],
+        "case_id": "threat_cold_start_insufficient_history",
+        "observation_available": true,
+        "replay_cutoff_at": "2026-08-01T15:30:00Z",
+        "replay_notes": "shadow_runtime_v1;seed=42;n=7d29d9b2",
+        "resource_metrics": {
+          "candidate_count": 0,
+          "observations_scanned": 0,
+          "replay_duration_ms": 10,
+          "rules_evaluated": 1,
+          "runtime_error_count": 1
+        },
+        "runtime_errors": [
+          {
+            "created_at": "2026-08-16T02:11:22.637185Z",
+            "detail": {
+              "category": "insufficient_history",
+              "entity_id": "acct-cold-001",
+              "entity_type": "account",
+              "rule_id": "rule-cold-anomaly"
+            },
+            "error_category": "validation_error",
+            "error_id": "drerr-4132fb6ed52a",
+            "error_message": "missing detection feature baseline for snapshot entity",
+            "package_id": "drpkg-det-cold-v1",
+            "rule_id": "rule-cold-anomaly",
+            "source_tenant_id": "tenant-det-cold"
+          }
+        ],
+        "slice_type": "threat"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "missing detection feature baseline for snapshot entity",
+          "outcome": "error",
+          "reason_code": "runtime_error",
+          "scorer_id": "threat_detection"
+        },
+        {
+          "details": {},
+          "message": "tenant isolation satisfied",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "tenant_isolation"
+        },
+        {
+          "details": {},
+          "message": "no resource budget configured",
+          "outcome": "skipped",
+          "reason_code": "not_applicable",
+          "scorer_id": "resource_budget"
+        }
+      ],
+      "slice_type": "threat",
+      "truth_content_hash": "e6a87659675c50248d375fc3dcd7bb2a42216d498972ffdbdfe159f845d543ea",
+      "truth_id": "truth-f470623503f7",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    },
+    {
+      "candidate_refs": {
+        "detection_scope_id": "dscope-521a006a9c98",
+        "feature_contract_version": "1.0",
+        "model_release_hash": null,
+        "model_release_id": null,
+        "package_content_hash": "2d5026d970c59e2ec453c944c33ec48a967b28bdb5955eb1751e62eb902d44ba",
+        "package_id": "drpkg-det-resource-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-resource-count"
+        ],
+        "scope_revision_id": "dscope-rev-1ade7c2e"
+      },
+      "case_id": "threat_resource_budget_exceeded",
+      "case_status": "failed",
+      "observation": {
+        "candidates": [],
+        "case_id": "threat_resource_budget_exceeded",
+        "observation_available": true,
+        "replay_cutoff_at": "2026-08-01T15:30:00Z",
+        "replay_notes": "shadow_runtime_v1;seed=42;n=9fa9f5c3",
+        "resource_metrics": {
+          "candidate_count": 0,
+          "observations_scanned": 0,
+          "replay_duration_ms": 7,
+          "rules_evaluated": 1,
+          "runtime_error_count": 1
+        },
+        "runtime_errors": [
+          {
+            "created_at": "2026-08-16T02:11:22.646528Z",
+            "detail": {
+              "found": 3,
+              "max_scan": 2
+            },
+            "error_category": "validation_error",
+            "error_id": "drerr-e18600dece90",
+            "error_message": "observation scan cost limit exceeded",
+            "package_id": "drpkg-det-resource-v1",
+            "rule_id": "rule-resource-count",
+            "source_tenant_id": "tenant-det-resource"
+          }
+        ],
+        "slice_type": "threat"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "observation scan cost limit exceeded",
+          "outcome": "error",
+          "reason_code": "runtime_error",
+          "scorer_id": "threat_detection"
+        },
+        {
+          "details": {},
+          "message": "tenant isolation satisfied",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "tenant_isolation"
+        },
+        {
+          "details": {},
+          "message": "observation scan cost limit exceeded",
+          "outcome": "fail",
+          "reason_code": "scan_budget_exceeded",
+          "scorer_id": "resource_budget"
+        }
+      ],
+      "slice_type": "threat",
+      "truth_content_hash": "55e1d3d406fcdcb491d47ab33f248e53de899db1ee8f8e0a81646cbd2867f7f4",
+      "truth_id": "truth-7b2ce6fa5e1a",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    }
+  ],
+  "code_sha": "baseline0001",
+  "completed_at": "2026-08-16T02:11:22.648371Z",
+  "config": {
+    "candidate_refs": {
+      "detection_scope_id": "dscope-b7c8ae649dd2",
+      "feature_contract_version": "1.0",
+      "model_release_hash": "923939d28bfaf57522062ab98194eb020e55efb36cec11f5c33e1d0b3f892d66",
+      "model_release_id": "mock-account-mad-v1",
+      "package_content_hash": "98c1ac1fbbc34a1d7e2f3621cc8f0ee388ea08f5466c42767b17fdc41c82a95d",
+      "package_id": "drpkg-det-cold-v1",
+      "package_version": 1,
+      "rule_ids": [
+        "rule-cold-anomaly"
+      ],
+      "scope_revision_id": "dscope-rev-1dcae5f6"
+    },
+    "candidate_refs_entries": [
+      {
+        "detection_scope_id": "dscope-b7c8ae649dd2",
+        "feature_contract_version": "1.0",
+        "model_release_hash": "923939d28bfaf57522062ab98194eb020e55efb36cec11f5c33e1d0b3f892d66",
+        "model_release_id": "mock-account-mad-v1",
+        "package_content_hash": "98c1ac1fbbc34a1d7e2f3621cc8f0ee388ea08f5466c42767b17fdc41c82a95d",
+        "package_id": "drpkg-det-cold-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-cold-anomaly"
+        ],
+        "scope_revision_id": "dscope-rev-1dcae5f6"
+      },
+      {
+        "detection_scope_id": "dscope-521a006a9c98",
+        "feature_contract_version": "1.0",
+        "model_release_hash": null,
+        "model_release_id": null,
+        "package_content_hash": "2d5026d970c59e2ec453c944c33ec48a967b28bdb5955eb1751e62eb902d44ba",
+        "package_id": "drpkg-det-resource-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-resource-count"
+        ],
+        "scope_revision_id": "dscope-rev-1ade7c2e"
+      }
+    ],
+    "candidate_set_hash": "9d86efc2c0da44106d85cdb2b16d8590df386a627c7edbda0a1c95494c8626e0",
+    "cutoff_at": "2026-08-01T15:30:00Z",
+    "effective_cutoff_at": "2026-08-01T15:30:00Z",
+    "extra": {},
+    "replay_fidelity": "shadow_runtime_v1",
+    "replay_mode": "detection_shadow",
+    "scorer_ids": [
+      "benign_detection",
+      "resource_budget",
+      "tenant_isolation",
+      "threat_detection",
+      "unevaluable_coverage"
+    ],
+    "seed": 42
+  },
+  "dataset_content_hash": "c0b707fb1c805b196d57546ceb89bf8d49f7cbac320a674d3d73f2102a3bae0c",
+  "dataset_id": "detection_shadow_v1_fail_closed",
+  "dataset_version": "2026.08.02",
+  "errors": [],
+  "evaluation_id": "det-eval-24da4666-e948-4555-8fa8-fc48acf676a6",
+  "gate": {
+    "diffs": [
+      {
+        "actual": "error",
+        "expected": "pass_or_unevaluable",
+        "field": "scorer:threat_detection",
+        "reason": "required scorer error on case threat_cold_start_insufficient_history: runtime_error"
+      },
+      {
+        "actual": "error",
+        "expected": "pass_or_unevaluable",
+        "field": "scorer:threat_detection",
+        "reason": "required scorer error on case threat_resource_budget_exceeded: runtime_error"
+      },
+      {
+        "actual": 0.0,
+        "expected": 1.0,
+        "field": "pass_rate",
+        "reason": "pass_rate below manifest minimum"
+      },
+      {
+        "actual": 2,
+        "expected": 0,
+        "field": "error_count",
+        "reason": "error_count above manifest maximum"
+      }
+    ],
+    "manifest_path": "data/evaluation/detection_shadow_v1_fail_closed/threshold_manifest.json",
+    "manifest_version": "2026.08.02",
+    "quarantine_active": false,
+    "verdict": "fail_closed"
+  },
+  "quality_report": {
+    "code_sha": "baseline0001",
+    "dataset_content_hash": "c0b707fb1c805b196d57546ceb89bf8d49f7cbac320a674d3d73f2102a3bae0c",
+    "dataset_id": "detection_shadow_v1_fail_closed",
+    "dataset_version": "2026.08.02",
+    "grouping_scorer_summaries": [],
+    "metrics": [
+      {
+        "confidence_interval": null,
+        "denominator": {
+          "denominator": 0,
+          "error_count": 2,
+          "missing_truth_count": 0,
+          "numerator": 0
+        },
+        "metric_id": "threat_recall",
+        "reason": "scorer error or missing truth; metric withheld",
+        "status": "fail_closed",
+        "value": null
+      },
+      {
+        "confidence_interval": null,
+        "denominator": {
+          "denominator": 0,
+          "error_count": 2,
+          "missing_truth_count": 0,
+          "numerator": 0
+        },
+        "metric_id": "threat_precision",
+        "reason": "scorer error or missing truth; metric withheld",
+        "status": "fail_closed",
+        "value": null
+      },
+      {
+        "confidence_interval": null,
+        "denominator": {
+          "denominator": 0,
+          "error_count": 0,
+          "missing_truth_count": 0,
+          "numerator": 0
+        },
+        "metric_id": "benign_specificity",
+        "reason": "insufficient sample for metric",
+        "status": "insufficient_sample",
+        "value": null
+      },
+      {
+        "confidence_interval": null,
+        "denominator": {
+          "denominator": 0,
+          "error_count": 0,
+          "missing_truth_count": 0,
+          "numerator": 0
+        },
+        "metric_id": "benign_fpr",
+        "reason": "insufficient sample for metric",
+        "status": "insufficient_sample",
+        "value": null
+      },
+      {
+        "confidence_interval": null,
+        "denominator": {
+          "denominator": 0,
+          "error_count": 0,
+          "missing_truth_count": 0,
+          "numerator": 0
+        },
+        "metric_id": "unevaluable_coverage",
+        "reason": "insufficient sample for metric",
+        "status": "insufficient_sample",
+        "value": null
+      }
+    ],
+    "release_refs": {
+      "config_profile": "mock_p0",
+      "kb_release_id": null,
+      "model_release_id": null,
+      "prompt_release_id": null,
+      "rule_release_id": null
+    },
+    "sample_counts": {
+      "benign": 0,
+      "threat": 2,
+      "total": 2,
+      "unevaluable": 0
+    },
+    "schema_version": "1.0"
+  },
+  "resource_summary": {
+    "max_observations_scanned_per_case": 0,
+    "max_replay_duration_ms_per_case": 10,
+    "total_candidates": 0,
+    "total_observations_scanned": 0,
+    "total_replay_duration_ms": 17,
+    "total_rules_evaluated": 2,
+    "total_runtime_errors": 2
+  },
+  "schema_version": "1.0",
+  "started_at": "2026-08-16T02:11:22.624520Z",
+  "status": "failed",
+  "tenant_id": "tenant-detection-eval",
+  "tenant_safety": {
+    "fail_count": 0,
+    "pass_count": 0,
+    "probe_count": 0,
+    "probes": []
+  }
+}

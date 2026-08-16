@@ -108,11 +108,33 @@ def test_cli_exit_code_observe_mode_allows_non_completed_with_gate_pass() -> Non
     )
 
 
-def test_shipped_failing_baseline_is_nonzero_only_in_required_mode() -> None:
+def test_shipped_gate_baseline_is_zero_in_required_mode() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     baseline = json.loads(
         (
             repo_root / "data" / "evaluation" / "detection_shadow_v1" / "baseline_artifact.json"
+        ).read_text(encoding="utf-8")
+    )
+    inputs = {
+        "artifact_status": baseline["status"],
+        "gate_verdict": baseline["gate"]["verdict"],
+        "baseline_compare_failed": False,
+        "required_scorer_error_count": baseline["aggregates"]["required_scorer_error_count"],
+    }
+
+    assert cli_exit_code(**inputs, allow_gate_fail=False) == 0
+    assert cli_exit_code(**inputs, allow_gate_fail=True) == 0
+
+
+def test_shipped_failing_baseline_is_nonzero_only_in_required_mode() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    baseline = json.loads(
+        (
+            repo_root
+            / "data"
+            / "evaluation"
+            / "detection_shadow_v1_fail_closed"
+            / "baseline_artifact.json"
         ).read_text(encoding="utf-8")
     )
     inputs = {
@@ -136,15 +158,32 @@ def test_ci_required_detection_step_and_artifact_upload_are_strict() -> None:
     by_name = {step.get("name"): step for step in steps if step.get("name")}
 
     required = by_name["Run mock detection evaluation (required gate)"]
+    observe = by_name["Run mock detection fail-closed evaluation (observe gate)"]
     assert "continue-on-error" not in required
+    assert "continue-on-error" not in observe
+    assert observe.get("if") == "success() || failure()"
     for bypass in ("--allow-gate-fail", "|| true", "|| :", "set +e"):
         assert bypass not in required["run"]
+    assert "--dataset-dir" in required["run"]
+    assert "data/evaluation/detection_shadow_v1" in required["run"]
+    assert "detection_shadow_v1_fail_closed" not in required["run"]
+    assert "--allow-gate-fail" in observe["run"]
+    assert (
+        "data/evaluation/detection_shadow_v1_fail_closed/baseline_artifact.json" in observe["run"]
+    )
 
     detection_upload = by_name["Upload required detection artifact"]
     assert detection_upload["if"] == "always()"
     assert detection_upload["with"]["if-no-files-found"] == "error"
     assert detection_upload["with"]["path"].strip() == (
         "artifacts/evaluation/detection_ci_run.json"
+    )
+
+    observe_upload = by_name["Upload detection fail-closed observe artifact"]
+    assert observe_upload["if"] == "always()"
+    assert observe_upload["with"]["if-no-files-found"] == "error"
+    assert observe_upload["with"]["path"].strip() == (
+        "artifacts/evaluation/detection_fail_closed_ci_run.json"
     )
 
 

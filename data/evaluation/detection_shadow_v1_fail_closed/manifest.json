@@ -1,8 +1,8 @@
 {
-  "dataset_id": "detection_shadow_v1",
+  "dataset_id": "detection_shadow_v1_fail_closed",
   "dataset_version": "2026.08.02",
   "tenant_id": "tenant-detection-eval",
   "schema_version": "1.0",
   "default_cutoff_at": "2026-08-01T15:30:00+00:00",
-  "content_hash": "055fe62e8bb3c0e6f12c60dbadc20f4b235045c8eb216c720c392488fe9e631d"
+  "content_hash": "c0b707fb1c805b196d57546ceb89bf8d49f7cbac320a674d3d73f2102a3bae0c"
 }
