@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -226,6 +227,26 @@ class _PartialLLM:
         return LLMResponse(
             content='{"title":"partial","summary":"partial","sections":{"overview":"only one"}}',
             model_name="partial",
+        )
+
+
+class _NearlyCompleteLLM:
+    """ISSUE-358: 14/15 sections — missing appendix_index only."""
+
+    async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
+        sections = {
+            key: f"llm content for {key}"
+            for key in SECTION_KEYS
+            if key != "appendix_index"
+        }
+        payload = {
+            "title": "nearly complete",
+            "summary": "nearly complete summary",
+            "sections": sections,
+        }
+        return LLMResponse(
+            content=json.dumps(payload, ensure_ascii=False),
+            model_name="nearly-complete",
         )
 
 
@@ -911,7 +932,39 @@ async def test_llm_incomplete_sections_falls_back_to_template(
         )
     )
     assert report.generated_by == GENERATED_BY_TEMPLATE
+    assert "report_llm_fallback:partial_sections" in report.warnings
     assert len(report.sections) == 15
+    overview = next(s for s in report.sections if s.key == "overview")
+    assert overview.content.startswith("only one")
+
+
+@pytest.mark.asyncio
+async def test_llm_missing_non_core_section_merges_and_stays_llm(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    """ISSUE-358: missing appendix_index alone must not downgrade the whole report."""
+    event_id = f"evt-report-nearly-llm-{uuid4().hex[:8]}"
+    await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
+    event_service.final_verdicts[event_id] = FinalVerdict.CONFIRMED_THREAT
+
+    agent = ReportAgent(
+        llm_client=_NearlyCompleteLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    report = await agent.execute(
+        ReportAgentInput(
+            event_id=event_id,
+            evidence_output=_main_evidence(event_id),
+            risk_assessment=_high_risk(),
+        )
+    )
+    assert report.generated_by == GENERATED_BY_LLM
+    assert "report_llm_fallback:partial_sections" not in report.warnings
+    assert len(report.sections) == 15
+    appendix = next(s for s in report.sections if s.key == "appendix_index")
+    assert "content_sha256=" in appendix.content
 
 
 def test_builder_preserves_section_order() -> None:
