@@ -12,6 +12,10 @@ from app.agents.prompts.prompt_blocks import (
     bounded_triage_reasoning,
     evidence_prompt_block,
 )
+from app.agents.triage_risk_consistency import (
+    TRIAGE_RISK_INCONSISTENCY_FLAG,
+    should_flag_triage_risk_inconsistency,
+)
 from app.core.llm.base import LLMMessage
 from app.models.agent_io import EvidenceOutput, RiskAssessment, TriageResult
 from app.models.enums import FinalVerdict
@@ -96,7 +100,9 @@ def build_response_plan_messages(
         "target_type and target when the tool requires an entity target, and must "
         "not invent tools or targets. Do not include "
         "update_source_event_disposition — the server appends deferred writeback "
-        "actions when required. Prefer lower-risk actions first."
+        "actions when required. Prefer lower-risk actions first. "
+        "When risk_severity is high or risk_score >= 65, plan containment for "
+        "EntitySet hosts/accounts even if triage severity is medium."
     )
     verdict: FinalVerdict | None = None
     if final_verdict is not None:
@@ -132,6 +138,12 @@ def build_response_plan_messages(
         "decision_summary": bounded_decision_summary(triage_result),
         "triage_reasoning": bounded_triage_reasoning(triage_result),
     }
+    if verdict is not None and should_flag_triage_risk_inconsistency(
+        triage=triage_result,
+        risk_score=int(risk_assessment.risk_score),
+        final_verdict=verdict,
+    ):
+        user_payload[TRIAGE_RISK_INCONSISTENCY_FLAG] = True
     return [
         LLMMessage(role="system", content=system),
         LLMMessage(
