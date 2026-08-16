@@ -174,8 +174,8 @@ jobs:
     name: backend-test
     runs-on: ubuntu-latest
     # ISSUE-356 / run 31917018845: default pytest+coverage hit the old 35m job wall
-    # before finishing (step 00:22:15→00:57:06). Split follow-up gates into
-    # backend-test-gates and budget 45m here for suite growth + p95 headroom.
+    # (step 00:22:15→00:57:06, canceled). After the split, run 31921298064 finished
+    # the default suite in 35:20 (2120s). 45m is that measured wall + ~10m headroom.
     timeout-minutes: 45
     defaults:
       run:
@@ -206,6 +206,8 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
       REDIS_URL: redis://localhost:6379/0
+      # Non-hidden data file: upload-artifact@v4 drops .* unless include-hidden-files.
+      COVERAGE_FILE: coverage-data
     steps:
       - uses: actions/checkout@v4
 
@@ -251,7 +253,7 @@ jobs:
         with:
           name: backend-coverage-workspace
           path: |
-            backend/.coverage
+            backend/coverage-data
             backend/coverage.xml
           if-no-files-found: error
 
@@ -292,6 +294,7 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
       REDIS_URL: redis://localhost:6379/0
+      COVERAGE_FILE: coverage-data
     steps:
       - uses: actions/checkout@v4
 
@@ -315,6 +318,9 @@ jobs:
         with:
           name: backend-coverage-workspace
           path: backend
+
+      - name: Assert coverage data file landed
+        run: test -f coverage-data && test -f coverage.xml
 
       - name: ISSUE-055 orchestration coverage gate
         run: >
