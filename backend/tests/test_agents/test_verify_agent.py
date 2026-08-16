@@ -23,6 +23,9 @@ A7. Verification false vs tool exception — Action status distinction
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -46,6 +49,7 @@ from app.models.enums import (
     ActionExecutionPhase,
     ActionLevel,
     ActionStatus,
+    ConfirmationEvidence,
     DispositionPolicy,
     ExecutionJobStatus,
     ExecutionOwner,
@@ -62,6 +66,24 @@ from app.orchestration.writeback_recovery_handler import (
 )
 
 pytestmark = pytest.mark.asyncio
+
+
+@contextmanager
+def _disposition_mode(mode: str) -> Iterator[None]:
+    """Set DISPOSITION_MODE and refresh Settings cache; restore both on exit."""
+    from app.core.config import get_settings
+
+    previous = os.environ.get("DISPOSITION_MODE")
+    os.environ["DISPOSITION_MODE"] = mode
+    get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("DISPOSITION_MODE", None)
+        else:
+            os.environ["DISPOSITION_MODE"] = previous
+        get_settings.cache_clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -182,7 +204,11 @@ def _tool_result_error(message: str = "tool failed") -> ToolResult:
     )
 
 
-def _mock_terminal_confirm_session_factory(writeback_id: str = "wbk-terminal-00001"):
+def _mock_terminal_confirm_session_factory(
+    writeback_id: str = "wbk-terminal-00001",
+    *,
+    confirmation_evidence: str | None = "readback_verified",
+):
     """Build a MagicMock session_factory that returns a CONFIRMED terminal
     writeback receipt for the given writeback_id.  Use this when a test
     needs phase 2 to pass the terminal writeback evaluation but doesn't
@@ -199,7 +225,7 @@ def _mock_terminal_confirm_session_factory(writeback_id: str = "wbk-terminal-000
             self.writeback_id = wb_id
             self.status = "confirmed"
             self.sequence = 1
-            self.confirmation_evidence: str | None = "readback_verified"
+            self.confirmation_evidence = confirmation_evidence
 
     def _receipt_writeback_id_from_stmt(stmt: Any) -> str | None:
         try:
@@ -4108,6 +4134,166 @@ class TestIssue060ReviewFixes:
 
         result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
         assert result.wm_persisted is False
+
+
+# --------------------------------------------------------------------------- #
+# ISSUE-362 / FIX-011 — Verify weak evidence aligned with CLOSED gate
+# --------------------------------------------------------------------------- #
+
+
+class TestIssue362Fix011WeakEvidenceRouting:
+    """VerifyAgent demotes non-mock weak confirmation evidence before CLOSED."""
+
+    @pytest.mark.parametrize(
+        ("evidence_raw", "disposition_is_mock", "expect_recovery"),
+        [
+            ("status_queried", False, True),
+            ("adapter_acknowledged", False, True),
+            ("readback_verified", False, False),
+            ("manual_confirmed", False, False),
+            (None, False, True),
+            ("not_a_tier", False, True),
+            ("status_queried", True, False),
+            ("adapter_acknowledged", True, True),
+            ("readback_verified", True, False),
+        ],
+    )
+    async def test_adjust_routing_for_weak_evidence_matrix(
+        self,
+        evidence_raw: str | None,
+        disposition_is_mock: bool,
+        expect_recovery: bool,
+    ) -> None:
+        confirmed, rec, man, detail, tier = VerifyAgent._adjust_routing_for_weak_evidence(
+            confirmed=True,
+            rec=False,
+            man=False,
+            detail_suffix="writeback_confirmed",
+            evidence_raw=evidence_raw,
+            disposition_is_mock=disposition_is_mock,
+        )
+        if expect_recovery:
+            assert confirmed is False
+            assert rec is True
+            assert man is False
+            assert detail == "writeback_confirmed_weak_evidence"
+        else:
+            assert confirmed is True
+            assert rec is False
+            assert detail == "writeback_confirmed"
+        if evidence_raw is None:
+            assert tier is None
+        else:
+            try:
+                assert tier == ConfirmationEvidence(evidence_raw).value
+            except ValueError:
+                assert tier == evidence_raw
+
+    @pytest.mark.parametrize(
+        "confirmation_evidence",
+        [
+            ConfirmationEvidence.STATUS_QUERIED.value,
+            ConfirmationEvidence.ADAPTER_ACKNOWLEDGED.value,
+            None,
+            "not_a_tier",
+        ],
+    )
+    async def test_non_mock_weak_terminal_routes_recovery(
+        self,
+        confirmation_evidence: str | None,
+    ) -> None:
+        """Non-mock disposition: weak terminal evidence must not pass as CONFIRMED."""
+        from app.core.config import get_settings, is_mock_disposition_mode
+
+        before_mode = get_settings().disposition_mode
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.CONFIRMED,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        writeback_id = "wbk-live-weak-evidence"
+        ed_svc = FakeEventDispositionService(
+            activated=True,
+            writeback_id=writeback_id,
+        )
+        agent = VerifyAgent(
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+            session_factory=_mock_terminal_confirm_session_factory(
+                writeback_id,
+                confirmation_evidence=confirmation_evidence,
+            ),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        with _disposition_mode("live_xdr"):
+            assert not is_mock_disposition_mode(get_settings().disposition_mode)
+            result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        assert get_settings().disposition_mode == before_mode
+        assert result.need_writeback_recovery is True
+        assert result.overall_status == VerificationOverallStatus.WAITING
+        assert result.overall_status != VerificationOverallStatus.SUCCESS
+        weak_rows = [r for r in result.results if r.detail == "writeback_confirmed_weak_evidence"]
+        assert len(weak_rows) >= 1
+
+    async def test_mock_status_queried_terminal_still_success(self) -> None:
+        """Mock P0 path unchanged: status_queried may still yield overall SUCCESS."""
+        from app.core.config import get_settings, is_mock_disposition_mode
+
+        before_mode = get_settings().disposition_mode
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.CONFIRMED,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        ed_svc = FakeEventDispositionService(
+            activated=True,
+            writeback_id="wbk-mock-status-queried",
+        )
+        agent = VerifyAgent(
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+            session_factory=_mock_terminal_confirm_session_factory(
+                "wbk-mock-status-queried",
+                confirmation_evidence=ConfirmationEvidence.STATUS_QUERIED.value,
+            ),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        with _disposition_mode("mock_xdr"):
+            assert is_mock_disposition_mode(get_settings().disposition_mode)
+            result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        assert get_settings().disposition_mode == before_mode
+        assert result.need_writeback_recovery is False
+        assert result.overall_status == VerificationOverallStatus.SUCCESS
 
 
 # --------------------------------------------------------------------------- #
