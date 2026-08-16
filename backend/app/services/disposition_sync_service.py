@@ -263,6 +263,17 @@ class DispositionSyncService:
             )
         await self._guard.validate(command, ctx)
 
+        event_row = await session.get(
+            orm.SecurityEvent,
+            event_id,
+            with_for_update=True,
+        )
+        if event_row is None:
+            raise ValidationError(
+                "security_event not found for outbox enqueue",
+                details={"event_id": event_id},
+            )
+
         source_row = await session.get(
             orm.SourceObject,
             source_record_id,
@@ -1146,6 +1157,10 @@ class DispositionSyncService:
 
         Exists so that EventDispositionService can trigger same-turn
         delivery without reaching into the private ``_deliver_outbox``.
+
+        ISSUE-355: do not wrap this path in ``run_with_db_retry``.  Adapter
+        ``submit`` runs inside the delivery transaction; retrying the whole
+        method can double-submit after a post-submit deadlock.
         """
         await self._deliver_outbox(outbox_id)
 
@@ -1157,6 +1172,17 @@ class DispositionSyncService:
         receipt_job_projection: ActionExecutionJob | None = None
         async with self._session_factory() as session:
             async with session.begin():
+                outbox_event_id = await session.scalar(
+                    select(orm.DispositionOutbox.event_id).where(
+                        orm.DispositionOutbox.outbox_id == outbox_id
+                    )
+                )
+                if outbox_event_id is not None:
+                    await session.get(
+                        orm.SecurityEvent,
+                        outbox_event_id,
+                        with_for_update=True,
+                    )
                 outbox = await session.scalar(
                     select(orm.DispositionOutbox)
                     .where(orm.DispositionOutbox.outbox_id == outbox_id)

@@ -126,9 +126,20 @@ async def test_ten_concurrent_events_reach_terminal_state_without_cross_talk(
     seeded = await asyncio.gather(*[_ingest_one(i) for i in range(CONCURRENT_COUNT)])
     assert len({event_id for event_id, _ in seeded}) == CONCURRENT_COUNT
 
-    event_ids = await asyncio.gather(
-        *[_investigate(event_id, scenario_id) for event_id, scenario_id in seeded]
+    event_ids_raw = await asyncio.gather(
+        *[_investigate(event_id, scenario_id) for event_id, scenario_id in seeded],
+        return_exceptions=True,
     )
+    failures: list[tuple[str, BaseException]] = []
+    event_ids: list[str] = []
+    for item in event_ids_raw:
+        if isinstance(item, BaseException):
+            failures.append(("investigate", item))
+        else:
+            event_ids.append(item)
+    if failures:
+        details = "\n".join(f"{label}: {exc!r}" for label, exc in failures)
+        pytest.fail(f"{len(failures)}/{CONCURRENT_COUNT} investigate failures:\n{details}")
     assert len(set(event_ids)) == CONCURRENT_COUNT
 
     for event_id in event_ids:

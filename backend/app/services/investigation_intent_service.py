@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings, TaskMode, get_settings
+from app.core.db_retry import run_with_db_retry
 from app.core.errors import (
     DependencyUnavailableError,
     IdempotencyKeyReuseError,
@@ -217,168 +218,172 @@ class InvestigationIntentService:
         if not subject:
             raise ValidationError("authenticated principal subject is required")
 
-        try:
-            async with self._session_factory() as session:
-                async with session.begin():
-                    existing = await session.scalar(
-                        select(orm.InvestigationIntent)
-                        .where(
-                            orm.InvestigationIntent.requested_by == subject,
-                            orm.InvestigationIntent.request_idempotency_key == key,
+        async def _commit() -> HttpInvestigationIntentResult:
+            try:
+                async with self._session_factory() as session:
+                    async with session.begin():
+                        event = await session.scalar(
+                            select(orm.SecurityEvent)
+                            .where(orm.SecurityEvent.event_id == event_id)
+                            .with_for_update()
                         )
-                        .with_for_update()
-                    )
-                    if existing is not None:
-                        return self._replay_http_intent(
-                            existing,
-                            event_id=event_id,
-                            request_payload_sha256=request_payload_sha256,
-                        )
-
-                    event = await session.scalar(
-                        select(orm.SecurityEvent)
-                        .where(orm.SecurityEvent.event_id == event_id)
-                        .with_for_update()
-                    )
-                    if event is None:
-                        raise ValidationError(
-                            f"event {event_id} not found",
-                            error_code="event_not_found",
-                            details={"event_id": event_id},
-                        )
-                    # A same-key contender may have committed while this
-                    # transaction waited on the event row lock.
-                    existing = await session.scalar(
-                        select(orm.InvestigationIntent)
-                        .where(
-                            orm.InvestigationIntent.requested_by == subject,
-                            orm.InvestigationIntent.request_idempotency_key == key,
-                        )
-                        .with_for_update()
-                    )
-                    if existing is not None:
-                        return self._replay_http_intent(
-                            existing,
-                            event_id=event_id,
-                            request_payload_sha256=request_payload_sha256,
-                        )
-                    if event.status != EventStatus.NEW.value:
-                        raise InvalidStateTransitionError(
-                            "event must be in NEW status to start investigation, "
-                            f"current: {event.status}",
-                            current=EventStatus(event.status),
-                            target=EventStatus.TRIAGING,
-                            details={"event_id": event_id},
-                        )
-
-                    active = await session.scalar(
-                        select(orm.InvestigationIntent)
-                        .where(
-                            orm.InvestigationIntent.event_id == event_id,
-                            orm.InvestigationIntent.intent_kind == INTENT_KIND_HTTP_INVESTIGATE,
-                            orm.InvestigationIntent.intent_version == INTENT_VERSION_ISSUE276_V1,
-                        )
-                        .with_for_update()
-                    )
-                    if active is not None:
-                        status = InvestigationIntentStatus(active.status)
-                        if status in {
-                            InvestigationIntentStatus.DEAD,
-                            InvestigationIntentStatus.SKIPPED,
-                        }:
-                            return self._rearm_http_intent(
-                                active,
-                                request_idempotency_key=key,
-                                request_payload_sha256=request_payload_sha256,
-                                requested_by=subject,
-                                orchestration_mode=orchestration_mode,
-                                include_response_execution=include_response_execution,
-                                generate_report=generate_report,
+                        if event is None:
+                            raise ValidationError(
+                                f"event {event_id} not found",
+                                error_code="event_not_found",
+                                details={"event_id": event_id},
                             )
-                        raise InvestigationInProgressError(
-                            "investigation already accepted for this event",
-                            details={
-                                "event_id": event_id,
-                                "intent_id": active.intent_id,
-                            },
-                        )
 
-                    # ISSUE-276: HTTP intake is the operator-authoritative path —
-                    # supersede any non-terminal auto_investigate siblings first.
-                    await self.skip_active_intents_for_event_in_session(
-                        session,
-                        event_id,
-                        reason="superseded_by_http_investigate",
-                    )
-
-                    intent_id = new_intent_id()
-                    row = orm.InvestigationIntent(
-                        intent_id=intent_id,
-                        event_id=event_id,
-                        intent_kind=INTENT_KIND_HTTP_INVESTIGATE,
-                        intent_version=INTENT_VERSION_ISSUE276_V1,
-                        status=InvestigationIntentStatus.PENDING.value,
-                        revision=1,
-                        broker_task_id=deterministic_investigation_task_id(intent_id, 1),
-                        request_idempotency_key=key,
-                        request_payload_sha256=request_payload_sha256,
-                        requested_by=subject,
-                        orchestration_mode=orchestration_mode,
-                        attempt=0,
-                        include_response_execution=include_response_execution,
-                        generate_report=generate_report,
-                    )
-                    session.add(row)
-                    await session.flush()
-                    return self._http_intent_result(row, created=True)
-        except IntegrityError as exc:
-            # A concurrent request may win either the request-key or per-event
-            # unique constraint after our initial locked lookups.
-            async with self._session_factory() as session:
-                async with session.begin():
-                    existing = await session.scalar(
-                        select(orm.InvestigationIntent)
-                        .where(
-                            orm.InvestigationIntent.requested_by == subject,
-                            orm.InvestigationIntent.request_idempotency_key == key,
-                        )
-                        .with_for_update()
-                    )
-                    if existing is not None:
-                        return self._replay_http_intent(
-                            existing,
-                            event_id=event_id,
-                            request_payload_sha256=request_payload_sha256,
-                        )
-                    active = await session.scalar(
-                        select(orm.InvestigationIntent)
-                        .where(
-                            orm.InvestigationIntent.event_id == event_id,
-                            orm.InvestigationIntent.intent_kind == INTENT_KIND_HTTP_INVESTIGATE,
-                            orm.InvestigationIntent.intent_version == INTENT_VERSION_ISSUE276_V1,
-                        )
-                        .with_for_update()
-                    )
-                    if active is not None:
-                        status = InvestigationIntentStatus(active.status)
-                        if status in {
-                            InvestigationIntentStatus.DEAD,
-                            InvestigationIntentStatus.SKIPPED,
-                        }:
-                            return self._rearm_http_intent(
-                                active,
-                                request_idempotency_key=key,
-                                request_payload_sha256=request_payload_sha256,
-                                requested_by=subject,
-                                orchestration_mode=orchestration_mode,
-                                include_response_execution=include_response_execution,
-                                generate_report=generate_report,
+                        existing = await session.scalar(
+                            select(orm.InvestigationIntent)
+                            .where(
+                                orm.InvestigationIntent.requested_by == subject,
+                                orm.InvestigationIntent.request_idempotency_key == key,
                             )
-                        raise InvestigationInProgressError(
-                            "investigation already accepted for this event",
-                            details={"event_id": event_id, "intent_id": active.intent_id},
-                        ) from exc
-            raise
+                            .with_for_update()
+                        )
+                        if existing is not None:
+                            return self._replay_http_intent(
+                                existing,
+                                event_id=event_id,
+                                request_payload_sha256=request_payload_sha256,
+                            )
+                        if event.status != EventStatus.NEW.value:
+                            raise InvalidStateTransitionError(
+                                "event must be in NEW status to start investigation, "
+                                f"current: {event.status}",
+                                current=EventStatus(event.status),
+                                target=EventStatus.TRIAGING,
+                                details={"event_id": event_id},
+                            )
+
+                        active = await session.scalar(
+                            select(orm.InvestigationIntent)
+                            .where(
+                                orm.InvestigationIntent.event_id == event_id,
+                                orm.InvestigationIntent.intent_kind == INTENT_KIND_HTTP_INVESTIGATE,
+                                orm.InvestigationIntent.intent_version
+                                == INTENT_VERSION_ISSUE276_V1,
+                            )
+                            .with_for_update()
+                        )
+                        if active is not None:
+                            status = InvestigationIntentStatus(active.status)
+                            if status in {
+                                InvestigationIntentStatus.DEAD,
+                                InvestigationIntentStatus.SKIPPED,
+                            }:
+                                return self._rearm_http_intent(
+                                    active,
+                                    request_idempotency_key=key,
+                                    request_payload_sha256=request_payload_sha256,
+                                    requested_by=subject,
+                                    orchestration_mode=orchestration_mode,
+                                    include_response_execution=include_response_execution,
+                                    generate_report=generate_report,
+                                )
+                            raise InvestigationInProgressError(
+                                "investigation already accepted for this event",
+                                details={
+                                    "event_id": event_id,
+                                    "intent_id": active.intent_id,
+                                },
+                            )
+
+                        # ISSUE-276: HTTP intake is the operator-authoritative path —
+                        # supersede any non-terminal auto_investigate siblings first.
+                        await self.skip_active_intents_for_event_in_session(
+                            session,
+                            event_id,
+                            reason="superseded_by_http_investigate",
+                        )
+
+                        intent_id = new_intent_id()
+                        row = orm.InvestigationIntent(
+                            intent_id=intent_id,
+                            event_id=event_id,
+                            intent_kind=INTENT_KIND_HTTP_INVESTIGATE,
+                            intent_version=INTENT_VERSION_ISSUE276_V1,
+                            status=InvestigationIntentStatus.PENDING.value,
+                            revision=1,
+                            broker_task_id=deterministic_investigation_task_id(intent_id, 1),
+                            request_idempotency_key=key,
+                            request_payload_sha256=request_payload_sha256,
+                            requested_by=subject,
+                            orchestration_mode=orchestration_mode,
+                            attempt=0,
+                            include_response_execution=include_response_execution,
+                            generate_report=generate_report,
+                        )
+                        session.add(row)
+                        await session.flush()
+                        return self._http_intent_result(row, created=True)
+            except IntegrityError as exc:
+                # A concurrent request may win either the request-key or per-event
+                # unique constraint after our initial locked lookups.
+                async with self._session_factory() as session:
+                    async with session.begin():
+                        event = await session.scalar(
+                            select(orm.SecurityEvent)
+                            .where(orm.SecurityEvent.event_id == event_id)
+                            .with_for_update()
+                        )
+                        if event is None:
+                            raise ValidationError(
+                                f"event {event_id} not found",
+                                error_code="event_not_found",
+                                details={"event_id": event_id},
+                            ) from exc
+
+                        existing = await session.scalar(
+                            select(orm.InvestigationIntent)
+                            .where(
+                                orm.InvestigationIntent.requested_by == subject,
+                                orm.InvestigationIntent.request_idempotency_key == key,
+                            )
+                            .with_for_update()
+                        )
+                        if existing is not None:
+                            return self._replay_http_intent(
+                                existing,
+                                event_id=event_id,
+                                request_payload_sha256=request_payload_sha256,
+                            )
+                        active = await session.scalar(
+                            select(orm.InvestigationIntent)
+                            .where(
+                                orm.InvestigationIntent.event_id == event_id,
+                                orm.InvestigationIntent.intent_kind == INTENT_KIND_HTTP_INVESTIGATE,
+                                orm.InvestigationIntent.intent_version
+                                == INTENT_VERSION_ISSUE276_V1,
+                            )
+                            .with_for_update()
+                        )
+                        if active is not None:
+                            status = InvestigationIntentStatus(active.status)
+                            if status in {
+                                InvestigationIntentStatus.DEAD,
+                                InvestigationIntentStatus.SKIPPED,
+                            }:
+                                return self._rearm_http_intent(
+                                    active,
+                                    request_idempotency_key=key,
+                                    request_payload_sha256=request_payload_sha256,
+                                    requested_by=subject,
+                                    orchestration_mode=orchestration_mode,
+                                    include_response_execution=include_response_execution,
+                                    generate_report=generate_report,
+                                )
+                            raise InvestigationInProgressError(
+                                "investigation already accepted for this event",
+                                details={"event_id": event_id, "intent_id": active.intent_id},
+                            ) from exc
+                raise
+
+        return await run_with_db_retry(
+            _commit,
+            operation="create_or_replay_http_intent",
+        )
 
     async def mark_inline_started(self, intent_id: str) -> str:
         """Fence a dev/test inline worker using the durable status/revision ledger."""
@@ -1343,104 +1348,121 @@ class InvestigationIntentService:
         intent_id: str,
     ) -> _EnqueuedPublishTarget | None:
         """Persist ENQUEUED before broker publish so workers never see pre-commit rows."""
-        async with self._session_factory() as session:
-            async with session.begin():
-                row = await session.get(
-                    orm.InvestigationIntent,
-                    intent_id,
-                    with_for_update=True,
-                )
-                if row is None:
-                    return None
-                if InvestigationIntentStatus(row.status) is not InvestigationIntentStatus.CLAIMED:
-                    return None
-                event = await session.get(
-                    orm.SecurityEvent,
-                    row.event_id,
-                    with_for_update=True,
-                )
-                if event is None:
-                    await self._set_status_in_session(
-                        row,
-                        InvestigationIntentStatus.SKIPPED,
-                        skip_reason="event_missing",
-                    )
-                    return None
-                resume_from_checkpoint = (
-                    int(row.revision or 1) > 1 and event.status in _EVENT_INVESTIGATION_RESUMABLE
-                )
-                if event.status != EventStatus.NEW.value and not resume_from_checkpoint:
-                    await self._set_status_in_session(
-                        row,
-                        InvestigationIntentStatus.SKIPPED,
-                        skip_reason="event_not_new",
-                    )
-                    return None
-                sibling_blocking = await session.scalar(
-                    select(orm.InvestigationIntent.intent_id).where(
-                        orm.InvestigationIntent.event_id == row.event_id,
-                        orm.InvestigationIntent.intent_id != row.intent_id,
-                        orm.InvestigationIntent.status.in_(
-                            (
-                                InvestigationIntentStatus.CLAIMED.value,
-                                InvestigationIntentStatus.ENQUEUED.value,
-                                InvestigationIntentStatus.STARTED.value,
-                            )
-                        ),
-                    )
-                )
-                if sibling_blocking is not None:
-                    await self._set_status_in_session(
-                        row,
-                        InvestigationIntentStatus.RETRY,
-                        last_error="sibling_intent_active",
-                        increment_attempt=True,
-                    )
-                    return None
-                include_response = bool(row.include_response_execution)
-                if row.intent_kind == INTENT_KIND_AUTO_INVESTIGATE:
-                    source_product = None
-                    if event.creation_source_ref:
-                        raw = event.creation_source_ref.get("source_product")
-                        if isinstance(raw, str):
-                            source_product = raw
-                    link_role = await _resolve_response_link_role(session, event.event_id)
-                    response_decision = self._auto_response.evaluate(
-                        event,
-                        link_role=link_role,
-                        source_product=source_product,
-                    )
-                    include_response = response_decision.eligible
-                    row.include_response_execution = include_response
-                    if self._auto_response.enabled:
-                        session.add(
-                            orm.EventAuditLog(
-                                event_id=event.event_id,
-                                from_status=event.status,
-                                to_status=event.status,
-                                operator="AutoResponsePolicyService",
-                                reason=format_auto_response_audit_reason(response_decision),
-                            )
+
+        async def _commit() -> _EnqueuedPublishTarget | None:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    event_id = await session.scalar(
+                        select(orm.InvestigationIntent.event_id).where(
+                            orm.InvestigationIntent.intent_id == intent_id
                         )
-                task_id = deterministic_investigation_task_id(row.intent_id, int(row.revision))
-                validate_intent_transition(
-                    InvestigationIntentStatus.CLAIMED,
-                    InvestigationIntentStatus.ENQUEUED,
-                )
-                row.status = InvestigationIntentStatus.ENQUEUED.value
-                row.broker_task_id = task_id
-                row.claim_owner = None
-                row.claim_expires_at = None
-                row.last_error = None
-                return _EnqueuedPublishTarget(
-                    row.event_id,
-                    task_id,
-                    row.intent_id,
-                    include_response,
-                    bool(row.generate_report),
-                    str(row.orchestration_mode or "graph"),
-                    resume_from_checkpoint,
-                )
+                    )
+                    if event_id is None:
+                        return None
+
+                    event = await session.get(
+                        orm.SecurityEvent,
+                        event_id,
+                        with_for_update=True,
+                    )
+                    row = await session.get(
+                        orm.InvestigationIntent,
+                        intent_id,
+                        with_for_update=True,
+                    )
+                    if row is None:
+                        return None
+                    claimed_status = InvestigationIntentStatus(row.status)
+                    if claimed_status is not InvestigationIntentStatus.CLAIMED:
+                        return None
+                    if event is None:
+                        await self._set_status_in_session(
+                            row,
+                            InvestigationIntentStatus.SKIPPED,
+                            skip_reason="event_missing",
+                        )
+                        return None
+                    resume_from_checkpoint = (
+                        int(row.revision or 1) > 1
+                        and event.status in _EVENT_INVESTIGATION_RESUMABLE
+                    )
+                    if event.status != EventStatus.NEW.value and not resume_from_checkpoint:
+                        await self._set_status_in_session(
+                            row,
+                            InvestigationIntentStatus.SKIPPED,
+                            skip_reason="event_not_new",
+                        )
+                        return None
+                    sibling_blocking = await session.scalar(
+                        select(orm.InvestigationIntent.intent_id).where(
+                            orm.InvestigationIntent.event_id == row.event_id,
+                            orm.InvestigationIntent.intent_id != row.intent_id,
+                            orm.InvestigationIntent.status.in_(
+                                (
+                                    InvestigationIntentStatus.CLAIMED.value,
+                                    InvestigationIntentStatus.ENQUEUED.value,
+                                    InvestigationIntentStatus.STARTED.value,
+                                )
+                            ),
+                        )
+                    )
+                    if sibling_blocking is not None:
+                        await self._set_status_in_session(
+                            row,
+                            InvestigationIntentStatus.RETRY,
+                            last_error="sibling_intent_active",
+                            increment_attempt=True,
+                        )
+                        return None
+                    include_response = bool(row.include_response_execution)
+                    if row.intent_kind == INTENT_KIND_AUTO_INVESTIGATE:
+                        source_product = None
+                        if event.creation_source_ref:
+                            raw = event.creation_source_ref.get("source_product")
+                            if isinstance(raw, str):
+                                source_product = raw
+                        link_role = await _resolve_response_link_role(session, event.event_id)
+                        response_decision = self._auto_response.evaluate(
+                            event,
+                            link_role=link_role,
+                            source_product=source_product,
+                        )
+                        include_response = response_decision.eligible
+                        row.include_response_execution = include_response
+                        if self._auto_response.enabled:
+                            session.add(
+                                orm.EventAuditLog(
+                                    event_id=event.event_id,
+                                    from_status=event.status,
+                                    to_status=event.status,
+                                    operator="AutoResponsePolicyService",
+                                    reason=format_auto_response_audit_reason(response_decision),
+                                )
+                            )
+                    task_id = deterministic_investigation_task_id(row.intent_id, int(row.revision))
+                    validate_intent_transition(
+                        InvestigationIntentStatus.CLAIMED,
+                        InvestigationIntentStatus.ENQUEUED,
+                    )
+                    row.status = InvestigationIntentStatus.ENQUEUED.value
+                    row.broker_task_id = task_id
+                    row.claim_owner = None
+                    row.claim_expires_at = None
+                    row.last_error = None
+                    return _EnqueuedPublishTarget(
+                        row.event_id,
+                        task_id,
+                        row.intent_id,
+                        include_response,
+                        bool(row.generate_report),
+                        str(row.orchestration_mode or "graph"),
+                        resume_from_checkpoint,
+                    )
+
+        return await run_with_db_retry(
+            _commit,
+            operation="commit_enqueued_publish_target",
+        )
 
     async def _revert_enqueued_after_publish_failure(
         self,
