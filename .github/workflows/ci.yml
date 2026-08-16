@@ -226,6 +226,8 @@ jobs:
       - name: Install backend (frozen dev)
         run: uv sync --frozen --extra dev
 
+      # ISSUE-371 / #1043: non-eager Celery worker smoke lives in nightly only
+      # (pyproject addopts excludes ``nightly``; see test_celery_redelivery_matrix).
       - name: Pytest with coverage (ISSUE-267)
         run: >
           uv run --frozen pytest --cov=app --cov-report=term

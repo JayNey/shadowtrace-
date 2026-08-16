@@ -403,6 +403,8 @@ worker-smoke-test:
 		tests/test_tasks/test_investigation_tasks.py -q
 
 # --- ISSUE-117 Phase B nightly matrix (pytest; Docker smoke optional) ----------- #
+# ISSUE-371: pyproject addopts excludes ``nightly``; -o addopts= keeps the
+# non-eager worker smoke in this matrix (same as celery-worker-nightly.yml).
 worker-nightly-pytest:
 	cd "$(CURDIR)/backend"; \
 	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
@@ -411,7 +413,8 @@ worker-nightly-pytest:
 		tests/test_core/test_celery_delivery.py \
 		tests/test_tasks/test_celery_redelivery_matrix.py \
 		tests/test_api/test_celery_investigation.py \
-		tests/test_tasks/test_investigation_tasks.py -q
+		tests/test_tasks/test_investigation_tasks.py \
+		-o addopts= -q
 
 worker-nightly-smoke:
 	bash "$(CURDIR)/scripts/celery_worker_smoke.sh"

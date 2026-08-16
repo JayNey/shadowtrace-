@@ -666,11 +666,16 @@ async def test_redelivery_matrix_soft_limit_old_owner_noop(
     assert captured["broker_task_id"] == "task-OLD-OWNER"
 
 
-@pytest.mark.integration
+@pytest.mark.nightly
 def test_run_investigation_non_eager_worker_forwards_generate_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Smoke: non-eager worker path must forward ``generate_report`` to execute."""
+    """Smoke: non-eager worker path must forward ``generate_report`` to execute.
+
+    Nightly-only (ISSUE-371): embedded ``start_worker`` is too slow/flaky for
+    the default suite. Not ``integration`` — ``-m integration`` would override
+    pyproject ``not nightly`` and re-include this smoke.
+    """
     from celery.contrib.testing.worker import start_worker
 
     captured: dict[str, Any] = {}
