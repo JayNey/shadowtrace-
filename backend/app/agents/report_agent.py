@@ -59,6 +59,14 @@ logger = logging.getLogger(__name__)
 GENERATED_BY_LLM = "llm"
 GENERATED_BY_TEMPLATE = "template"
 LLM_TIMEOUT_SECONDS = 30.0
+# ISSUE-358: partial LLM sections may merge. This trio only stamps
+# ``generated_by=llm``; it does not replace ISSUE-212 chapter-content checks.
+CORE_LLM_SECTION_KEYS: tuple[str, ...] = (
+    "overview",
+    "executed_actions",
+    "verification_results",
+)
+LLM_FALLBACK_PARTIAL_SECTIONS = "partial_sections"
 
 # Template lines that LLM merge must preserve (ISSUE-104 investigation limits).
 _OVERVIEW_MERGE_PREFIXES = (
@@ -245,6 +253,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         )
         generated_by = GENERATED_BY_TEMPLATE
         llm_fallback: dict[str, Any] | None = None
+        llm_partial_fallback = False
 
         if self.llm_client is not None:
             try:
@@ -259,7 +268,22 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 title = llm_title or title
                 summary = llm_summary or summary
                 draft_sections = self._merge_sections(draft_sections, llm_sections)
-                generated_by = GENERATED_BY_LLM
+                if self._llm_core_sections_substantive(llm_sections):
+                    generated_by = GENERATED_BY_LLM
+                else:
+                    generated_by = GENERATED_BY_TEMPLATE
+                    llm_partial_fallback = True
+                    missing_core = [
+                        key
+                        for key in CORE_LLM_SECTION_KEYS
+                        if not str(llm_sections.get(key) or "").strip()
+                    ]
+                    logger.warning(
+                        "ReportAgent LLM core sections incomplete; merging partial "
+                        "sections with template fallback event=%s missing_core=%s",
+                        input.event_id,
+                        missing_core,
+                    )
             except SoftTimeLimitExceeded:
                 # ISSUE-314: soft-limit must not fall back to template "success".
                 raise
@@ -306,6 +330,8 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             final_verdict=final_verdict,
         ):
             warnings.append("triage_risk_inconsistency")
+        if llm_partial_fallback:
+            warnings.append(f"report_llm_fallback:{LLM_FALLBACK_PARTIAL_SECTIONS}")
         if llm_fallback is not None:
             error_code = str(llm_fallback["error_code"])
             warnings.append(f"report_llm_fallback:{error_code}")
@@ -453,12 +479,16 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             text = str(value).strip()
             if text:
                 parsed[key] = text
-        if len(parsed) < len(SECTION_KEYS):
-            raise LLMError(
-                "report_generate LLM returned too few sections",
-                details={"present": sorted(parsed), "required": len(SECTION_KEYS)},
-            )
         return title, summary, parsed
+
+    @staticmethod
+    def _llm_core_sections_substantive(llm_sections: dict[str, str]) -> bool:
+        """True when LLM supplied non-empty overview / actions / verification.
+
+        Uses LLM-returned keys only — template backfill after merge must not
+        count as ``generated_by=llm``.
+        """
+        return all(str(llm_sections.get(key) or "").strip() for key in CORE_LLM_SECTION_KEYS)
 
     @staticmethod
     def _missing_required_lines(
