@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from app.agents.prompts.response_prompt import build_response_plan_messages
+from app.agents.triage_risk_consistency import TRIAGE_RISK_INCONSISTENCY_FLAG
 from app.models.agent_io import (
     CollectionStatus,
     EvidenceOutput,
@@ -243,3 +244,77 @@ def test_response_prompt_non_confirmed_threat_omits_entityset_isolation_mandate(
         assert "plan isolate_host for every host listed in entities.hosts" not in system
         expected = None if verdict is None else verdict.value
         assert payload["final_verdict"] == expected
+
+
+def test_response_system_prompt_follows_risk_severity_for_containment() -> None:
+    triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.MEDIUM,
+        need_investigation=True,
+        reasoning="",
+        decision_summary="Data exfiltration pattern; alert title lacks external IP.",
+    )
+    messages = build_response_plan_messages(
+        triage_result=triage,
+        risk_assessment=RiskAssessment(
+            risk_score=75,
+            severity=Severity.HIGH,
+            confidence=0.8,
+            risk_factors=[],
+            scoring_mode=ScoringMode.RULE_ONLY,
+        ),
+        evidence_output=None,
+        available_tools=["isolate_host", "block_ip"],
+        entities_summary={"hosts": [{"hostname": "wks-01"}]},
+    )
+    system = messages[0].content
+    payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
+    assert "When risk_severity is high or risk_score >= 65" in system
+    assert "plan containment for EntitySet hosts/accounts even if triage severity is medium" in system
+    assert payload["severity"] == Severity.MEDIUM.value
+    assert payload["risk_severity"] == Severity.HIGH.value
+    assert payload["risk_score"] == 75
+
+
+def test_response_user_payload_includes_triage_risk_inconsistency_flag() -> None:
+    triage = TriageResult(
+        event_type=EventType.OTHER,
+        severity=Severity.MEDIUM,
+        need_investigation=True,
+        decision_summary="No clear threat pattern detected.",
+    )
+    messages = build_response_plan_messages(
+        triage_result=triage,
+        risk_assessment=RiskAssessment(
+            risk_score=80,
+            severity=Severity.HIGH,
+            confidence=0.8,
+            risk_factors=[],
+            scoring_mode=ScoringMode.RULE_ONLY,
+        ),
+        evidence_output=None,
+        available_tools=["create_ticket"],
+        entities_summary={},
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+    )
+    payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
+    assert payload[TRIAGE_RISK_INCONSISTENCY_FLAG] is True
+
+
+def test_response_user_payload_omits_triage_risk_inconsistency_when_consistent() -> None:
+    triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        decision_summary="Confirmed data exfiltration to external staging host.",
+    )
+    messages = build_response_plan_messages(
+        triage_result=triage,
+        risk_assessment=_risk(),
+        evidence_output=None,
+        available_tools=["create_ticket"],
+        entities_summary={},
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+    )
+    payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
+    assert TRIAGE_RISK_INCONSISTENCY_FLAG not in payload
