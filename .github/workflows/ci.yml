@@ -610,6 +610,17 @@ jobs:
             --threshold-manifest "${GITHUB_WORKSPACE}/data/evaluation/detection_shadow_v1/threshold_manifest.json" \
             --compare-baseline "${GITHUB_WORKSPACE}/data/evaluation/detection_shadow_v1/baseline_artifact.json"
 
+      - name: Run mock detection fail-closed evaluation (observe gate)
+        run: |
+          uv run --frozen python -m scripts.run_detection_evaluation \
+            --dataset-dir "${GITHUB_WORKSPACE}/data/evaluation/detection_shadow_v1_fail_closed" \
+            --output "${GITHUB_WORKSPACE}/artifacts/evaluation/detection_fail_closed_ci_run.json" \
+            --code-sha "${GITHUB_SHA}" \
+            --seed 42 \
+            --threshold-manifest "${GITHUB_WORKSPACE}/data/evaluation/detection_shadow_v1_fail_closed/threshold_manifest.json" \
+            --compare-baseline "${GITHUB_WORKSPACE}/data/evaluation/detection_shadow_v1_fail_closed/baseline_artifact.json" \
+            --allow-gate-fail
+
       - name: Upload non-detection evaluation artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -628,6 +639,15 @@ jobs:
           name: detection-evaluation-run-artifact
           path: |
             artifacts/evaluation/detection_ci_run.json
+          if-no-files-found: error
+
+      - name: Upload detection fail-closed observe artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: detection-fail-closed-observe-artifact
+          path: |
+            artifacts/evaluation/detection_fail_closed_ci_run.json
           if-no-files-found: error
 
   frontend-build:

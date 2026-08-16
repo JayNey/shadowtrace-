@@ -39,7 +39,9 @@ from app.services.evaluation_truth_service import EvaluationTruthService
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 REPO_ROOT = BACKEND_DIR.parent
-DATASET_DIR = REPO_ROOT / "data" / "evaluation" / "detection_shadow_v1"
+GATE_DATASET_DIR = REPO_ROOT / "data" / "evaluation" / "detection_shadow_v1"
+FAIL_CLOSED_DATASET_DIR = REPO_ROOT / "data" / "evaluation" / "detection_shadow_v1_fail_closed"
+DATASET_DIR = GATE_DATASET_DIR
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace",
@@ -97,10 +99,23 @@ async def loaded_detection_dataset(
 ) -> tuple[object, object]:
     truths, manifest = await load_fixture_dataset(
         truth_service,
-        DATASET_DIR,
+        GATE_DATASET_DIR,
         tenant_id="tenant-detection-eval",
     )
-    fixture_index = load_detection_fixture_index(DATASET_DIR)
+    fixture_index = load_detection_fixture_index(GATE_DATASET_DIR)
+    return manifest, fixture_index
+
+
+@pytest_asyncio.fixture
+async def loaded_fail_closed_detection_dataset(
+    truth_service: EvaluationTruthService,
+) -> tuple[object, object]:
+    truths, manifest = await load_fixture_dataset(
+        truth_service,
+        FAIL_CLOSED_DATASET_DIR,
+        tenant_id="tenant-detection-eval",
+    )
+    fixture_index = load_detection_fixture_index(FAIL_CLOSED_DATASET_DIR)
     return manifest, fixture_index
 
 
@@ -108,10 +123,14 @@ async def loaded_detection_dataset(
 @pytest.mark.asyncio
 async def test_detection_fixture_dataset_loads(
     loaded_detection_dataset: tuple[object, object],
+    loaded_fail_closed_detection_dataset: tuple[object, object],
 ) -> None:
-    manifest, fixture_index = loaded_detection_dataset
-    assert manifest.case_count == 7
-    assert len(fixture_index.by_case_id) == 7
+    gate_manifest, gate_fixture_index = loaded_detection_dataset
+    fail_closed_manifest, fail_closed_fixture_index = loaded_fail_closed_detection_dataset
+    assert gate_manifest.case_count == 5
+    assert len(gate_fixture_index.by_case_id) == 5
+    assert fail_closed_manifest.case_count == 2
+    assert len(fail_closed_fixture_index.by_case_id) == 2
 
 
 async def _run_loaded_dataset(
@@ -121,6 +140,7 @@ async def _run_loaded_dataset(
     *,
     seed: int = 42,
     code_sha: str = "abc1234",
+    dataset_dir: Path = GATE_DATASET_DIR,
 ) -> object:
     manifest, fixture_index = loaded_detection_dataset
     candidate_refs_entries, candidate_set_hash = await derive_all_candidate_refs(
@@ -142,13 +162,13 @@ async def _run_loaded_dataset(
         candidate_refs=candidate_refs_entries[0],
         candidate_refs_entries=candidate_refs_entries,
         candidate_set_hash=candidate_set_hash,
-        threshold_manifest_path=DATASET_DIR / "threshold_manifest.json",
+        threshold_manifest_path=dataset_dir / "threshold_manifest.json",
     )
 
 
 @pytest.mark.evaluation
 @pytest.mark.asyncio
-async def test_detection_shadow_v1_full_dataset(
+async def test_detection_shadow_v1_gate_dataset_passes(
     session_factory: async_sessionmaker[AsyncSession],
     truth_service: EvaluationTruthService,
     loaded_detection_dataset: tuple[object, object],
@@ -159,11 +179,14 @@ async def test_detection_shadow_v1_full_dataset(
         loaded_detection_dataset,
     )
 
-    assert artifact.status == EvaluationRunStatus.FAILED
-    assert artifact.aggregates.case_count == 7
+    assert artifact.status == EvaluationRunStatus.COMPLETED
+    assert artifact.aggregates.case_count == 5
     assert artifact.aggregates.pass_count == 4
-    assert artifact.aggregates.error_count == 2
+    assert artifact.aggregates.error_count == 0
     assert artifact.aggregates.unevaluable_count == 1
+    assert artifact.aggregates.pass_rate == 1.0
+    assert artifact.gate is not None
+    assert artifact.gate.verdict == GateVerdict.PASS
     assert artifact.artifact_hash
     assert artifact.approval_note.startswith("Not a governance approval")
     assert artifact.tenant_safety.probe_count >= 1
@@ -171,7 +194,30 @@ async def test_detection_shadow_v1_full_dataset(
     assert artifact.quality_report is not None
     assert artifact.resource_summary.total_replay_duration_ms >= 0
     assert artifact.config.candidate_set_hash
-    assert len(artifact.config.candidate_refs_entries) >= 5
+    assert len(artifact.config.candidate_refs_entries) >= 4
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_detection_shadow_v1_fail_closed_observe_dataset(
+    session_factory: async_sessionmaker[AsyncSession],
+    truth_service: EvaluationTruthService,
+    loaded_fail_closed_detection_dataset: tuple[object, object],
+) -> None:
+    artifact = await _run_loaded_dataset(
+        session_factory,
+        truth_service,
+        loaded_fail_closed_detection_dataset,
+        dataset_dir=FAIL_CLOSED_DATASET_DIR,
+    )
+
+    assert artifact.status == EvaluationRunStatus.FAILED
+    assert artifact.aggregates.case_count == 2
+    assert artifact.aggregates.pass_count == 0
+    assert artifact.aggregates.error_count == 2
+    assert artifact.aggregates.unevaluable_count == 0
+    assert artifact.gate is not None
+    assert artifact.gate.verdict == GateVerdict.FAIL_CLOSED
 
     cold_start = next(
         case
@@ -337,12 +383,13 @@ async def test_diff_detects_candidate_set_hash_drift(
 async def test_resource_failure_fail_closed(
     session_factory: async_sessionmaker[AsyncSession],
     truth_service: EvaluationTruthService,
-    loaded_detection_dataset: tuple[object, object],
+    loaded_fail_closed_detection_dataset: tuple[object, object],
 ) -> None:
     artifact = await _run_loaded_dataset(
         session_factory,
         truth_service,
-        loaded_detection_dataset,
+        loaded_fail_closed_detection_dataset,
+        dataset_dir=FAIL_CLOSED_DATASET_DIR,
     )
     case = next(
         item for item in artifact.case_results if item.case_id == "threat_resource_budget_exceeded"
@@ -487,12 +534,13 @@ async def test_duplicate_observation_idempotent_replay(
 async def test_cold_start_insufficient_history_fail_closed(
     session_factory: async_sessionmaker[AsyncSession],
     truth_service: EvaluationTruthService,
-    loaded_detection_dataset: tuple[object, object],
+    loaded_fail_closed_detection_dataset: tuple[object, object],
 ) -> None:
     artifact = await _run_loaded_dataset(
         session_factory,
         truth_service,
-        loaded_detection_dataset,
+        loaded_fail_closed_detection_dataset,
+        dataset_dir=FAIL_CLOSED_DATASET_DIR,
     )
     case = next(
         item
@@ -526,7 +574,7 @@ async def test_artifact_candidate_refs_cover_all_packages(
         if case.candidate_refs is not None
     }
     assert case_package_ids.issubset(package_ids)
-    assert len(package_ids) >= 5
+    assert len(package_ids) >= 4
 
 
 @pytest.mark.evaluation
@@ -540,7 +588,7 @@ async def test_detection_evaluation_matches_pinned_baseline(
 
     from app.models.detection_evaluation import DetectionEvaluationArtifact
 
-    baseline_path = DATASET_DIR / "baseline_artifact.json"
+    baseline_path = GATE_DATASET_DIR / "baseline_artifact.json"
     baseline_payload = json.loads(baseline_path.read_text(encoding="utf-8"))
     baseline = DetectionEvaluationArtifact.model_validate(baseline_payload)
 
@@ -657,7 +705,7 @@ async def test_gate_fail_closed_with_shipped_threshold_manifest(
         fixture_index,
     )
     cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
-    shipped = load_threshold_manifest(DATASET_DIR / "threshold_manifest.json")
+    shipped = load_threshold_manifest(GATE_DATASET_DIR / "threshold_manifest.json")
     threshold = shipped.model_copy(
         update={"required_scorers": [*shipped.required_scorers, "missing_scorer"]}
     )

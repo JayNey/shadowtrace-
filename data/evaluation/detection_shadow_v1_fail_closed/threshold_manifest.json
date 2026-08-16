@@ -1,0 +1,14 @@
+{
+  "manifest_version": "2026.08.02",
+  "dataset_id": "detection_shadow_v1_fail_closed",
+  "dataset_version": "2026.08.02",
+  "required_scorers": [
+    "threat_detection",
+    "benign_detection",
+    "unevaluable_coverage",
+    "tenant_isolation"
+  ],
+  "min_pass_rate": 1.0,
+  "max_error_count": 0,
+  "required_gate": true
+}

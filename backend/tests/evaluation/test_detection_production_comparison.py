@@ -265,7 +265,7 @@ def _artifact_for_seeded_with_case(
         tenant_id=seeded.source_tenant_id,
         dataset_id="detection_shadow_v1",
         dataset_version="2026.08.02",
-        dataset_content_hash="4786dcbb13e5b510df2960b80ac488d1dc1b7eee40f260e8c0e93f093990ae48",
+        dataset_content_hash="055fe62e8bb3c0e6f12c60dbadc20f4b235045c8eb216c720c392488fe9e631d",
         code_sha="abc1234",
         config=DetectionEvaluationConfig(
             seed=42,
@@ -294,7 +294,7 @@ def _artifact_for_seeded_with_case(
             diffs=[],
         ),
         quality_report=_quality_report(
-            dataset_hash="4786dcbb13e5b510df2960b80ac488d1dc1b7eee40f260e8c0e93f093990ae48",
+            dataset_hash="055fe62e8bb3c0e6f12c60dbadc20f4b235045c8eb216c720c392488fe9e631d",
         ),
         tenant_safety=DetectionTenantSafetySummary(probe_count=1, pass_count=1),
         resource_summary=DetectionResourceSummary(),
@@ -480,7 +480,7 @@ async def test_production_comparison_missing_promotion_is_insufficient_data(
             tenant_id="tenant-det-threat",
             dataset_id="detection_shadow_v1",
             dataset_version="2026.08.02",
-            dataset_content_hash="4786dcbb13e5b510df2960b80ac488d1dc1b7eee40f260e8c0e93f093990ae48",
+            dataset_content_hash="055fe62e8bb3c0e6f12c60dbadc20f4b235045c8eb216c720c392488fe9e631d",
             code_sha="abc1234",
             config=DetectionEvaluationConfig(
                 seed=42,
