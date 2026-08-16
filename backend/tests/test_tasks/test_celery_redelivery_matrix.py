@@ -667,6 +667,7 @@ async def test_redelivery_matrix_soft_limit_old_owner_noop(
 
 
 @pytest.mark.integration
+@pytest.mark.nightly
 def test_run_investigation_non_eager_worker_forwards_generate_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

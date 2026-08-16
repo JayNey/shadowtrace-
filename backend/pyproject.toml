@@ -54,7 +54,7 @@ packages = ["app"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-addopts = "-m 'not opensearch and not neo4j and not system and not regression and not baseline_refresh and not autonomous_mock_e2e and not adversarial_audit'"
+addopts = "-m 'not opensearch and not neo4j and not system and not regression and not baseline_refresh and not autonomous_mock_e2e and not adversarial_audit and not nightly'"
 markers = [
   "integration: requires real PostgreSQL and Redis services",
   "adversarial_audit: optional local full-loop quality gate (ISSUE-203; long-running)",
@@ -71,6 +71,7 @@ markers = [
   "unit: pure unit tests with no external services",
   "opensearch: requires OpenSearch service (ISSUE-084)",
   "neo4j: requires Neo4j service (docker compose --profile optional up -d neo4j)",
+  "nightly: slow Celery worker / redelivery matrix tests (ISSUE-371; celery-worker-nightly only)",
 ]
 
 [tool.coverage.run]

@@ -67,7 +67,8 @@ jobs:
           tests/test_core/test_celery_health.py
           tests/test_tasks/test_celery_redelivery_matrix.py
           tests/test_api/test_celery_investigation.py
-          tests/test_tasks/test_investigation_tasks.py -q
+          tests/test_tasks/test_investigation_tasks.py
+          -o addopts= -q
 
   # Broad Docker smoke remains manual; the focused SIGKILL gate below runs on
   # both the nightly schedule and workflow_dispatch.
