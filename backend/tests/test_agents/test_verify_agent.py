@@ -23,6 +23,9 @@ A7. Verification false vs tool exception — Action status distinction
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -63,6 +66,24 @@ from app.orchestration.writeback_recovery_handler import (
 )
 
 pytestmark = pytest.mark.asyncio
+
+
+@contextmanager
+def _disposition_mode(mode: str) -> Iterator[None]:
+    """Set DISPOSITION_MODE and refresh Settings cache; restore both on exit."""
+    from app.core.config import get_settings
+
+    previous = os.environ.get("DISPOSITION_MODE")
+    os.environ["DISPOSITION_MODE"] = mode
+    get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("DISPOSITION_MODE", None)
+        else:
+            os.environ["DISPOSITION_MODE"] = previous
+        get_settings.cache_clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -4123,7 +4144,6 @@ class TestIssue060ReviewFixes:
 class TestIssue362Fix011WeakEvidenceRouting:
     """VerifyAgent demotes non-mock weak confirmation evidence before CLOSED."""
 
-    @pytest.mark.asyncio(False)
     @pytest.mark.parametrize(
         ("evidence_raw", "disposition_is_mock", "expect_recovery"),
         [
@@ -4138,7 +4158,7 @@ class TestIssue362Fix011WeakEvidenceRouting:
             ("readback_verified", True, False),
         ],
     )
-    def test_adjust_routing_for_weak_evidence_matrix(
+    async def test_adjust_routing_for_weak_evidence_matrix(
         self,
         evidence_raw: str | None,
         disposition_is_mock: bool,
@@ -4169,15 +4189,23 @@ class TestIssue362Fix011WeakEvidenceRouting:
             except ValueError:
                 assert tier == evidence_raw
 
-    async def test_non_mock_status_queried_terminal_routes_recovery(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "confirmation_evidence",
+        [
+            ConfirmationEvidence.STATUS_QUERIED.value,
+            ConfirmationEvidence.ADAPTER_ACKNOWLEDGED.value,
+            None,
+            "not_a_tier",
+        ],
+    )
+    async def test_non_mock_weak_terminal_routes_recovery(
+        self,
+        confirmation_evidence: str | None,
     ) -> None:
-        """Non-mock live XDR: status_queried must not pass Verify as CONFIRMED."""
-        from app.core.config import get_settings
+        """Non-mock disposition: weak terminal evidence must not pass as CONFIRMED."""
+        from app.core.config import get_settings, is_mock_disposition_mode
 
-        monkeypatch.setenv("DISPOSITION_MODE", "live_xdr")
-        get_settings.cache_clear()
-
+        before_mode = get_settings().disposition_mode
         action = _action(
             tool_name="block_ip",
             status=ActionStatus.SUCCESS,
@@ -4188,9 +4216,10 @@ class TestIssue362Fix011WeakEvidenceRouting:
             writeback_status=WritebackStatus.CONFIRMED,
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
+        writeback_id = "wbk-live-weak-evidence"
         ed_svc = FakeEventDispositionService(
             activated=True,
-            writeback_id="wbk-live-status-queried",
+            writeback_id=writeback_id,
         )
         agent = VerifyAgent(
             tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
@@ -4199,8 +4228,8 @@ class TestIssue362Fix011WeakEvidenceRouting:
             event_bus=FakeEventBus(),
             event_disposition_service=ed_svc,
             session_factory=_mock_terminal_confirm_session_factory(
-                "wbk-live-status-queried",
-                confirmation_evidence=ConfirmationEvidence.STATUS_QUERIED.value,
+                writeback_id,
+                confirmation_evidence=confirmation_evidence,
             ),
         )
         agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
@@ -4210,25 +4239,22 @@ class TestIssue362Fix011WeakEvidenceRouting:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+        with _disposition_mode("live_xdr"):
+            assert not is_mock_disposition_mode(get_settings().disposition_mode)
+            result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
+        assert get_settings().disposition_mode == before_mode
         assert result.need_writeback_recovery is True
         assert result.overall_status == VerificationOverallStatus.WAITING
         assert result.overall_status != VerificationOverallStatus.SUCCESS
-        weak_rows = [
-            r for r in result.results if r.detail == "writeback_confirmed_weak_evidence"
-        ]
+        weak_rows = [r for r in result.results if r.detail == "writeback_confirmed_weak_evidence"]
         assert len(weak_rows) >= 1
 
-    async def test_mock_status_queried_terminal_still_success(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_mock_status_queried_terminal_still_success(self) -> None:
         """Mock P0 path unchanged: status_queried may still yield overall SUCCESS."""
-        from app.core.config import get_settings
+        from app.core.config import get_settings, is_mock_disposition_mode
 
-        monkeypatch.setenv("DISPOSITION_MODE", "mock_xdr")
-        get_settings.cache_clear()
-
+        before_mode = get_settings().disposition_mode
         action = _action(
             tool_name="block_ip",
             status=ActionStatus.SUCCESS,
@@ -4261,8 +4287,11 @@ class TestIssue362Fix011WeakEvidenceRouting:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+        with _disposition_mode("mock_xdr"):
+            assert is_mock_disposition_mode(get_settings().disposition_mode)
+            result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
+        assert get_settings().disposition_mode == before_mode
         assert result.need_writeback_recovery is False
         assert result.overall_status == VerificationOverallStatus.SUCCESS
 

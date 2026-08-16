@@ -539,9 +539,9 @@ class ClosedGateActionView(BaseModel):
     has_job_or_outbox: bool = False
 
 
-# ISSUE-333: non-mock CLOSED requires strong confirmation_evidence
-# {readback_verified, manual_confirmed}. VerifyAgent currently demotes only
-# adapter_acknowledged; CLOSED also rejects status_queried / missing / invalid.
+# ISSUE-333 / ISSUE-362: non-mock CLOSED requires strong confirmation_evidence
+# {readback_verified, manual_confirmed}. VerifyAgent demotes the same non-mock
+# weak tiers (status_queried / missing / invalid / adapter_acknowledged).
 CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE: frozenset[ConfirmationEvidence] = frozenset(
     {
         ConfirmationEvidence.READBACK_VERIFIED,
@@ -568,9 +568,9 @@ class TerminalEventWritebackView(BaseModel):
     # Only meaningful when disposition_is_mock=False; mock receipts are always
     # simulated=True and the CLOSED gate accepts them unconditionally.
     simulated: bool | None = None
-    # Projected from the latest DispositionReceipt (ISSUE-333).  Non-mock CLOSED
-    # requires readback_verified or manual_confirmed (stricter than Verify's
-    # ACK-only demotion).
+    # Projected from the latest DispositionReceipt (ISSUE-333 / ISSUE-362).
+    # Non-mock CLOSED and Verify both require readback_verified or
+    # manual_confirmed; mock P0 still only demotes adapter_acknowledged.
     confirmation_evidence: ConfirmationEvidence | None = None
 
 

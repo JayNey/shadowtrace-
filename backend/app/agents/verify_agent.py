@@ -61,9 +61,9 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.execution import ActionExecutionJob
-from app.models.workflow import CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE
 from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.models.verification_readiness import has_immediate_effect_pending
+from app.models.workflow import CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE
 from app.services.event_disposition_service import DispositionActivationResult
 from app.services.execution_job_persistence import job_from_row, load_target_results_by_job_ids
 from app.services.working_memory import BoundWorkingMemory
@@ -1800,8 +1800,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 )
                 if not confirmed and detail_suffix == "writeback_confirmed_weak_evidence":
                     logger.info(
-                        "Terminal writeback %s CONFIRMED but evidence_tier=weak"
-                        " (%s) event=%s",
+                        "Terminal writeback %s CONFIRMED but evidence_tier=weak (%s) event=%s",
                         terminal_wb_id,
                         evidence_tier,
                         event_id,
