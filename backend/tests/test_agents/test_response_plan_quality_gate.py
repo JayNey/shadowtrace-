@@ -6,8 +6,11 @@ from dataclasses import dataclass
 
 from app.agents.rules.response_plan_quality_gate import (
     CONTAINMENT_TOOLS,
+    IDENTITY_CONTAINMENT_TOOLS,
     apply_containment_quality_gate,
     apply_evidence_sufficiency_gate,
+    apply_identity_containment_dedup_gate,
+    deduplicate_identity_containment,
     entity_containment_coverage_needs,
     evidence_blocks_high_impact_actions,
     evidence_insufficiency_reason_code,
@@ -726,3 +729,86 @@ def test_apply_gate_noop_on_empty_entityset() -> None:
     assert merged == llm_filtered
     assert generated_by is ResponsePlanGeneratedBy.LLM
     assert strategy == "LLM ok"
+
+
+def test_identity_dedup_collapses_three_piece_set_on_same_account() -> None:
+    """ISSUE-359: disable + force_logout + revoke_token on one account → keep disable only."""
+    candidates = [
+        _Candidate("disable_account", "svc-analytics-47"),
+        _Candidate("force_logout", "svc-analytics-47"),
+        _Candidate("revoke_token", "svc-analytics-47"),
+    ]
+    deduped, removed = deduplicate_identity_containment(candidates)
+    assert removed is True
+    assert [item.tool_name for item in deduped] == ["disable_account"]
+    assert deduped[0].target == "svc-analytics-47"
+
+
+def test_identity_dedup_keeps_force_logout_when_disable_absent() -> None:
+    candidates = [
+        _Candidate("force_logout", "svc-analytics-47"),
+        _Candidate("revoke_token", "svc-analytics-47"),
+    ]
+    deduped, removed = deduplicate_identity_containment(candidates)
+    assert removed is True
+    assert [item.tool_name for item in deduped] == ["force_logout"]
+
+
+def test_identity_dedup_does_not_merge_different_accounts() -> None:
+    candidates = [
+        _Candidate("disable_account", "account-a"),
+        _Candidate("disable_account", "account-b"),
+    ]
+    deduped, removed = deduplicate_identity_containment(candidates)
+    assert removed is False
+    assert len(deduped) == 2
+
+
+def test_identity_dedup_preserves_isolate_hosts_after_containment_merge() -> None:
+    """ISSUE-359: identity dedup must not remove EntitySet isolate coverage."""
+    llm_filtered = [
+        _Candidate("disable_account", "svc-analytics-47"),
+        _Candidate("force_logout", "svc-analytics-47"),
+        _Candidate("revoke_token", "svc-analytics-47"),
+        _Candidate("isolate_host", "WKS-DATA-031"),
+        _Candidate("block_ip", "198.51.100.77"),
+    ]
+    merged, _, _ = apply_containment_quality_gate(
+        candidates=llm_filtered,
+        rule_fallback_candidates=[
+            _Candidate("isolate_host", "WKS-DATA-031"),
+            _Candidate("isolate_host", "SRV-DB-STG-02"),
+            _Candidate("disable_account", "svc-analytics-47"),
+            _Candidate("block_ip", "198.51.100.77"),
+        ],
+        generated_by=ResponsePlanGeneratedBy.LLM,
+        strategy="LLM identity triple",
+        severity=Severity.HIGH,
+        risk_assessment=_risk(),
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        entities=_exfil_coverage_entities(),
+        disposition_only=False,
+    )
+    deduped, generated_by, strategy = apply_identity_containment_dedup_gate(
+        candidates=merged,
+        generated_by=ResponsePlanGeneratedBy.LLM,
+        strategy="LLM identity triple",
+        disposition_only=False,
+    )
+    identity_tools = [
+        item.tool_name
+        for item in deduped
+        if item.tool_name in IDENTITY_CONTAINMENT_TOOLS
+    ]
+    isolate_targets = {item.target for item in deduped if item.tool_name == "isolate_host"}
+    assert len(identity_tools) <= 2
+    assert identity_tools == ["disable_account"]
+    assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
+    assert "BACKUP-SRV-01" not in isolate_targets
+    assert generated_by is ResponsePlanGeneratedBy.TEMPLATE
+    assert "identity_containment_dedup" in strategy
+
+
+def test_identity_containment_tools_cover_issue_scope() -> None:
+    for tool in ("disable_account", "force_logout", "revoke_token"):
+        assert tool in IDENTITY_CONTAINMENT_TOOLS

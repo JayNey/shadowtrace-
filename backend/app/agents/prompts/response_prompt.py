@@ -110,7 +110,9 @@ def build_response_plan_messages(
         "than blocking a remote destination. For compromised identity or account "
         "paths prefer disable_account. The server drops default source block_ip; "
         "do not set explicit_source_block (analyst/playbook only). Still block "
-        "external exfil/C2 destinations and malicious domains."
+        "external exfil/C2 destinations and malicious domains.\n"
+        "For the same account, do not stack disable_account with force_logout or "
+        "revoke_token — pick disable_account unless L4 revoke is explicitly required."
     )
     verdict: FinalVerdict | None = None
     if final_verdict is not None:
