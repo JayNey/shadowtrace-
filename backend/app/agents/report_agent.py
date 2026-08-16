@@ -59,7 +59,8 @@ logger = logging.getLogger(__name__)
 GENERATED_BY_LLM = "llm"
 GENERATED_BY_TEMPLATE = "template"
 LLM_TIMEOUT_SECONDS = 30.0
-# ISSUE-358: partial LLM sections may merge; core trio gates honest ``generated_by=llm``.
+# ISSUE-358: partial LLM sections may merge. This trio only stamps
+# ``generated_by=llm``; it does not replace ISSUE-212 chapter-content checks.
 CORE_LLM_SECTION_KEYS: tuple[str, ...] = (
     "overview",
     "executed_actions",
@@ -272,6 +273,17 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 else:
                     generated_by = GENERATED_BY_TEMPLATE
                     llm_partial_fallback = True
+                    missing_core = [
+                        key
+                        for key in CORE_LLM_SECTION_KEYS
+                        if not str(llm_sections.get(key) or "").strip()
+                    ]
+                    logger.warning(
+                        "ReportAgent LLM core sections incomplete; merging partial "
+                        "sections with template fallback event=%s missing_core=%s",
+                        input.event_id,
+                        missing_core,
+                    )
             except SoftTimeLimitExceeded:
                 # ISSUE-314: soft-limit must not fall back to template "success".
                 raise
@@ -320,10 +332,6 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             warnings.append("triage_risk_inconsistency")
         if llm_partial_fallback:
             warnings.append(f"report_llm_fallback:{LLM_FALLBACK_PARTIAL_SECTIONS}")
-            self._trace_fallback_detail = (
-                f"{LLM_FALLBACK_PARTIAL_SECTIONS}: insufficient core LLM sections"
-            )
-            error_detail = "report LLM returned insufficient core sections"
         if llm_fallback is not None:
             error_code = str(llm_fallback["error_code"])
             warnings.append(f"report_llm_fallback:{error_code}")
@@ -475,7 +483,11 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
 
     @staticmethod
     def _llm_core_sections_substantive(llm_sections: dict[str, str]) -> bool:
-        """True when LLM supplied non-empty overview / actions / verification sections."""
+        """True when LLM supplied non-empty overview / actions / verification.
+
+        Uses LLM-returned keys only — template backfill after merge must not
+        count as ``generated_by=llm``.
+        """
         return all(str(llm_sections.get(key) or "").strip() for key in CORE_LLM_SECTION_KEYS)
 
     @staticmethod

@@ -230,14 +230,32 @@ class _PartialLLM:
         )
 
 
+class _WhitespaceCoreLLM:
+    """ISSUE-358: whitespace core sections must not count as LLM substance."""
+
+    async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
+        payload = {
+            "title": "whitespace core",
+            "summary": "whitespace core summary",
+            "sections": {
+                "overview": "   \n",
+                "executed_actions": "llm content for executed_actions",
+                "verification_results": "llm content for verification_results",
+                "attack_storyline": "llm storyline kept",
+            },
+        }
+        return LLMResponse(
+            content=json.dumps(payload, ensure_ascii=False),
+            model_name="whitespace-core",
+        )
+
+
 class _NearlyCompleteLLM:
     """ISSUE-358: 14/15 sections — missing appendix_index only."""
 
     async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
         sections = {
-            key: f"llm content for {key}"
-            for key in SECTION_KEYS
-            if key != "appendix_index"
+            key: f"llm content for {key}" for key in SECTION_KEYS if key != "appendix_index"
         }
         payload = {
             "title": "nearly complete",
@@ -933,6 +951,9 @@ async def test_llm_incomplete_sections_falls_back_to_template(
     )
     assert report.generated_by == GENERATED_BY_TEMPLATE
     assert "report_llm_fallback:partial_sections" in report.warnings
+    assert report.error_detail is None
+    assert report.report_quality.value == "degraded_template"
+    assert report.degraded is True
     assert len(report.sections) == 15
     overview = next(s for s in report.sections if s.key == "overview")
     assert overview.content.startswith("only one")
@@ -962,9 +983,49 @@ async def test_llm_missing_non_core_section_merges_and_stays_llm(
     )
     assert report.generated_by == GENERATED_BY_LLM
     assert "report_llm_fallback:partial_sections" not in report.warnings
+    assert report.report_quality.value == "complete"
+    assert report.degraded is False
     assert len(report.sections) == 15
+    overview = next(s for s in report.sections if s.key == "overview")
+    actions = next(s for s in report.sections if s.key == "executed_actions")
+    verification = next(s for s in report.sections if s.key == "verification_results")
+    assert "llm content for overview" in overview.content
+    assert "llm content for executed_actions" in actions.content
+    assert "llm content for verification_results" in verification.content
     appendix = next(s for s in report.sections if s.key == "appendix_index")
     assert "content_sha256=" in appendix.content
+
+
+@pytest.mark.asyncio
+async def test_llm_whitespace_core_is_template_partial_sections(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ISSUE-358: whitespace-only overview must not stamp generated_by=llm."""
+    event_id = f"evt-report-ws-core-{uuid4().hex[:8]}"
+    await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
+    agent = ReportAgent(
+        llm_client=_WhitespaceCoreLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    with caplog.at_level(logging.WARNING, logger="app.agents.report_agent"):
+        report = await agent.execute(
+            ReportAgentInput(
+                event_id=event_id,
+                evidence_output=_main_evidence(event_id),
+                risk_assessment=_high_risk(),
+            )
+        )
+    assert report.generated_by == GENERATED_BY_TEMPLATE
+    assert "report_llm_fallback:partial_sections" in report.warnings
+    assert report.error_detail is None
+    assert report.report_quality.value == "degraded_template"
+    assert report.degraded is True
+    storyline = next(s for s in report.sections if s.key == "attack_storyline")
+    assert "llm storyline kept" in storyline.content
+    assert any("missing_core" in rec.message for rec in caplog.records)
 
 
 def test_builder_preserves_section_order() -> None:
