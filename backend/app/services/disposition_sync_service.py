@@ -25,7 +25,6 @@ from app.adapters.disposition.error_classification import (
 )
 from app.adapters.registry import DispositionAdapterRegistry
 from app.core.config import get_settings
-from app.core.db_retry import run_with_db_retry
 from app.core.errors import (
     DependencyUnavailableError,
     EventNotFoundError,
@@ -1158,11 +1157,12 @@ class DispositionSyncService:
 
         Exists so that EventDispositionService can trigger same-turn
         delivery without reaching into the private ``_deliver_outbox``.
-        """
-        async def _run() -> None:
-            await self._deliver_outbox(outbox_id)
 
-        await run_with_db_retry(_run, operation="deliver_outbox")
+        ISSUE-355: do not wrap this path in ``run_with_db_retry``.  Adapter
+        ``submit`` runs inside the delivery transaction; retrying the whole
+        method can double-submit after a post-submit deadlock.
+        """
+        await self._deliver_outbox(outbox_id)
 
     async def _deliver_outbox(self, outbox_id: str) -> None:
         command: DispositionCommand

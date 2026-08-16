@@ -295,6 +295,25 @@ async def test_renew_redis_unavailable_single_attempt_below_threshold() -> None:
 
 
 @pytest.mark.asyncio
+async def test_renew_redis_unavailable_triggers_after_threshold() -> None:
+    """ISSUE-355: Redis-unavailable still fail-closes after consecutive threshold."""
+    lease = EventLease(None)
+    renewal_failed = asyncio.Event()
+    async with _fast_renew_loop():
+        task = await lease.start_renewal(
+            "evt-test",
+            _OWNER,
+            on_renewal_failed=renewal_failed,
+            max_renew_failures=2,
+        )
+        try:
+            await asyncio.wait_for(renewal_failed.wait(), timeout=2.0)
+            assert renewal_failed.is_set()
+        finally:
+            await _cancel_renew_task(task)
+
+
+@pytest.mark.asyncio
 async def test_renew_success_does_not_trigger() -> None:
     """Normal successful renewal never sets on_renewal_failed."""
     fake_redis = _FakeRedis()

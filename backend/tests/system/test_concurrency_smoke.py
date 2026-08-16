@@ -138,8 +138,8 @@ async def test_ten_concurrent_events_reach_terminal_state_without_cross_talk(
         else:
             event_ids.append(item)
     if failures:
-        for label, exc in failures:
-            pytest.fail(f"{label} failed: {exc!r}")
+        details = "\n".join(f"{label}: {exc!r}" for label, exc in failures)
+        pytest.fail(f"{len(failures)}/{CONCURRENT_COUNT} investigate failures:\n{details}")
     assert len(set(event_ids)) == CONCURRENT_COUNT
 
     for event_id in event_ids:

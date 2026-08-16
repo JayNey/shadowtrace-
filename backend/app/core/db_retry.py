@@ -22,9 +22,13 @@ T = TypeVar("T")
 
 
 def is_transient_db_error(exc: BaseException) -> bool:
-    """Return True for deadlock / serialization failures and connection blips."""
-    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
-        return True
+    """Return True for PostgreSQL deadlock / serialization failures.
+
+    ISSUE-355: only ``40001`` / ``40P01`` (and equivalent messages) plus
+    invalidated DBAPI connections.  Generic ``ConnectionError`` /
+    ``TimeoutError`` / ``OSError`` must not count — those can come from
+    adapter HTTP and must not retry a path that already submitted.
+    """
     if isinstance(exc, DBAPIError) and exc.connection_invalidated:
         return True
     if isinstance(exc, (OperationalError, InternalError)):

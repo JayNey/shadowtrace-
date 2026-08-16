@@ -261,8 +261,7 @@ class InvestigationIntentService:
                             select(orm.InvestigationIntent)
                             .where(
                                 orm.InvestigationIntent.event_id == event_id,
-                                orm.InvestigationIntent.intent_kind
-                                == INTENT_KIND_HTTP_INVESTIGATE,
+                                orm.InvestigationIntent.intent_kind == INTENT_KIND_HTTP_INVESTIGATE,
                                 orm.InvestigationIntent.intent_version
                                 == INTENT_VERSION_ISSUE276_V1,
                             )
@@ -354,8 +353,7 @@ class InvestigationIntentService:
                             select(orm.InvestigationIntent)
                             .where(
                                 orm.InvestigationIntent.event_id == event_id,
-                                orm.InvestigationIntent.intent_kind
-                                == INTENT_KIND_HTTP_INVESTIGATE,
+                                orm.InvestigationIntent.intent_kind == INTENT_KIND_HTTP_INVESTIGATE,
                                 orm.InvestigationIntent.intent_version
                                 == INTENT_VERSION_ISSUE276_V1,
                             )
@@ -1350,6 +1348,7 @@ class InvestigationIntentService:
         intent_id: str,
     ) -> _EnqueuedPublishTarget | None:
         """Persist ENQUEUED before broker publish so workers never see pre-commit rows."""
+
         async def _commit() -> _EnqueuedPublishTarget | None:
             async with self._session_factory() as session:
                 async with session.begin():
