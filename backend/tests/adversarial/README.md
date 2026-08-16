@@ -51,9 +51,13 @@ to load the matching pack.
 ## Run (adversarial pytest — optional / local)
 
 The dynamic audit **pytest modules** (`test_agent_adversarial_audit.py`,
-`test_agent_adversarial_full_loop.py`) are maintained outside the default CI path and
-may be absent in a minimal checkout. When present locally, they require Postgres +
-Redis (same as integration tests):
+`test_agent_adversarial_full_loop.py`) are excluded by pyproject ``addopts``
+(local bare ``pytest`` and CI ``backend-test`` both skip them).
+CI Checks display **`backend-closure-gates-mock`** (ISSUE-350). The YAML job **id**
+stays `backend-closure-gates` so `needs:` keys remain stable; the job pins
+**`LLM_MODE=mock`**. A green check is **Mock plumbing** (golden / scripted paths +
+Mock disposition). It is **not** Live reasoning proof and **not** EntitySet
+containment-coverage proof. Local full-loop still needs Postgres + Redis.
 
 ```bash
 cd backend
@@ -86,7 +90,7 @@ This suite has **two layers**:
 | Layer | Role | Pass means |
 |-------|------|------------|
 | **Plumbing** | Agents run, traces persist, tools/LLM logs exist | Wiring works — not capability proof |
-| **Quality gate** (`test_agent_adversarial_full_loop.py`, ISSUE-203) | Hard asserts on terminal status, report, disposition targets, Mock writeback, no sunset shims | Production graph reached `REPORTING`/`CLOSED` with aligned containment + terminal `CONFIRMED` receipt |
+| **Quality gate** (`test_agent_adversarial_full_loop.py`, ISSUE-203) | Hard asserts on terminal status, report, disposition targets, Mock writeback, no sunset shims | Production graph reached `REPORTING`/`CLOSED` with **scripted-golden-aligned** containment targets + terminal `CONFIRMED` receipt |
 
 Mock full loop typically finishes in **~20–40s** (see artifact `elapsed_s`). Runner default
 timeout is **120s**; set ``ADVERSARIAL_FULL_LOOP_TIMEOUT_S`` for Live runs (default 600s when
@@ -103,7 +107,16 @@ Do **not** claim autonomous investigation quality from Mock plumbing alone. Live
 | **Mock + scenario golden** | Regression / demo packs (e.g. `insider_data_exfiltration`, `adversarial_credential_db_staging_exfil`) | Same as Mock — golden content is scripted, not emergent reasoning |
 | **Live** (`LLM_MODE=openai_compatible` + API key) | Closer-to-production LLM behavior on unseen narratives | Vendor availability, cost, non-determinism |
 
-**Do not** interpret Mock adversarial audit **PASS** as proof of autonomous investigation quality. Mock results validate plumbing and scripted paths only; Live runs (or human red-team review) are required for capability claims. The `backend-closure-gates` CI job runs adversarial full-loop with default Mock LLM — a green gate is **not** Live investigation proof (ISSUE-334).
+**Do not** interpret Mock adversarial audit **PASS** as proof of autonomous investigation quality. Mock results validate plumbing and scripted paths only; Live runs (or human red-team review) are required for capability claims.
+
+### Certification cards (ISSUE-350)
+
+| Card | How it runs | What a green result means | What it does **not** mean |
+|------|-------------|---------------------------|---------------------------|
+| **Mock plumbing** | CI Checks `backend-closure-gates-mock` (job id `backend-closure-gates`, `LLM_MODE=mock` pinned). Local: same as CI — `pytest tests/adversarial/test_agent_adversarial_full_loop.py -m adversarial_audit -o addopts=` (needs Postgres + Redis). Helper pytest ≠ this card. | Pipeline wiring, golden-scripted agents, Mock disposition CLOSED | Live glm reasoning, novel-narrative capability, or containment coverage beyond scripted golden + ISSUE-328 gates |
+| **Live reasoning** | Manual / nightly `LLM_MODE=openai_compatible` + API key. **Not a PR gate.** | Closer-to-production LLM behavior on this scenario | Must not block daily Mock plumbing; golden `isolate_host` is not glm skill |
+
+The scorecard JSON field `scorecard_header` records `llm_mode`, `certification_card` (from `scorecard_contract_for_llm_mode()["kind"]`), and `summary` (the card interpretation). Golden `response_plan` for this pack includes EntitySet hosts (`WKS-DATA-031` and `SRV-DB-STG-02`) so Mock LLM and ISSUE-328 rules stay aligned — that is still a **scripted** pack, not Live reasoning.
 
 ### Provenance-aware quality audit (ISSUE-334)
 
@@ -127,7 +140,8 @@ For **pytest on the host**, export the same vars (or `set -a && source ../.env.l
 
 ```bash
 set -a && source ../.env.live && set +a
-uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py -v -s
+uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py \
+  -m adversarial_audit -v -s -o addopts=
 ```
 
 Or inline:
@@ -137,7 +151,8 @@ LLM_MODE=openai_compatible \
 LLM_API_BASE_URL=https://ark.cn-beijing.volces.com/api/coding/v3 \
 LLM_API_KEY=... \
 LLM_PRIMARY_MODEL=glm-5.2 \
-  uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_full_loop.py -m adversarial_audit -v -s
+  uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_full_loop.py \
+  -m adversarial_audit -v -s -o addopts=
 ```
 
 Live runs are slower and non-deterministic; increase timeout if needed:

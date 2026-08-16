@@ -82,7 +82,10 @@ jobs:
         run: uv run --frozen mypy app
 
   backend-closure-gates:
-    name: backend-closure-gates
+    # ISSUE-350: Checks display name must read as Mock plumbing, not product capability.
+    # Job id stays backend-closure-gates so `needs:` keys stay stable. GitHub Checks
+    # and branch-protection required names follow `name:` (backend-closure-gates-mock).
+    name: backend-closure-gates-mock
     runs-on: ubuntu-latest
     timeout-minutes: 25
     defaults:
@@ -114,6 +117,8 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
       REDIS_URL: redis://localhost:6379/0
+      # ISSUE-350: pin Mock LLM. Live glm is a separate reasoning card (nightly/manual).
+      LLM_MODE: mock
       # ISSUE-347: adversarial closure profile — scorecard visibility, not P0 blocking.
       OUTPUT_QUALITY_BLOCKING: "false"
       QUALITY_JUDGE_ENABLED: "false"
@@ -135,8 +140,9 @@ jobs:
       - name: Install backend (frozen dev)
         run: uv sync --frozen --extra dev
 
-      - name: ISSUE-261 production and adversarial closure gates
-        # Mock LLM adversarial PASS validates plumbing/scripted paths only — not Live reasoning (ISSUE-334).
+      - name: ISSUE-261 production and adversarial closure gates (Mock LLM plumbing)
+        # ISSUE-350: green here is Mock plumbing + golden/scripted paths, not Live
+        # reasoning and not EntitySet containment-coverage proof (ISSUE-328 / Live card).
         run: |
           production_rc=0
           adversarial_rc=0

@@ -271,7 +271,7 @@ fmt:
 	cd backend && $(PYTHON) -m ruff check --fix app tests && $(PYTHON) -m ruff format app tests
 
 # --- ISSUE-347 adversarial quality profile (scorecard visibility; P0 stays fail-soft) ---
-# Default mirrors backend-closure-gates CI: unscored output_quality bucket in audit JSON.
+# Default mirrors backend-closure-gates-mock CI: unscored output_quality bucket in audit JSON.
 # Set ADVERSARIAL_OUTPUT_QUALITY_BLOCKING=true locally to drill blocking semantics.
 ADVERSARIAL_OUTPUT_QUALITY_BLOCKING ?= false
 ADVERSARIAL_QUALITY_JUDGE_ENABLED ?= false

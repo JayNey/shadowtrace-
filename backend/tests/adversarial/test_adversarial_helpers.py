@@ -8,9 +8,12 @@ from app.models.evidence import SKIP_GAP_REASONS, skipped_entity_description
 from tests.adversarial.audit_report import (
     AdversarialAuditChecks,
     _writeback_certification_label,
+    build_scorecard_header,
     build_writeback_certification,
     evaluate_evidence_collection_ok,
     evaluate_writeback_confirmed,
+    resolve_scorecard_llm_mode,
+    scorecard_contract_for_llm_mode,
     writeback_tier_ok,
 )
 from tests.adversarial.full_loop_runner import (
@@ -684,6 +687,70 @@ def test_resolve_full_loop_timeout_env_override(monkeypatch) -> None:
     assert resolve_full_loop_timeout_s() == 90.0
     monkeypatch.setenv("ADVERSARIAL_FULL_LOOP_TIMEOUT_S", "10")
     assert resolve_full_loop_timeout_s() == 30.0
+
+
+def test_resolve_scorecard_llm_mode_defaults_to_settings_when_env_unset(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("LLM_MODE", raising=False)
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    expected = str(get_settings().llm_mode or "mock").strip().lower() or "mock"
+    assert resolve_scorecard_llm_mode() == expected
+
+
+def test_resolve_scorecard_llm_mode_explicit_override(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_MODE", "openai_compatible")
+    assert resolve_scorecard_llm_mode(llm_mode="mock") == "mock"
+
+
+def test_resolve_scorecard_llm_mode_normalizes_case(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_MODE", "MOCK")
+    assert resolve_scorecard_llm_mode() == "mock"
+    monkeypatch.setenv("LLM_MODE", "OpenAI_Compatible")
+    assert resolve_scorecard_llm_mode() == "openai_compatible"
+    assert scorecard_contract_for_llm_mode("OpenAI_Compatible")["kind"] == "live_reasoning"
+
+
+def test_resolve_scorecard_llm_mode_blank_env_falls_back(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_MODE", "  ")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    expected = str(get_settings().llm_mode or "mock").strip().lower() or "mock"
+    assert resolve_scorecard_llm_mode() == expected
+
+
+def test_scorecard_header_marks_mock_plumbing_card(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_MODE", "mock")
+    header = build_scorecard_header()
+    assert header["llm_mode"] == "mock"
+    assert header["certification_card"] == "mock_plumbing"
+    assert "not Live reasoning" in header["summary"]
+    assert "containment-coverage" in header["summary"]
+    report = _analysis_pass_checks().to_dict()
+    assert report["scorecard_header"] == header
+    assert report["verdict_for_human"].startswith("PASS")
+
+
+def test_scorecard_header_marks_live_reasoning_card(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_MODE", "openai_compatible")
+    header = build_scorecard_header()
+    assert header["llm_mode"] == "openai_compatible"
+    assert header["certification_card"] == "live_reasoning"
+    assert "golden isolate is not glm capability" in header["summary"]
+    report = _analysis_pass_checks().to_dict()
+    assert report["scorecard_header"] == header
+    assert report["verdict_for_human"].startswith("PASS")
+
+
+def test_scorecard_header_marks_custom_provider_card() -> None:
+    contract = scorecard_contract_for_llm_mode("anthropic")
+    assert contract["kind"] == "custom"
+    header = build_scorecard_header(llm_mode="anthropic")
+    assert header["certification_card"] == "custom"
+    assert "anthropic" in header["summary"]
 
 
 def test_resolve_observed_severity_prefers_risk_over_triage() -> None:
