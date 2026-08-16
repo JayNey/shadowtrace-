@@ -108,6 +108,24 @@ def test_containment_tool_for_target_maps_ground_truth_entities() -> None:
     assert containment_tool_for_target(UPLOAD_DOMAIN, GROUND_TRUTH) == "block_domain"
 
 
+def test_vpn_src_is_identify_only_not_containment() -> None:
+    """ISSUE-365: VPN source stays identifiable; it is not a block_ip requirement."""
+    assert VPN_SRC_IP in GROUND_TRUTH["must_identify_indicators"]
+    assert VPN_SRC_IP not in GROUND_TRUTH["must_response_targets"]
+    assert VPN_SRC_IP not in GROUND_TRUTH["response_containment_tools"]
+    assert containment_tool_for_target(VPN_SRC_IP, GROUND_TRUTH) is None
+    complete = [
+        {"tool_name": "disable_account", "target": ACCOUNT},
+        {"tool_name": "isolate_host", "target": HOST_WORKSTATION},
+        {"tool_name": "isolate_host", "target": HOST_DB},
+        {"tool_name": "block_ip", "target": UPLOAD_IP},
+        {"tool_name": "block_domain", "target": UPLOAD_DOMAIN},
+    ]
+    gaps = missing_response_targets(ground_truth=GROUND_TRUTH, actions=complete)
+    assert gaps == []
+    assert format_disposition_gap("block_ip", VPN_SRC_IP) not in gaps
+
+
 def test_containment_tool_explicit_map_survives_entity_reorder() -> None:
     reordered = {
         **GROUND_TRUTH,

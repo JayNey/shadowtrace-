@@ -54,6 +54,15 @@ from tests.system.helpers import seed_source_object_for_event
 
 logger = logging.getLogger(__name__)
 
+# Immediate containment tools the full-loop runner waits to leave pending.
+# Includes block_domain now that dest-only GROUND_TRUTH requires it (ISSUE-365).
+IMMEDIATE_CONTAINMENT_TOOLS = (
+    "block_ip",
+    "block_domain",
+    "disable_account",
+    "isolate_host",
+)
+
 # Sunset registry — must never reappear in ``sunset_shims_used``.
 _REMOVED_SHIMS = (
     "_sanitize_actions_for_verify",
@@ -389,7 +398,7 @@ async def _wait_for_containment_actions_success(
     timeout_s: float = 60.0,
 ) -> None:
     """Wait until immediate containment response actions reach terminal success."""
-    containment_tools = ("block_ip", "disable_account", "isolate_host")
+    containment_tools = IMMEDIATE_CONTAINMENT_TOOLS
     terminal_statuses = (
         ActionStatus.SUCCESS.value,
         ActionStatus.PARTIAL_SUCCESS.value,
