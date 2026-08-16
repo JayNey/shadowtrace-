@@ -184,6 +184,28 @@ def test_response_reasoning_none_coerced_to_empty_string() -> None:
     assert payload["triage_reasoning"] == ""
 
 
+def test_response_system_prompt_block_ip_dest_only_policy() -> None:
+    messages = build_response_plan_messages(
+        triage_result=TriageResult(
+            event_type=EventType.DATA_EXFILTRATION,
+            severity=Severity.HIGH,
+            need_investigation=True,
+            reasoning="",
+            decision_summary="exfil",
+        ),
+        risk_assessment=_risk(),
+        evidence_output=None,
+        available_tools=["block_ip", "disable_account"],
+        entities_summary={},
+    )
+    system = messages[0].content.lower()
+    assert "block_ip" in system
+    assert "dst_ip" in system
+    assert "src_ip" in system
+    assert "explicit_source_block" in system
+    assert "disable_account" in system
+
+
 def test_response_and_risk_share_prompt_blocks() -> None:
     from pathlib import Path
 

@@ -14,7 +14,7 @@ from app.agents.response_agent import (
     ActionCandidate,
     ResponseAgent,
     ResponsePolicyFilter,
-    _apply_block_ip_role_correction,
+    _apply_block_ip_source_policy,
     _cap_low_severity_candidates,
     _enforce_execution_owner_consistency,
     _entities_summary,
@@ -1696,8 +1696,8 @@ def test_entities_summary_includes_ip_scope_and_normalized_field() -> None:
     assert srv["source_hints"]["normalized_field"] == "secondary_host"
 
 
-def test_apply_block_ip_role_correction_keeps_action_and_fixes_reason() -> None:
-    """ISSUE-327: src_ip block_ip stays grounded; exfil-destination wording is corrected."""
+def test_apply_block_ip_source_policy_drops_src_ip_action() -> None:
+    """ISSUE-361: default block_ip on src_ip is dropped (VPN egress blast radius)."""
     entities = EntitySet(
         ips=[
             IPEntity(
@@ -1715,17 +1715,13 @@ def test_apply_block_ip_role_correction_keeps_action_and_fixes_reason() -> None:
         parameters={},
         reason="Block the external exfiltration destination IP",
     )
-    corrected = _apply_block_ip_role_correction(candidate, entities=entities)
-    assert corrected.tool_name == "block_ip"
-    assert corrected.target == "198.51.100.44"
-    assert corrected.parameters["role"] == "source"
-    assert "exfiltration destination" not in corrected.reason.lower()
-    assert "source ip" in corrected.reason.lower()
+    kept = _apply_block_ip_source_policy(candidate, entities=entities)
+    assert kept is None
 
 
 @pytest.mark.asyncio
-async def test_block_ip_src_ip_reason_corrected_in_plan() -> None:
-    """End-to-end: mislabeled src_ip block_ip reason is corrected before persistence."""
+async def test_block_ip_src_ip_dropped_from_plan() -> None:
+    """End-to-end: mislabeled src_ip block_ip is removed before persistence."""
     vpn_ip = "198.51.100.44"
     event_id = f"evt-{uuid4().hex[:8]}"
     entities = EntitySet(
@@ -1782,11 +1778,7 @@ async def test_block_ip_src_ip_reason_corrected_in_plan() -> None:
     )
     plan = await agent.execute(_agent_input(event_id))
     block_actions = [action for action in plan.actions if action.tool_name == "block_ip"]
-    assert len(block_actions) == 1
-    block = block_actions[0]
-    assert block.target == vpn_ip
-    assert block.parameters.get("role") == "source"
-    assert "exfiltration destination" not in (block.reason or "").lower()
+    assert block_actions == []
 
 
 def _mislabeled_block_ip(
@@ -1823,6 +1815,22 @@ def _mislabeled_block_ip(
     return entities, candidate
 
 
+def test_response_system_prompt_block_ip_dest_only_policy() -> None:
+    messages = build_response_plan_messages(
+        triage_result=_triage(),
+        risk_assessment=_risk(),
+        evidence_output=None,
+        available_tools=["block_ip", "disable_account"],
+        entities_summary={},
+    )
+    system = messages[0].content.lower()
+    assert "block_ip" in system
+    assert "dst_ip" in system
+    assert "src_ip" in system
+    assert "explicit_source_block" in system
+    assert "disable_account" in system
+
+
 def test_response_prompt_entities_json_includes_ip_scope_and_src_dst() -> None:
     import json
 
@@ -1857,59 +1865,66 @@ def test_response_prompt_entities_json_includes_ip_scope_and_src_dst() -> None:
     assert upload["attributes"]["normalized_field"] == "dst_ip"
 
 
-def test_apply_block_ip_role_correction_overwrites_destination_role() -> None:
-    entities, candidate = _mislabeled_block_ip(
-        address="198.51.100.44",
-        normalized_field="src_ip",
-        role="destination",
-    )
-    corrected = _apply_block_ip_role_correction(candidate, entities=entities)
-    assert corrected.parameters["role"] == "source"
-    assert "exfiltration destination" not in corrected.reason.lower()
-
-
-def test_apply_block_ip_role_correction_does_not_rewrite_dst_ip() -> None:
-    entities, candidate = _mislabeled_block_ip(
-        address="198.51.100.77",
-        normalized_field="dst_ip",
-    )
-    corrected = _apply_block_ip_role_correction(candidate, entities=entities)
-    assert corrected.tool_name == "block_ip"
-    assert corrected.target == "198.51.100.77"
-    assert "exfiltration destination" in corrected.reason.lower()
-    assert "role" not in (corrected.parameters or {})
-
-
-def test_apply_block_ip_role_correction_accepts_source_ip_alias() -> None:
+def test_apply_block_ip_source_policy_drops_source_ip_alias() -> None:
     entities, candidate = _mislabeled_block_ip(
         address="198.51.100.44",
         normalized_field="source_ip",
     )
-    corrected = _apply_block_ip_role_correction(candidate, entities=entities)
-    assert corrected.parameters["role"] == "source"
-    assert "exfiltration destination" not in corrected.reason.lower()
+    kept = _apply_block_ip_source_policy(candidate, entities=entities)
+    assert kept is None
 
 
-def test_apply_block_ip_role_correction_keeps_action_without_normalized_field() -> None:
+def test_apply_block_ip_source_policy_keeps_dst_ip() -> None:
+    entities, candidate = _mislabeled_block_ip(
+        address="198.51.100.77",
+        normalized_field="dst_ip",
+    )
+    kept = _apply_block_ip_source_policy(candidate, entities=entities)
+    assert kept is not None
+    assert kept.tool_name == "block_ip"
+    assert kept.target == "198.51.100.77"
+    assert "exfiltration destination" in kept.reason.lower()
+    assert "role" not in (kept.parameters or {})
+
+
+def test_apply_block_ip_source_policy_keeps_action_without_normalized_field() -> None:
     entities, candidate = _mislabeled_block_ip(
         address="198.51.100.44",
         normalized_field=None,
     )
-    corrected = _apply_block_ip_role_correction(candidate, entities=entities)
-    assert corrected.tool_name == "block_ip"
-    assert corrected.target == "198.51.100.44"
-    assert "exfiltration destination" in corrected.reason.lower()
+    kept = _apply_block_ip_source_policy(candidate, entities=entities)
+    assert kept is not None
+    assert kept.tool_name == "block_ip"
+    assert kept.target == "198.51.100.44"
+    assert "exfiltration destination" in kept.reason.lower()
 
 
-def test_apply_block_ip_role_correction_uses_internal_scope_in_reason() -> None:
+def test_apply_block_ip_source_policy_drops_internal_src_ip() -> None:
     entities, candidate = _mislabeled_block_ip(
         address="10.60.1.10",
         normalized_field="src_ip",
         scope="internal",
     )
-    corrected = _apply_block_ip_role_correction(candidate, entities=entities)
-    assert "internal" in corrected.reason.lower()
-    assert "external" not in corrected.reason.lower()
+    kept = _apply_block_ip_source_policy(candidate, entities=entities)
+    assert kept is None
+
+
+def test_apply_block_ip_source_policy_allows_explicit_override() -> None:
+    entities, candidate = _mislabeled_block_ip(
+        address="198.51.100.44",
+        normalized_field="src_ip",
+        role=None,
+    )
+    candidate = ActionCandidate(
+        tool_name=candidate.tool_name,
+        target_type=candidate.target_type,
+        target=candidate.target,
+        parameters={"explicit_source_block": True},
+        reason=candidate.reason,
+    )
+    kept = _apply_block_ip_source_policy(candidate, entities=entities)
+    assert kept is not None
+    assert kept.target == "198.51.100.44"
 
 
 def _exfil_entity_set() -> EntitySet:

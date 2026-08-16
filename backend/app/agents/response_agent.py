@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -865,8 +865,10 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             candidates = [c for c in candidates if c.tool_name == VIRTUAL_DISPOSITION_TOOL]
 
         candidates = [
-            _apply_block_ip_role_correction(candidate, entities=entities)
+            kept
             for candidate in candidates
+            for kept in [_apply_block_ip_source_policy(candidate, entities=entities)]
+            if kept is not None
         ]
 
         actions = self._materialize_actions(
@@ -1458,11 +1460,7 @@ _HOST_SERVER_MARKERS = re.compile(
     re.IGNORECASE,
 )
 _SOURCE_IP_FIELDS = _BLOCK_IP_SOURCE_FIELDS
-_EXFIL_DESTINATION_REASON_MARKERS = (
-    "exfiltration destination",
-    "exfil dest",
-    "exfil destination",
-)
+_EXPLICIT_SOURCE_BLOCK_PARAM = "explicit_source_block"
 
 
 def _infer_host_kind(host: HostEntity) -> str | None:
@@ -1559,21 +1557,28 @@ def _lookup_ip_entity(entities: EntitySet, target: str | None) -> IPEntity | Non
     return None
 
 
-def _reason_mislabels_src_as_exfil_dest(reason: str) -> bool:
-    text = reason.lower()
-    if any(marker in text for marker in _EXFIL_DESTINATION_REASON_MARKERS):
+def _explicit_source_block_requested(candidate: ActionCandidate) -> bool:
+    params = candidate.parameters or {}
+    flag = params.get(_EXPLICIT_SOURCE_BLOCK_PARAM)
+    if flag is True:
         return True
-    return "destination" in text and any(
-        token in text for token in ("exfil", "upload", "c2", "command and control")
-    )
+    if isinstance(flag, int) and flag == 1:
+        return True
+    if isinstance(flag, str) and flag.strip().lower() in {"1", "true", "yes"}:
+        return True
+    return False
 
 
-def _apply_block_ip_role_correction(
+def _apply_block_ip_source_policy(
     candidate: ActionCandidate,
     *,
     entities: EntitySet,
-) -> ActionCandidate:
-    """Keep block_ip on src IPs but fix misleading exfil-destination reasons (ISSUE-327)."""
+) -> ActionCandidate | None:
+    """Drop default block_ip on VPN/source egress IPs; keep exfil/C2 destinations (ISSUE-361).
+
+    Classification uses EntitySet ``normalized_field`` (src_ip / source_ip), not
+    reason substring heuristics. Analyst override: parameters.explicit_source_block=true.
+  """
     if candidate.tool_name != "block_ip" or candidate.target_type != "ip":
         return candidate
     ip_entity = _lookup_ip_entity(entities, candidate.target)
@@ -1582,13 +1587,9 @@ def _apply_block_ip_role_correction(
     normalized = str((ip_entity.attributes or {}).get("normalized_field") or "").strip().lower()
     if normalized not in _SOURCE_IP_FIELDS:
         return candidate
-    if not _reason_mislabels_src_as_exfil_dest(candidate.reason):
+    if _explicit_source_block_requested(candidate):
         return candidate
-    params = dict(candidate.parameters or {})
-    params["role"] = "source"
-    scope = str(ip_entity.scope or "unknown")
-    corrected_reason = f"Block {scope} source IP ({candidate.target})"
-    return replace(candidate, parameters=params, reason=corrected_reason)
+    return None
 
 
 async def _upsert_action_row(session: AsyncSession, action: Action) -> str:
