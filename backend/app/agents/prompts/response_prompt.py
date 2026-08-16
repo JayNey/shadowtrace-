@@ -14,6 +14,7 @@ from app.agents.prompts.prompt_blocks import (
 )
 from app.core.llm.base import LLMMessage
 from app.models.agent_io import EvidenceOutput, RiskAssessment, TriageResult
+from app.models.enums import FinalVerdict
 
 
 class ResponseActionLLM(BaseModel):
@@ -82,6 +83,7 @@ def build_response_plan_messages(
     evidence_output: EvidenceOutput | None,
     available_tools: list[str],
     entities_summary: dict[str, Any],
+    final_verdict: FinalVerdict | str | None = None,
 ) -> list[LLMMessage]:
     """Build JSON-mode messages requesting candidate response actions only."""
     system = (
@@ -96,6 +98,25 @@ def build_response_plan_messages(
         "update_source_event_disposition — the server appends deferred writeback "
         "actions when required. Prefer lower-risk actions first."
     )
+    verdict: FinalVerdict | None = None
+    if final_verdict is not None:
+        try:
+            verdict = (
+                final_verdict
+                if isinstance(final_verdict, FinalVerdict)
+                else FinalVerdict(str(final_verdict))
+            )
+        except ValueError:
+            verdict = None
+    if verdict is FinalVerdict.CONFIRMED_THREAT:
+        system += (
+            " For confirmed threats, plan isolate_host for every host listed in "
+            "entities.hosts (EntitySet hosts only — not asset inventory or decoys). "
+            "You may sequence lower-risk actions first, but do not omit identified "
+            "compromised hosts from isolation. strategy_summary must reflect the "
+            "final containment actions and must not claim a host remains online if "
+            "you isolate it."
+        )
     evidence_block: dict[str, Any] = {}
     if evidence_output is not None:
         evidence_block = evidence_prompt_block(evidence_output)
@@ -104,6 +125,7 @@ def build_response_plan_messages(
         "severity": triage_result.severity.value,
         "risk_score": risk_assessment.risk_score,
         "risk_severity": risk_assessment.severity.value,
+        "final_verdict": verdict.value if verdict is not None else None,
         "entities": entities_summary,
         "available_tools": sorted(available_tools),
         "evidence": evidence_block,

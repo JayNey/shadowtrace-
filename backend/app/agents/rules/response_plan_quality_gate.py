@@ -24,6 +24,7 @@ EntitySet; never re-introduce a tool PolicyFilter rejected.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, TypeVar
@@ -200,6 +201,66 @@ def _build_coverage_candidate(prototype: _CandidateT, need: EntityCoverageNeed) 
         except TypeError:
             continue
     raise TypeError(f"cannot construct coverage candidate for {need.tool_name} from {cls.__name__}")
+
+
+def _isolate_host_targets(candidates: list[_CandidateT]) -> list[str]:
+    """Collect ``isolate_host`` targets from final candidates (stable order, deduped)."""
+    seen: set[str] = set()
+    targets: list[str] = []
+    for item in candidates:
+        if item.tool_name != "isolate_host":
+            continue
+        target = str(getattr(item, "target", "") or "").strip()
+        if not target:
+            continue
+        key = _normalized_token(target)
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(target)
+    return targets
+
+
+_ONLINE_CLAIM_PATTERN_TEMPLATES = (
+    r"(?i)\b{host}\s+remains?\s+online\b[^.;]*(?:[.;]\s*)?",
+    r"(?i)\bleave\s+{host}\s+online\b[^.;]*(?:[.;]\s*)?",
+    r"(?i)\bkeeping\s+{host}\s+online\b[^.;]*(?:[.;]\s*)?",
+)
+
+
+def _strip_online_claims_for_isolated_hosts(strategy: str, isolated_hosts: list[str]) -> str:
+    """Remove strategy clauses that claim an isolated host remains online (ISSUE-357)."""
+    if not strategy or not isolated_hosts:
+        return strategy
+    text = strategy
+    for host in isolated_hosts:
+        host_pattern = re.escape(host)
+        for template in _ONLINE_CLAIM_PATTERN_TEMPLATES:
+            text = re.sub(template.format(host=host_pattern), "", text)
+    text = re.sub(r"\s*;\s*;\s*", "; ", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip(" ;")
+
+
+def _append_isolated_hosts_note(strategy: str, isolated_hosts: list[str]) -> str:
+    if not isolated_hosts:
+        return strategy
+    note = f"isolated hosts: {', '.join(isolated_hosts)}"
+    if note in strategy:
+        return strategy
+    return f"{strategy}; {note}" if strategy else note
+
+
+def _reconcile_strategy_after_coverage_merge(
+    strategy: str,
+    candidates: list[_CandidateT],
+) -> str:
+    """Align approval narrative with post-merge ``isolate_host`` targets (ISSUE-357)."""
+    isolated_hosts = _isolate_host_targets(candidates)
+    if not isolated_hosts:
+        return strategy
+    strategy = _strip_online_claims_for_isolated_hosts(strategy, isolated_hosts)
+    return _append_isolated_hosts_note(strategy, isolated_hosts)
 
 
 def _merge_entity_coverage(
@@ -500,6 +561,7 @@ def apply_containment_quality_gate(
     if coverage_added:
         note = "containment_quality_gate: entity_coverage_merge"
         strategy = f"{strategy}; {note}" if strategy else note
+        strategy = _reconcile_strategy_after_coverage_merge(strategy, candidates)
         if not had_containment and generated_by is ResponsePlanGeneratedBy.LLM:
             generated_by = ResponsePlanGeneratedBy.TEMPLATE
     if coverage_incomplete:
