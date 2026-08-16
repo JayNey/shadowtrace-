@@ -41,6 +41,8 @@ from tests.adversarial.scenario_credential_db_staging_exfil import (
     HOST_BACKUP_NOISE,
     HOST_DB,
     HOST_WORKSTATION,
+    UPLOAD_DOMAIN,
+    UPLOAD_IP,
     VPN_SRC_IP,
 )
 
@@ -102,7 +104,8 @@ def test_containment_tool_for_target_maps_ground_truth_entities() -> None:
     assert containment_tool_for_target(ACCOUNT, GROUND_TRUTH) == "disable_account"
     assert containment_tool_for_target("WKS-DATA-031", GROUND_TRUTH) == "isolate_host"
     assert containment_tool_for_target(HOST_DB, GROUND_TRUTH) == "isolate_host"
-    assert containment_tool_for_target(VPN_SRC_IP, GROUND_TRUTH) == "block_ip"
+    assert containment_tool_for_target(UPLOAD_IP, GROUND_TRUTH) == "block_ip"
+    assert containment_tool_for_target(UPLOAD_DOMAIN, GROUND_TRUTH) == "block_domain"
 
 
 def test_containment_tool_explicit_map_survives_entity_reorder() -> None:
@@ -128,7 +131,8 @@ def test_missing_response_targets_reports_gaps(monkeypatch) -> None:
     actions = [{"tool_name": "disable_account", "target": "svc-analytics-47"}]
     gaps = missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
     assert format_disposition_gap("isolate_host", "WKS-DATA-031") in gaps
-    assert format_disposition_gap("block_ip", VPN_SRC_IP) in gaps
+    assert format_disposition_gap("block_ip", UPLOAD_IP) in gaps
+    assert format_disposition_gap("block_domain", UPLOAD_DOMAIN) in gaps
     assert format_disposition_gap("isolate_host", HOST_DB) in gaps
 
 
@@ -136,7 +140,8 @@ def test_missing_response_targets_requires_tool_target_pair() -> None:
     actions = [
         {"tool_name": "disable_account", "target": "svc-analytics-47"},
         {"tool_name": "disable_account", "target": "WKS-DATA-031"},
-        {"tool_name": "block_ip", "target": VPN_SRC_IP},
+        {"tool_name": "block_ip", "target": UPLOAD_IP},
+        {"tool_name": "block_domain", "target": UPLOAD_DOMAIN},
     ]
     gaps = missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
     assert gaps == [
@@ -156,7 +161,8 @@ def test_missing_response_targets_default_enforces_db_isolation() -> None:
     actions = [
         {"tool_name": "disable_account", "target": "svc-analytics-47"},
         {"tool_name": "isolate_host", "target": "WKS-DATA-031"},
-        {"tool_name": "block_ip", "target": "198.51.100.44"},
+        {"tool_name": "block_ip", "target": UPLOAD_IP},
+        {"tool_name": "block_domain", "target": UPLOAD_DOMAIN},
     ]
     enforced = missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
     all_gaps = missing_response_targets(
@@ -312,7 +318,8 @@ def test_missing_db_gap_cleared_when_plan_isolates_host() -> None:
     with_db = [
         {"tool_name": "disable_account", "target": "svc-analytics-47"},
         {"tool_name": "isolate_host", "target": "WKS-DATA-031"},
-        {"tool_name": "block_ip", "target": "198.51.100.44"},
+        {"tool_name": "block_ip", "target": UPLOAD_IP},
+        {"tool_name": "block_domain", "target": UPLOAD_DOMAIN},
         {"tool_name": "isolate_host", "target": HOST_DB},
     ]
     without_db = with_db[:-1]
@@ -479,7 +486,8 @@ def test_strict_disposition_targets_env(monkeypatch) -> None:
     actions = [
         {"tool_name": "disable_account", "target": "svc-analytics-47"},
         {"tool_name": "isolate_host", "target": "WKS-DATA-031"},
-        {"tool_name": "block_ip", "target": "198.51.100.44"},
+        {"tool_name": "block_ip", "target": UPLOAD_IP},
+        {"tool_name": "block_domain", "target": UPLOAD_DOMAIN},
     ]
     monkeypatch.delenv("ADVERSARIAL_STRICT_DISPOSITION_TARGETS", raising=False)
     assert strict_disposition_targets_enabled() is False
