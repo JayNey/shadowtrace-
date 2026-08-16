@@ -449,6 +449,7 @@ class ResponsePolicyFilter:
 
 _BLOCK_IP_SOURCE_FIELDS = frozenset({"src_ip", "source_ip"})
 _BLOCK_IP_DESTINATION_FIELDS = frozenset({"dst_ip"})
+_EXPLICIT_SOURCE_BLOCK_PARAM = "explicit_source_block"
 
 
 def _block_ip_sort_key(ip: IPEntity) -> tuple[int, int]:
@@ -864,12 +865,20 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
         if disposition_only:
             candidates = [c for c in candidates if c.tool_name == VIRTUAL_DISPOSITION_TOOL]
 
-        candidates = [
-            kept
-            for candidate in candidates
-            for kept in [_apply_block_ip_source_policy(candidate, entities=entities)]
-            if kept is not None
-        ]
+        # ISSUE-361: drop default src/VPN block_ip after 328/339 coverage merge.
+        # Quality gate never injects source block_ip; this only affects LLM/playbook.
+        dropped_source_ips: list[str] = []
+        kept_candidates: list[ActionCandidate] = []
+        for candidate in candidates:
+            kept = _apply_block_ip_source_policy(candidate, entities=entities)
+            if kept is None:
+                if candidate.target:
+                    dropped_source_ips.append(candidate.target)
+                continue
+            kept_candidates.append(kept)
+        candidates = kept_candidates
+        if dropped_source_ips:
+            strategy = _strip_dropped_source_block_ips_from_strategy(strategy, dropped_source_ips)
 
         actions = self._materialize_actions(
             event_id=input.event_id,
@@ -1115,12 +1124,14 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             tool_name = item.tool_name.strip()
             if not tool_name or tool_name == VIRTUAL_DISPOSITION_TOOL:
                 continue
+            params = dict(item.parameters or {})
+            params.pop(_EXPLICIT_SOURCE_BLOCK_PARAM, None)
             candidates.append(
                 ActionCandidate(
                     tool_name=tool_name,
                     target_type=item.target_type,
                     target=item.target,
-                    parameters=dict(item.parameters or {}),
+                    parameters=params,
                     reason=item.reason or "llm proposal",
                     step_order=idx + 1,
                 )
@@ -1459,8 +1470,6 @@ _HOST_SERVER_MARKERS = re.compile(
     r"(?:^|[-_])(?:srv|db|web|dc|sql|ad|fs|mail|server)(?:[-_]|$)",
     re.IGNORECASE,
 )
-_SOURCE_IP_FIELDS = _BLOCK_IP_SOURCE_FIELDS
-_EXPLICIT_SOURCE_BLOCK_PARAM = "explicit_source_block"
 
 
 def _infer_host_kind(host: HostEntity) -> str | None:
@@ -1569,6 +1578,26 @@ def _explicit_source_block_requested(candidate: ActionCandidate) -> bool:
     return False
 
 
+def _strip_dropped_source_block_ips_from_strategy(strategy: str, dropped_ips: list[str]) -> str:
+    """Remove dropped VPN/source IPs from approval narrative (ISSUE-361)."""
+    text = strategy or ""
+    if not dropped_ips:
+        return text
+    for ip in dropped_ips:
+        token = (ip or "").strip()
+        if not token:
+            continue
+        text = re.sub(re.escape(token), "", text, flags=re.IGNORECASE)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\s*,\s*,+", ",", text)
+    text = re.sub(r"\s*;\s*;+", ";", text)
+    text = text.strip(" ,;.")
+    note = "source egress block_ip omitted"
+    if note in text.lower():
+        return text
+    return f"{text}; {note}" if text else note
+
+
 def _apply_block_ip_source_policy(
     candidate: ActionCandidate,
     *,
@@ -1577,15 +1606,16 @@ def _apply_block_ip_source_policy(
     """Drop default block_ip on VPN/source egress IPs; keep exfil/C2 destinations (ISSUE-361).
 
     Classification uses EntitySet ``normalized_field`` (src_ip / source_ip), not
-    reason substring heuristics. Analyst override: parameters.explicit_source_block=true.
-  """
+    reason substring heuristics. Analyst/playbook override:
+    parameters.explicit_source_block=true (stripped from LLM proposals).
+    """
     if candidate.tool_name != "block_ip" or candidate.target_type != "ip":
         return candidate
     ip_entity = _lookup_ip_entity(entities, candidate.target)
     if ip_entity is None:
         return candidate
     normalized = str((ip_entity.attributes or {}).get("normalized_field") or "").strip().lower()
-    if normalized not in _SOURCE_IP_FIELDS:
+    if normalized not in _BLOCK_IP_SOURCE_FIELDS:
         return candidate
     if _explicit_source_block_requested(candidate):
         return candidate

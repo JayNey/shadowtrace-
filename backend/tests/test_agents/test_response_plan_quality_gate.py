@@ -461,9 +461,7 @@ def test_apply_gate_merges_uncovered_db_host_without_isolating_bait() -> None:
         candidates=llm_filtered,
         rule_fallback_candidates=rule_filtered,
         generated_by=ResponsePlanGeneratedBy.LLM,
-        strategy=(
-            "Isolate workstation; SRV-DB-STG-02 remains online pending investigation"
-        ),
+        strategy=("Isolate workstation; SRV-DB-STG-02 remains online pending investigation"),
         severity=Severity.HIGH,
         risk_assessment=_risk(),
         final_verdict=FinalVerdict.CONFIRMED_THREAT,

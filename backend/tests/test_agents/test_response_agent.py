@@ -1779,6 +1779,224 @@ async def test_block_ip_src_ip_dropped_from_plan() -> None:
     plan = await agent.execute(_agent_input(event_id))
     block_actions = [action for action in plan.actions if action.tool_name == "block_ip"]
     assert block_actions == []
+    assert "source egress block_ip omitted" in plan.strategy_summary
+    assert vpn_ip not in plan.strategy_summary
+
+
+@pytest.mark.asyncio
+async def test_block_ip_src_dropped_keeps_dest_isolate_disable_account_and_domain() -> None:
+    """FIX-009 live shape: drop VPN src, keep dest + isolate + account + domain."""
+    vpn_ip = "198.51.100.44"
+    dest_ip = "198.51.100.77"
+    domain = "storage-sync-cdn.example"
+    event_id = f"evt-{uuid4().hex[:8]}"
+    entities = _exfil_entity_set().model_copy(
+        update={
+            "domains": [
+                DomainEntity(entity_id="dom-cdn", fqdn=domain, source_refs=[_ref()]),
+            ]
+        }
+    )
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(entities=entities))
+
+    class _LiveShapeLLM:
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            import json
+
+            from app.core.llm.base import LLMResponse
+
+            payload = {
+                "actions": [
+                    {
+                        "tool_name": "block_ip",
+                        "target_type": "ip",
+                        "target": vpn_ip,
+                        "parameters": {},
+                        "reason": "Block the VPN source egress IP",
+                    },
+                    {
+                        "tool_name": "block_ip",
+                        "target_type": "ip",
+                        "target": dest_ip,
+                        "parameters": {},
+                        "reason": "Block the external exfiltration destination IP",
+                    },
+                    {
+                        "tool_name": "block_domain",
+                        "target_type": "domain",
+                        "target": domain,
+                        "parameters": {},
+                        "reason": "Block malicious upload domain",
+                    },
+                    {
+                        "tool_name": "isolate_host",
+                        "target_type": "host",
+                        "target": "WKS-DATA-031",
+                        "parameters": {},
+                        "reason": "isolate analytics workstation",
+                    },
+                    {
+                        "tool_name": "isolate_host",
+                        "target_type": "host",
+                        "target": "SRV-DB-STG-02",
+                        "parameters": {},
+                        "reason": "isolate database host",
+                    },
+                    {
+                        "tool_name": "disable_account",
+                        "target_type": "account",
+                        "target": "svc-analytics-47",
+                        "parameters": {},
+                        "reason": "disable stolen service account",
+                    },
+                ],
+                "strategy_summary": (
+                    f"Block VPN source {vpn_ip} and dest {dest_ip}; isolate hosts"
+                ),
+            }
+            return LLMResponse(
+                content=json.dumps(payload),
+                model_name="mock",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            )
+
+    agent = ResponseAgent(
+        llm_client=_LiveShapeLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    block_targets = {action.target for action in plan.actions if action.tool_name == "block_ip"}
+    assert block_targets == {dest_ip}
+    isolate_targets = {
+        action.target for action in plan.actions if action.tool_name == "isolate_host"
+    }
+    assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
+    assert any(action.tool_name == "disable_account" for action in plan.actions)
+    assert any(
+        action.tool_name == "block_domain" and action.target == domain for action in plan.actions
+    )
+    assert vpn_ip not in plan.strategy_summary
+    assert dest_ip in plan.strategy_summary
+    assert "source egress block_ip omitted" in plan.strategy_summary
+
+
+@pytest.mark.asyncio
+async def test_block_ip_src_only_llm_gate_merges_dest_then_drops_src() -> None:
+    """LLM src-only plan: 328 merges dest coverage, 361 then drops the VPN src."""
+    vpn_ip = "198.51.100.44"
+    dest_ip = "198.51.100.77"
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(entities=_exfil_entity_set()))
+
+    class _SrcOnlyLLM:
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            import json
+
+            from app.core.llm.base import LLMResponse
+
+            payload = {
+                "actions": [
+                    {
+                        "tool_name": "block_ip",
+                        "target_type": "ip",
+                        "target": vpn_ip,
+                        "parameters": {},
+                        "reason": "Block the VPN source IP",
+                    },
+                    {
+                        "tool_name": "create_ticket",
+                        "target_type": "ticket",
+                        "target": "ticket",
+                        "parameters": {"title": "track", "description": "track"},
+                        "reason": "track response",
+                    },
+                ],
+                "strategy_summary": f"Block VPN egress {vpn_ip}",
+            }
+            return LLMResponse(
+                content=json.dumps(payload),
+                model_name="mock",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            )
+
+    agent = ResponseAgent(
+        llm_client=_SrcOnlyLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    block_targets = {action.target for action in plan.actions if action.tool_name == "block_ip"}
+    assert block_targets == {dest_ip}
+    isolate_targets = {
+        action.target for action in plan.actions if action.tool_name == "isolate_host"
+    }
+    assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
+    assert any(action.tool_name == "disable_account" for action in plan.actions)
+    assert vpn_ip not in plan.strategy_summary
+    assert "source egress block_ip omitted" in plan.strategy_summary
+
+
+@pytest.mark.asyncio
+async def test_llm_explicit_source_block_flag_is_ignored() -> None:
+    """ISSUE-361: model cannot self-authorize source block_ip via parameters."""
+    vpn_ip = "198.51.100.44"
+    dest_ip = "198.51.100.77"
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(entities=_exfil_entity_set()))
+
+    class _SelfAuthLLM:
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            import json
+
+            from app.core.llm.base import LLMResponse
+
+            payload = {
+                "actions": [
+                    {
+                        "tool_name": "block_ip",
+                        "target_type": "ip",
+                        "target": vpn_ip,
+                        "parameters": {"explicit_source_block": True},
+                        "reason": "Block the VPN source IP",
+                    },
+                    {
+                        "tool_name": "block_ip",
+                        "target_type": "ip",
+                        "target": dest_ip,
+                        "parameters": {},
+                        "reason": "Block the external destination IP",
+                    },
+                ],
+                "strategy_summary": f"Block {vpn_ip} and {dest_ip}",
+            }
+            return LLMResponse(
+                content=json.dumps(payload),
+                model_name="mock",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            )
+
+    agent = ResponseAgent(
+        llm_client=_SelfAuthLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    block_targets = {action.target for action in plan.actions if action.tool_name == "block_ip"}
+    assert block_targets == {dest_ip}
+    assert vpn_ip not in plan.strategy_summary
 
 
 def _mislabeled_block_ip(
@@ -1813,22 +2031,6 @@ def _mislabeled_block_ip(
         reason="Block the external exfiltration destination IP",
     )
     return entities, candidate
-
-
-def test_response_system_prompt_block_ip_dest_only_policy() -> None:
-    messages = build_response_plan_messages(
-        triage_result=_triage(),
-        risk_assessment=_risk(),
-        evidence_output=None,
-        available_tools=["block_ip", "disable_account"],
-        entities_summary={},
-    )
-    system = messages[0].content.lower()
-    assert "block_ip" in system
-    assert "dst_ip" in system
-    assert "src_ip" in system
-    assert "explicit_source_block" in system
-    assert "disable_account" in system
 
 
 def test_response_prompt_entities_json_includes_ip_scope_and_src_dst() -> None:
@@ -1925,6 +2127,41 @@ def test_apply_block_ip_source_policy_allows_explicit_override() -> None:
     kept = _apply_block_ip_source_policy(candidate, entities=entities)
     assert kept is not None
     assert kept.target == "198.51.100.44"
+
+
+@pytest.mark.parametrize("flag", [True, 1, "true", "yes", "TRUE", "1"])
+def test_apply_block_ip_source_policy_explicit_override_coerces_truthy(flag: object) -> None:
+    entities, candidate = _mislabeled_block_ip(
+        address="198.51.100.44",
+        normalized_field="src_ip",
+    )
+    candidate = ActionCandidate(
+        tool_name=candidate.tool_name,
+        target_type=candidate.target_type,
+        target=candidate.target,
+        parameters={"explicit_source_block": flag},
+        reason=candidate.reason,
+    )
+    kept = _apply_block_ip_source_policy(candidate, entities=entities)
+    assert kept is not None
+    assert kept.target == "198.51.100.44"
+
+
+@pytest.mark.parametrize("flag", [False, 0, "false", "no", ""])
+def test_apply_block_ip_source_policy_rejects_falsey_override(flag: object) -> None:
+    entities, candidate = _mislabeled_block_ip(
+        address="198.51.100.44",
+        normalized_field="src_ip",
+    )
+    candidate = ActionCandidate(
+        tool_name=candidate.tool_name,
+        target_type=candidate.target_type,
+        target=candidate.target,
+        parameters={"explicit_source_block": flag},
+        reason=candidate.reason,
+    )
+    kept = _apply_block_ip_source_policy(candidate, entities=entities)
+    assert kept is None
 
 
 def _exfil_entity_set() -> EntitySet:

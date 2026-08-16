@@ -204,6 +204,8 @@ def test_response_system_prompt_block_ip_dest_only_policy() -> None:
     assert "src_ip" in system
     assert "explicit_source_block" in system
     assert "disable_account" in system
+    assert "analyst/playbook only" in system
+    assert "**destination**" not in messages[0].content
 
 
 def test_response_and_risk_share_prompt_blocks() -> None:
@@ -293,8 +295,7 @@ def test_response_system_prompt_follows_risk_severity_for_containment() -> None:
     payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
     assert "When risk_severity is high or risk_score >= 65" in system
     assert (
-        "plan containment for EntitySet hosts/accounts even if triage severity is medium"
-        in system
+        "plan containment for EntitySet hosts/accounts even if triage severity is medium" in system
     )
     assert payload["severity"] == Severity.MEDIUM.value
     assert payload["risk_severity"] == Severity.HIGH.value
@@ -328,10 +329,12 @@ def test_response_prompt_issue360_live_path_stacks_with_357_and_omits_inconsiste
     payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
     assert "When risk_severity is high or risk_score >= 65" in system
     assert (
-        "plan containment for EntitySet hosts/accounts even if triage severity is medium"
-        in system
+        "plan containment for EntitySet hosts/accounts even if triage severity is medium" in system
     )
     assert "plan isolate_host for every host listed in entities.hosts" in system
+    assert "block_ip policy (ISSUE-361)" in system
+    assert "dst_ip" in system
+    assert "explicit_source_block" in system
     assert payload["severity"] == Severity.MEDIUM.value
     assert payload["risk_severity"] == Severity.HIGH.value
     assert payload["risk_score"] == 75

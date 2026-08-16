@@ -104,13 +104,13 @@ def build_response_plan_messages(
         "When risk_severity is high or risk_score >= 65, plan containment for "
         "EntitySet hosts/accounts even if triage severity is medium.\n"
         "block_ip policy (ISSUE-361): use block_ip only for external exfiltration "
-        "or C2 **destination** IPs (entities whose attributes.normalized_field is "
+        "or C2 destination IPs (entities whose attributes.normalized_field is "
         "dst_ip). Do not block VPN egress or other source IPs (src_ip, source_ip) — "
         "blocking egress can lock legitimate VPN paths and has higher blast radius "
         "than blocking a remote destination. For compromised identity or account "
-        "paths prefer disable_account. Only block a source IP when an analyst "
-        "explicitly requires it: set parameters.explicit_source_block=true on that "
-        "action. Still block external exfil/C2 destinations and malicious domains."
+        "paths prefer disable_account. The server drops default source block_ip; "
+        "do not set explicit_source_block (analyst/playbook only). Still block "
+        "external exfil/C2 destinations and malicious domains."
     )
     verdict: FinalVerdict | None = None
     if final_verdict is not None:

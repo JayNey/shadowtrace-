@@ -310,9 +310,7 @@ def _strip_online_claims_for_isolated_hosts(
         clause = clause.strip(" .;")
         if not clause:
             continue
-        fragments = (
-            _AND_OR_SPLIT.split(clause) if _ONLINE_WORD.search(clause) else [clause]
-        )
+        fragments = _AND_OR_SPLIT.split(clause) if _ONLINE_WORD.search(clause) else [clause]
         kept_fragments = [
             fragment.strip()
             for fragment in fragments
