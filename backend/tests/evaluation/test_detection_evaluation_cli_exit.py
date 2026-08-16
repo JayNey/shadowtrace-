@@ -161,12 +161,15 @@ def test_ci_required_detection_step_and_artifact_upload_are_strict() -> None:
     observe = by_name["Run mock detection fail-closed evaluation (observe gate)"]
     assert "continue-on-error" not in required
     assert "continue-on-error" not in observe
+    assert observe.get("if") == "success() || failure()"
     for bypass in ("--allow-gate-fail", "|| true", "|| :", "set +e"):
         assert bypass not in required["run"]
+    assert "--dataset-dir" in required["run"]
+    assert "data/evaluation/detection_shadow_v1" in required["run"]
+    assert "detection_shadow_v1_fail_closed" not in required["run"]
     assert "--allow-gate-fail" in observe["run"]
     assert (
-        "data/evaluation/detection_shadow_v1_fail_closed/baseline_artifact.json"
-        in observe["run"]
+        "data/evaluation/detection_shadow_v1_fail_closed/baseline_artifact.json" in observe["run"]
     )
 
     detection_upload = by_name["Upload required detection artifact"]

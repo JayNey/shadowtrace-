@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -143,6 +144,14 @@ async def _run_loaded_dataset(
     dataset_dir: Path = GATE_DATASET_DIR,
 ) -> object:
     manifest, fixture_index = loaded_detection_dataset
+    declared_id = json.loads((dataset_dir / "manifest.json").read_text(encoding="utf-8"))[
+        "dataset_id"
+    ]
+    if manifest.dataset_id != declared_id:
+        raise AssertionError(
+            f"dataset_dir {dataset_dir} is {declared_id!r} but loaded fixture is "
+            f"{manifest.dataset_id!r}"
+        )
     candidate_refs_entries, candidate_set_hash = await derive_all_candidate_refs(
         session_factory,
         fixture_index,
@@ -182,8 +191,10 @@ async def test_detection_shadow_v1_gate_dataset_passes(
     assert artifact.status == EvaluationRunStatus.COMPLETED
     assert artifact.aggregates.case_count == 5
     assert artifact.aggregates.pass_count == 4
+    assert artifact.aggregates.fail_count == 0
     assert artifact.aggregates.error_count == 0
     assert artifact.aggregates.unevaluable_count == 1
+    assert artifact.aggregates.required_scorer_error_count == 0
     assert artifact.aggregates.pass_rate == 1.0
     assert artifact.gate is not None
     assert artifact.gate.verdict == GateVerdict.PASS
@@ -216,6 +227,8 @@ async def test_detection_shadow_v1_fail_closed_observe_dataset(
     assert artifact.aggregates.pass_count == 0
     assert artifact.aggregates.error_count == 2
     assert artifact.aggregates.unevaluable_count == 0
+    assert artifact.aggregates.required_scorer_error_count == 2
+    assert artifact.aggregates.pass_rate == 0.0
     assert artifact.gate is not None
     assert artifact.gate.verdict == GateVerdict.FAIL_CLOSED
 
@@ -226,11 +239,17 @@ async def test_detection_shadow_v1_fail_closed_observe_dataset(
     )
     assert cold_start.case_status == EvaluationRunStatus.FAILED
     assert cold_start.observation.runtime_errors
+    assert not cold_start.observation.candidates
+    cold_threat = next(
+        result for result in cold_start.scorer_results if result.scorer_id == "threat_detection"
+    )
+    assert cold_threat.outcome == ScorerOutcome.ERROR
 
     resource_case = next(
         case for case in artifact.case_results if case.case_id == "threat_resource_budget_exceeded"
     )
     assert resource_case.case_status == EvaluationRunStatus.FAILED
+    assert not resource_case.observation.candidates
     budget = next(r for r in resource_case.scorer_results if r.scorer_id == "resource_budget")
     assert budget.outcome == ScorerOutcome.FAIL
 
@@ -584,8 +603,6 @@ async def test_detection_evaluation_matches_pinned_baseline(
     truth_service: EvaluationTruthService,
     loaded_detection_dataset: tuple[object, object],
 ) -> None:
-    import json
-
     from app.models.detection_evaluation import DetectionEvaluationArtifact
 
     baseline_path = GATE_DATASET_DIR / "baseline_artifact.json"
@@ -598,6 +615,31 @@ async def test_detection_evaluation_matches_pinned_baseline(
         loaded_detection_dataset,
         seed=42,
         code_sha="baseline0001",
+        dataset_dir=GATE_DATASET_DIR,
+    )
+    assert diff_detection_against_baseline(baseline, candidate) == []
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_detection_fail_closed_evaluation_matches_pinned_baseline(
+    session_factory: async_sessionmaker[AsyncSession],
+    truth_service: EvaluationTruthService,
+    loaded_fail_closed_detection_dataset: tuple[object, object],
+) -> None:
+    from app.models.detection_evaluation import DetectionEvaluationArtifact
+
+    baseline_path = FAIL_CLOSED_DATASET_DIR / "baseline_artifact.json"
+    baseline_payload = json.loads(baseline_path.read_text(encoding="utf-8"))
+    baseline = DetectionEvaluationArtifact.model_validate(baseline_payload)
+
+    candidate = await _run_loaded_dataset(
+        session_factory,
+        truth_service,
+        loaded_fail_closed_detection_dataset,
+        seed=42,
+        code_sha="baseline0001",
+        dataset_dir=FAIL_CLOSED_DATASET_DIR,
     )
     assert diff_detection_against_baseline(baseline, candidate) == []
 

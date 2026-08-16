@@ -604,6 +604,7 @@ jobs:
       - name: Run mock detection evaluation (required gate)
         run: |
           uv run --frozen python -m scripts.run_detection_evaluation \
+            --dataset-dir "${GITHUB_WORKSPACE}/data/evaluation/detection_shadow_v1" \
             --output "${GITHUB_WORKSPACE}/artifacts/evaluation/detection_ci_run.json" \
             --code-sha "${GITHUB_SHA}" \
             --seed 42 \
@@ -611,6 +612,7 @@ jobs:
             --compare-baseline "${GITHUB_WORKSPACE}/data/evaluation/detection_shadow_v1/baseline_artifact.json"
 
       - name: Run mock detection fail-closed evaluation (observe gate)
+        if: success() || failure()
         run: |
           uv run --frozen python -m scripts.run_detection_evaluation \
             --dataset-dir "${GITHUB_WORKSPACE}/data/evaluation/detection_shadow_v1_fail_closed" \

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -107,6 +108,9 @@ REPO_ROOT = BACKEND_DIR.parent
 PRODUCTION_DATASET_DIR = REPO_ROOT / "data" / "evaluation" / "detection_production_v1"
 SHADOW_DATASET_DIR = REPO_ROOT / "data" / "evaluation" / "detection_shadow_v1"
 THRESHOLD_PATH = SHADOW_DATASET_DIR / "threshold_manifest.json"
+SHADOW_DATASET_CONTENT_HASH = str(
+    json.loads((SHADOW_DATASET_DIR / "manifest.json").read_text(encoding="utf-8"))["content_hash"]
+)
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace",
@@ -265,7 +269,7 @@ def _artifact_for_seeded_with_case(
         tenant_id=seeded.source_tenant_id,
         dataset_id="detection_shadow_v1",
         dataset_version="2026.08.02",
-        dataset_content_hash="055fe62e8bb3c0e6f12c60dbadc20f4b235045c8eb216c720c392488fe9e631d",
+        dataset_content_hash=SHADOW_DATASET_CONTENT_HASH,
         code_sha="abc1234",
         config=DetectionEvaluationConfig(
             seed=42,
@@ -294,7 +298,7 @@ def _artifact_for_seeded_with_case(
             diffs=[],
         ),
         quality_report=_quality_report(
-            dataset_hash="055fe62e8bb3c0e6f12c60dbadc20f4b235045c8eb216c720c392488fe9e631d",
+            dataset_hash=SHADOW_DATASET_CONTENT_HASH,
         ),
         tenant_safety=DetectionTenantSafetySummary(probe_count=1, pass_count=1),
         resource_summary=DetectionResourceSummary(),
@@ -480,7 +484,7 @@ async def test_production_comparison_missing_promotion_is_insufficient_data(
             tenant_id="tenant-det-threat",
             dataset_id="detection_shadow_v1",
             dataset_version="2026.08.02",
-            dataset_content_hash="055fe62e8bb3c0e6f12c60dbadc20f4b235045c8eb216c720c392488fe9e631d",
+            dataset_content_hash=SHADOW_DATASET_CONTENT_HASH,
             code_sha="abc1234",
             config=DetectionEvaluationConfig(
                 seed=42,
