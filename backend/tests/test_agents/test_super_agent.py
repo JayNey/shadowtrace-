@@ -792,16 +792,27 @@ class TestLeaseExpiryRecovery:
 class TestLeaseAcquiredOwnerValidation:
     """ISSUE-366: lease_acquired=True requires an explicit owner_id (fail-closed)."""
 
-    async def test_lease_acquired_without_owner_id_raises_validation_error(self) -> None:
+    @pytest.mark.parametrize(
+        "owner_id",
+        [None, "", "  \t"],
+        ids=["omitted", "empty", "whitespace"],
+    )
+    async def test_lease_acquired_without_owner_id_raises_validation_error(
+        self,
+        owner_id: str | None,
+    ) -> None:
         lease = _InMemoryEventLease()
-        owner = generate_owner_id()
-        assert await lease.acquire(_EVENT_ID, owner) is True
+        holder = generate_owner_id()
+        assert await lease.acquire(_EVENT_ID, holder) is True
         agent = _build_super_agent(
             lease=lease,
             event_service=_MockEventService({_EVENT_ID: {"status": EventStatus.NEW}}),
         )
+        kwargs: dict[str, object] = {"lease_acquired": True}
+        if owner_id is not None:
+            kwargs["owner_id"] = owner_id
         with pytest.raises(ValidationError) as exc:
-            await agent.investigate(_EVENT_ID, lease_acquired=True)
+            await agent.investigate(_EVENT_ID, **kwargs)  # type: ignore[arg-type]
         assert exc.value.error_code == "validation_error"
         assert "owner_id" in exc.value.message
 
@@ -811,9 +822,12 @@ class TestLeaseAcquiredOwnerValidation:
         owner = generate_owner_id()
         assert await lease.acquire(_EVENT_ID, owner) is True
         triage_started = asyncio.Event()
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
         agent = _build_super_agent(
             lease=lease,
-            event_service=_MockEventService({_EVENT_ID: {"status": EventStatus.NEW}}),
+            event_service=_MockEventService(events),
         )
         agent.triage_agent = _BlockingTriageAgent(started=triage_started)  # type: ignore[assignment]
 
@@ -822,6 +836,8 @@ class TestLeaseAcquiredOwnerValidation:
 
         assert exc.value.error_code == "investigation_lease_lost"
         assert triage_started.is_set()
+        assert events[_EVENT_ID]["status"] is not EventStatus.FAILED
+        assert events[_EVENT_ID]["status"] is not EventStatus.REPORTING
 
 
 class TestRenewalFailure:

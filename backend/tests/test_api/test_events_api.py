@@ -2521,6 +2521,61 @@ async def test_investigate_releases_lease_when_super_agent_wiring_fails(
 
 
 @pytest.mark.asyncio
+async def test_investigate_background_pairs_acquire_owner_with_investigate(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-366: HTTP background path passes the same owner_id as lease.acquire."""
+    from app.api.v1 import events as events_module
+
+    event_id = await _create_test_event(event_service, title="HTTP owner pairing")
+    captured: dict[str, object] = {}
+
+    class _CapturingLease:
+        async def acquire(self, eid: str, owner_id: str, ttl_s: int = 600) -> bool:
+            captured["acquired_owner"] = owner_id
+            return True
+
+        async def release(self, eid: str, owner_id: str) -> bool:
+            return True
+
+    class _CapturingAgent:
+        async def investigate(
+            self,
+            eid: str,
+            *,
+            owner_id: str | None = None,
+            lease_acquired: bool = False,
+            **_kw: object,
+        ) -> None:
+            captured["investigate_event"] = eid
+            captured["investigate_owner"] = owner_id
+            captured["lease_acquired"] = lease_acquired
+
+    async def _fake_super_agent() -> _CapturingAgent:
+        return _CapturingAgent()
+
+    monkeypatch.setattr(events_module, "get_event_lease", lambda: _CapturingLease())
+    monkeypatch.setattr(events_module, "get_super_agent", _fake_super_agent)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 202, resp.text
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline and "investigate_owner" not in captured:
+        await asyncio.sleep(0.05)
+
+    assert captured.get("lease_acquired") is True
+    assert captured.get("investigate_event") == event_id
+    assert captured["investigate_owner"] == captured["acquired_owner"]
+    assert isinstance(captured["investigate_owner"], str) and captured["investigate_owner"]
+
+
+@pytest.mark.asyncio
 async def test_investigate_background_lease_lost_does_not_mark_failed(
     client: TestClient,
     event_service: EventService,

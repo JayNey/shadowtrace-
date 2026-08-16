@@ -64,6 +64,12 @@ RUN_ANALYSIS_ONLY_TASK_KWARG_NAMES: Final = frozenset(
 )
 
 
+def _require_owner_when_lease_acquired(*, owner_id: str | None, lease_acquired: bool) -> None:
+    """ISSUE-366: dispatch kwargs must not advertise an inherited lease without owner."""
+    if lease_acquired and not str(owner_id or "").strip():
+        raise ValueError("owner_id is required when lease_acquired is True")
+
+
 @dataclass(frozen=True, slots=True)
 class InvestigationDispatchPayload:
     include_response_execution: bool = False
@@ -74,6 +80,10 @@ class InvestigationDispatchPayload:
     lease_acquired: bool = False
 
     def to_apply_async_kwargs(self) -> dict[str, object]:
+        _require_owner_when_lease_acquired(
+            owner_id=self.owner_id,
+            lease_acquired=self.lease_acquired,
+        )
         kwargs: dict[str, object] = {
             "include_response_execution": self.include_response_execution,
             "generate_report": self.generate_report,
@@ -98,6 +108,10 @@ class AnalysisOnlyDispatchPayload:
     lease_acquired: bool = False
 
     def to_apply_async_kwargs(self) -> dict[str, object]:
+        _require_owner_when_lease_acquired(
+            owner_id=self.owner_id,
+            lease_acquired=self.lease_acquired,
+        )
         kwargs: dict[str, object] = {"generate_report": self.generate_report}
         if self.intent_id is not None:
             kwargs["intent_id"] = self.intent_id

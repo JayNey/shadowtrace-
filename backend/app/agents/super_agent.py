@@ -386,13 +386,14 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         if self.risk_agent is None or self.report_agent is None:
             raise RuntimeError("SuperAgent requires RiskAgent and ReportAgent")
 
-        if lease_acquired and not owner_id:
+        owner_token = str(owner_id or "").strip()
+        if lease_acquired and not owner_token:
             raise ValidationError(
                 "owner_id is required when lease_acquired is True",
                 details={"event_id": event_id},
             )
 
-        resolved_owner = owner_id or generate_owner_id()
+        resolved_owner = owner_token or generate_owner_id()
         acquired = lease_acquired
         renewal_task: asyncio.Task[None] | None = None
         renewal_failed: asyncio.Event | None = None
