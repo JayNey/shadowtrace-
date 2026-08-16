@@ -1083,7 +1083,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             evidence_output=input.evidence_output,
             available_tools=available,
             entities_summary=_entities_summary(entities),
-            final_verdict=_coerce_final_verdict(final_verdict),
+            final_verdict=final_verdict,
         )
         response = await self.llm_client.chat(
             messages,
@@ -1437,17 +1437,6 @@ def approval_confidence_for_disposition_only(
     if recommendation == "close_as_fp" and fp_score >= FP_HIGH_THRESHOLD:
         return max(combined, FP_HIGH_THRESHOLD)
     return combined
-
-
-def _coerce_final_verdict(value: FinalVerdict | str | None) -> FinalVerdict | None:
-    if value is None:
-        return None
-    if isinstance(value, FinalVerdict):
-        return value
-    try:
-        return FinalVerdict(str(value))
-    except ValueError:
-        return None
 
 
 def _severity_rank(severity: Severity) -> int:

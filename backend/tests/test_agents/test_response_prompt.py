@@ -270,10 +270,51 @@ def test_response_system_prompt_follows_risk_severity_for_containment() -> None:
     system = messages[0].content
     payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
     assert "When risk_severity is high or risk_score >= 65" in system
-    assert "plan containment for EntitySet hosts/accounts even if triage severity is medium" in system
+    assert (
+        "plan containment for EntitySet hosts/accounts even if triage severity is medium"
+        in system
+    )
     assert payload["severity"] == Severity.MEDIUM.value
     assert payload["risk_severity"] == Severity.HIGH.value
     assert payload["risk_score"] == 75
+
+
+def test_response_prompt_issue360_live_path_stacks_with_357_and_omits_inconsistency_flag() -> None:
+    """DATA_EXFIL MEDIUM + risk 75 + confirmed_threat: 360+357 stack, no 330 weak-triage flag."""
+    triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.MEDIUM,
+        need_investigation=True,
+        reasoning="",
+        decision_summary="Data exfiltration pattern; alert title lacks external IP.",
+    )
+    messages = build_response_plan_messages(
+        triage_result=triage,
+        risk_assessment=RiskAssessment(
+            risk_score=75,
+            severity=Severity.HIGH,
+            confidence=0.8,
+            risk_factors=[],
+            scoring_mode=ScoringMode.RULE_ONLY,
+        ),
+        evidence_output=None,
+        available_tools=["isolate_host", "block_ip"],
+        entities_summary={"hosts": [{"hostname": "SRV-DB-STG-02"}]},
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+    )
+    system = messages[0].content
+    payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
+    assert "When risk_severity is high or risk_score >= 65" in system
+    assert (
+        "plan containment for EntitySet hosts/accounts even if triage severity is medium"
+        in system
+    )
+    assert "plan isolate_host for every host listed in entities.hosts" in system
+    assert payload["severity"] == Severity.MEDIUM.value
+    assert payload["risk_severity"] == Severity.HIGH.value
+    assert payload["risk_score"] == 75
+    assert payload["final_verdict"] == FinalVerdict.CONFIRMED_THREAT.value
+    assert TRIAGE_RISK_INCONSISTENCY_FLAG not in payload
 
 
 def test_response_user_payload_includes_triage_risk_inconsistency_flag() -> None:
