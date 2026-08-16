@@ -7,6 +7,7 @@ run them with ``-m adversarial_audit -o addopts=``.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +26,7 @@ from app.models.evidence import SKIP_GAP_REASONS, skipped_entity_description
 from tests.adversarial.helpers import SignalAuditResult, disposition_gap_target_label
 
 AdversarialAuditMode = Literal["analysis_only", "full_loop"]
+ScorecardContractKind = Literal["mock_plumbing", "live_reasoning", "custom"]
 
 # ISSUE-065 / ISSUE-347: informative only — never folded into scored PASS dimensions.
 OUTPUT_QUALITY_PASS_THRESHOLD = 0.75
@@ -51,6 +53,67 @@ _FULL_LOOP_SCORED_CHECKS = _ANALYSIS_SCORED_CHECKS | frozenset(
 )
 
 _GENERIC_QUERY_DNS_SKIP_DESCRIPTION = skipped_entity_description("query_dns")
+
+
+def resolve_scorecard_llm_mode(*, llm_mode: str | None = None) -> str:
+    """Resolve ``LLM_MODE`` for adversarial scorecard headers (ISSUE-350).
+
+    Explicit ``llm_mode`` wins. Otherwise a non-blank ``LLM_MODE`` env var is
+    used (pytest monkeypatch). If env is unset/blank, fall back to
+    ``get_settings().llm_mode`` so ``.env`` matches the running client.
+    Values are normalized to lowercase.
+    """
+    if llm_mode is not None:
+        raw: object = llm_mode
+    else:
+        env_raw = os.environ.get("LLM_MODE")
+        if env_raw is not None and str(env_raw).strip():
+            raw = env_raw
+        else:
+            from app.core.config import get_settings
+
+            raw = get_settings().llm_mode
+    resolved = str(raw or "").strip().lower()
+    return resolved or "mock"
+
+
+def scorecard_contract_for_llm_mode(llm_mode: str) -> dict[str, str]:
+    """Human-facing contract for interpreting PASS/FAIL on the scorecard."""
+    mode = str(llm_mode or "").strip().lower() or "mock"
+    kind: ScorecardContractKind
+    if mode == "mock":
+        kind = "mock_plumbing"
+        interpretation = (
+            "PASS validates pipeline wiring and scripted golden paths only; "
+            "not Live reasoning and not containment-coverage proof."
+        )
+    elif mode == "openai_compatible":
+        kind = "live_reasoning"
+        interpretation = (
+            "Live LLM reasoning card — independent of CI Mock plumbing; "
+            "golden isolate is not glm capability."
+        )
+    else:
+        kind = "custom"
+        interpretation = (
+            f"Scorecard produced under LLM_MODE={mode!r}; "
+            "interpret PASS relative to the configured provider."
+        )
+    return {"kind": kind, "interpretation": interpretation}
+
+
+def build_scorecard_header(*, llm_mode: str | None = None) -> dict[str, str]:
+    """ISSUE-350 scorecard banner: Mock plumbing vs Live reasoning.
+
+    Does not change scored dimensions or ``verdict_for_human`` PASS/FAIL prefixes.
+    """
+    resolved = resolve_scorecard_llm_mode(llm_mode=llm_mode)
+    contract = scorecard_contract_for_llm_mode(resolved)
+    return {
+        "llm_mode": resolved,
+        "certification_card": contract["kind"],
+        "summary": contract["interpretation"],
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +233,7 @@ class AdversarialAuditChecks:
         )
         payload: dict[str, Any] = {
             "generated_at": datetime.now(UTC).isoformat(),
+            "scorecard_header": build_scorecard_header(),
             "audit_mode": self.audit_mode,
             "ground_truth": gt,
             "observed": {
