@@ -173,9 +173,10 @@ jobs:
   backend-test:
     name: backend-test
     runs-on: ubuntu-latest
-    # Measured cancel at ~20m on suite-only runs; isolation + parallel closure gates
-    # allow a p95-based budget that still runs coverage/timing/random retest.
-    timeout-minutes: 35
+    # ISSUE-356 / run 31917018845: default pytest+coverage hit the old 35m job wall
+    # before finishing (step 00:22:15→00:57:06). Split follow-up gates into
+    # backend-test-gates and budget 45m here for suite growth + p95 headroom.
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: backend
@@ -243,6 +244,77 @@ jobs:
           name: backend-junit-default
           path: backend/junit-default.xml
           if-no-files-found: error
+
+      - name: Upload coverage workspace for gates job
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage-workspace
+          path: |
+            backend/.coverage
+            backend/coverage.xml
+          if-no-files-found: error
+
+  backend-test-gates:
+    name: backend-test-gates
+    needs: backend-test
+    runs-on: ubuntu-latest
+    # ISSUE-356: coverage fail-under + 3× timing retest + random-order retest.
+    # Historically ~8–12m when the suite fit in one job; own budget avoids starving
+    # gates after a long default-suite run.
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: shadowtrace
+          POSTGRES_PASSWORD: shadowtrace
+          POSTGRES_DB: shadowtrace
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shadowtrace -d shadowtrace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify uv.lock
+        run: uv lock --check
+
+      - name: Install backend (frozen dev)
+        run: uv sync --frozen --extra dev
+
+      - name: Download coverage workspace from backend-test
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-coverage-workspace
+          path: backend
 
       - name: ISSUE-055 orchestration coverage gate
         run: >
