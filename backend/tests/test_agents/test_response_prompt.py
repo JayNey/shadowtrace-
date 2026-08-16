@@ -335,6 +335,9 @@ def test_response_prompt_issue360_live_path_stacks_with_357_and_omits_inconsiste
     assert "block_ip policy (ISSUE-361)" in system
     assert "dst_ip" in system
     assert "explicit_source_block" in system
+    assert "do not stack disable_account with force_logout" in system
+    assert "reset_password" in system
+    assert "unless L4 revoke is explicitly required" not in system
     assert payload["severity"] == Severity.MEDIUM.value
     assert payload["risk_severity"] == Severity.HIGH.value
     assert payload["risk_score"] == 75

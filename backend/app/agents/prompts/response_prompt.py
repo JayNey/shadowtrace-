@@ -111,8 +111,9 @@ def build_response_plan_messages(
         "paths prefer disable_account. The server drops default source block_ip; "
         "do not set explicit_source_block (analyst/playbook only). Still block "
         "external exfil/C2 destinations and malicious domains.\n"
-        "For the same account, do not stack disable_account with force_logout or "
-        "revoke_token — pick disable_account unless L4 revoke is explicitly required."
+        "For the same account, do not stack disable_account with force_logout, "
+        "reset_password, or revoke_token — pick disable_account. The server "
+        "collapses redundant identity tools on the same account."
     )
     verdict: FinalVerdict | None = None
     if final_verdict is not None:
