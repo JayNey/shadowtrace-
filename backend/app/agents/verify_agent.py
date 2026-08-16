@@ -36,6 +36,7 @@ from app.agents.rules.verification_mapping import (
     resolve_verification_tool,
     validate_verification_tool_params,
 )
+from app.core.config import get_settings, is_mock_disposition_mode
 from app.db import models as orm
 from app.models.action import Action
 from app.models.agent_io import (
@@ -60,6 +61,7 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.execution import ActionExecutionJob
+from app.models.workflow import CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE
 from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.models.verification_readiness import has_immediate_effect_pending
 from app.services.event_disposition_service import DispositionActivationResult
@@ -1633,26 +1635,55 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         man: bool,
         detail_suffix: str,
         evidence_raw: str | None,
+        disposition_is_mock: bool | None = None,
     ) -> tuple[bool, bool, bool, str, str | None]:
+        """Demote CONFIRMED writebacks with weak confirmation evidence.
+
+        Non-mock disposition aligns with ``CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE``
+        (ISSUE-333 / FIX-011): only ``readback_verified`` / ``manual_confirmed``
+        may proceed; ``status_queried``, missing, invalid, and ``adapter_acknowledged``
+        route to recovery instead of hitting the CLOSED gate.
+
+        Mock disposition keeps the ISSUE-227 simulated path: only
+        ``adapter_acknowledged`` is demoted so mock P0 receipts can still close.
+        """
         evidence_tier: str | None = evidence_raw
         if not confirmed:
             return confirmed, rec, man, detail_suffix, evidence_tier
+
+        if disposition_is_mock is None:
+            disposition_is_mock = is_mock_disposition_mode(get_settings().disposition_mode)
+
+        weak_recovery = (
+            False,
+            True,
+            False,
+            "writeback_confirmed_weak_evidence",
+        )
+
+        if disposition_is_mock:
+            if evidence_raw is None:
+                return confirmed, rec, man, detail_suffix, None
+            try:
+                evidence = ConfirmationEvidence(evidence_raw)
+            except ValueError:
+                return confirmed, rec, man, detail_suffix, evidence_raw
+            evidence_tier = evidence.value
+            if evidence is ConfirmationEvidence.ADAPTER_ACKNOWLEDGED:
+                return (*weak_recovery, evidence_tier)
+            return confirmed, rec, man, detail_suffix, evidence_tier
+
+        # Non-mock: same tier set as validate_closed_gate (ISSUE-333).
         if evidence_raw is None:
-            return confirmed, rec, man, detail_suffix, None
+            return (*weak_recovery, None)
         try:
             evidence = ConfirmationEvidence(evidence_raw)
         except ValueError:
-            return confirmed, rec, man, detail_suffix, evidence_raw
+            return (*weak_recovery, evidence_raw)
         evidence_tier = evidence.value
-        if evidence is ConfirmationEvidence.ADAPTER_ACKNOWLEDGED:
-            return (
-                False,
-                True,
-                False,
-                "writeback_confirmed_weak_evidence",
-                evidence_tier,
-            )
-        return confirmed, rec, man, detail_suffix, evidence_tier
+        if evidence in CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE:
+            return confirmed, rec, man, detail_suffix, evidence_tier
+        return (*weak_recovery, evidence_tier)
 
     async def _evaluate_terminal_writeback_status(
         self,
@@ -1767,14 +1798,12 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         evidence_raw=evidence_raw,
                     )
                 )
-                if (
-                    evidence_raw is not None
-                    and evidence_tier == ConfirmationEvidence.ADAPTER_ACKNOWLEDGED.value
-                ):
+                if not confirmed and detail_suffix == "writeback_confirmed_weak_evidence":
                     logger.info(
                         "Terminal writeback %s CONFIRMED but evidence_tier=weak"
-                        " (adapter_acknowledged) event=%s",
+                        " (%s) event=%s",
                         terminal_wb_id,
+                        evidence_tier,
                         event_id,
                     )
                 empty["confirmation_evidence"] = evidence_tier
