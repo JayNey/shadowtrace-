@@ -71,4 +71,24 @@ describe("mergeWritebacks", () => {
     const merged = mergeWritebacks(context, api);
     expect(merged[0]?.simulated).toBe(false);
   });
+
+  it("fills simulated from API when snapshot has no receipts", () => {
+    const api: WritebackResponse[] = [
+      {
+        writeback_id: "wbk-3",
+        disposition_id: "disp-3",
+        action_id: "act-3",
+        status: "confirmed",
+        confirmation_evidence: "readback_verified",
+        evidence_tier: "strong",
+        provider_code: null,
+        message_code: null,
+        target_results: [],
+        simulated: true,
+      },
+    ];
+    const merged = mergeWritebacks([], api);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.simulated).toBe(true);
+  });
 });

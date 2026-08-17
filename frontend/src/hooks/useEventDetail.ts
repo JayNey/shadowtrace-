@@ -45,7 +45,6 @@ export interface EventWriteback extends WritebackResponse {
   provider_message?: string | null;
   submitted_at?: string | null;
   confirmed_at?: string | null;
-  simulated?: boolean;
   sequence?: number;
 }
 
@@ -89,6 +88,8 @@ export function mergeWritebacks(
   }
   for (const item of apiItems) {
     const existing = merged.get(item.writeback_id);
+    // API is source of truth: explicit false overwrites snapshot true.
+    // ?? only applies when an older payload omits the field.
     merged.set(item.writeback_id, {
       ...existing,
       ...item,

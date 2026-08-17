@@ -645,6 +645,7 @@ describe("EventDetailPage", () => {
         provider_code: "OK",
         message_code: null,
         target_results: [],
+        simulated: true,
       },
     });
 
@@ -657,6 +658,80 @@ describe("EventDetailPage", () => {
     expect(screen.getByTestId("writeback-row-wb-70")).toHaveStyle({
       background: "rgba(82, 196, 26, 0.10)",
     });
+  });
+
+  it("shows simulated warning when only GET writeback carries simulated", async () => {
+    const user = userEvent.setup();
+    const detail = makeDetail();
+    detail.event.event_context_snapshot = {
+      ...detail.event.event_context_snapshot,
+      disposition_receipts: [],
+      writeback_summary: {
+        event_id: "evt-70",
+        closure_cycle: 2,
+        disposition_policy: "required",
+        required_action_count: 1,
+        applicable_action_count: 1,
+        blocked_action_ids: [],
+        readiness_counts: { ready: 1 },
+        aggregate_readiness: "ready",
+        writeback_counts: { confirmed: 1 },
+        aggregate_status: "confirmed",
+        terminal_event_action_id: "action-70",
+        terminal_event_writeback_id: "wb-api-370",
+        terminal_event_disposition: "closed",
+        terminal_event_confirmed: true,
+        external_unsynced: false,
+        updated_at: "2026-07-27T08:11:00Z",
+      },
+    };
+    mockGetEvent.mockResolvedValue({ data: detail });
+    mockListDispositions.mockResolvedValue({
+      data: {
+        event_id: "evt-70",
+        items: [
+          {
+            disposition: {
+              disposition_id: "disp-api-370",
+              action_id: "action-70",
+              closure_cycle: 2,
+              intent_kind: "event_status_update",
+              source_locator: {
+                source_id: "mock-xdr",
+                source_type: "xdr",
+                object_kind: "event",
+                object_id: "source-event-70",
+              },
+              operation_code: "close_event",
+              operation_params: {},
+              target_results: [],
+              operator_id: "shadowtrace",
+              idempotency_key: "idem-api-370",
+              execution_owner: "xdr_managed",
+            },
+            writeback_status: "confirmed",
+          },
+        ],
+      },
+    });
+    mockGetWriteback.mockResolvedValue({
+      data: {
+        writeback_id: "wb-api-370",
+        disposition_id: "disp-api-370",
+        action_id: "action-70",
+        status: "confirmed",
+        confirmation_evidence: "readback_verified",
+        evidence_tier: "strong",
+        provider_code: "OK",
+        message_code: null,
+        target_results: [],
+        simulated: true,
+      },
+    });
+
+    renderPage("/events/evt-70#actions");
+    await user.click(await screen.findByRole("tab", { name: /外部写回/ }));
+    expect(await screen.findByTestId("simulated-receipt-warning")).toBeInTheDocument();
   });
 
   it("does not paint entity required=true applicable=false as terminal writeback done", async () => {

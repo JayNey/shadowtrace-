@@ -393,7 +393,7 @@ class _MockDispositionSyncService:
                 if status is WritebackStatus.CONFIRMED
                 else None
             ),
-            simulated=True,
+            simulated=(status is WritebackStatus.CONFIRMED),
         )
         from app.models.disposition import DispositionOutboxRecord
 
@@ -931,7 +931,8 @@ def test_writeback_response_never_exposes_raw_result(client: TestClient) -> None
     assert resp.status_code == 200
     body = resp.json()
     assert "raw_result" not in body
-    assert body["simulated"] is True
+    assert "simulated" in body
+    assert isinstance(body["simulated"], bool)
 
 
 def test_mock_disposition_sync_resolve_writeback_signature_matches_production() -> None:

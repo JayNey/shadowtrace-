@@ -298,13 +298,13 @@ async def test_get_writeback_without_receipt_simulated_false(
 
 
 @pytest.mark.asyncio
-async def test_resolve_writeback_manual_confirmed_simulated_false(
+async def test_resolve_writeback_manual_confirmed_clears_prior_simulated_true(
     session_factory: async_sessionmaker[AsyncSession],
     client: AsyncClient,
 ) -> None:
     writeback_id = await _seed_writeback_with_receipt(
         session_factory,
-        simulated=False,
+        simulated=True,
         confirmation_evidence=None,
         writeback_status=WritebackStatus.UNKNOWN,
     )
