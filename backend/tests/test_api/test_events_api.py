@@ -504,6 +504,7 @@ async def _seed_reporting_not_required_with_running_side_effect(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> str:
     """NOT_REQUIRED REPORTING with background RUNNING job."""
+    import hashlib
     from uuid import uuid4
 
     sfx = uuid4().hex[:8]
@@ -525,12 +526,23 @@ async def _seed_reporting_not_required_with_running_side_effect(
                     final_verdict=FinalVerdict.FALSE_POSITIVE.value,
                     risk_score=10,
                     entities={},
+                    creation_source_ref={
+                        "source_kind": "incident",
+                        "source_product": "mock_xdr",
+                        "source_tenant_id": "t1",
+                        "connector_id": f"conn-{sfx}",
+                        "source_object_id": f"INC-{sfx}",
+                        "raw_payload_hash": hashlib.sha256(b"not-required-bg").hexdigest(),
+                        "ingested_at": now.isoformat(),
+                    },
+                    source_reference_snapshots=[],
                     disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
                 )
             )
+            await session.flush()
             session.add(
                 orm.Action(
                     action_id=action_id,
@@ -1596,7 +1608,12 @@ async def test_close_reporting_writeback_failed_rejected(
         headers=_hdr(),
     )
     assert resp.status_code == 409
-    assert resp.json()["error_code"] == "writeback_failed"
+    data = resp.json()
+    assert data["error_code"] == "writeback_failed"
+    assert data["details"]["writeback_status"] == WritebackStatus.FAILED.value
+    action_id = data["details"]["action_id"]
+    assert action_id.startswith("act-")
+    assert not action_id.startswith("act-term-")
 
 
 @pytest.mark.asyncio
@@ -1618,7 +1635,12 @@ async def test_close_reporting_writeback_conflict_rejected(
         headers=_hdr(),
     )
     assert resp.status_code == 409
-    assert resp.json()["error_code"] == "writeback_conflict"
+    data = resp.json()
+    assert data["error_code"] == "writeback_conflict"
+    assert data["details"]["writeback_status"] == WritebackStatus.CONFLICT.value
+    action_id = data["details"]["action_id"]
+    assert action_id.startswith("act-")
+    assert not action_id.startswith("act-term-")
 
 
 @pytest.mark.asyncio
@@ -1681,6 +1703,52 @@ async def test_close_reporting_outbox_accepted_rejected(
     resp = client.post(
         f"/api/v1/events/{event_id}/close",
         json={"reason": "outbox accepted test"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 409
+    data = resp.json()
+    assert data["error_code"] == "closed_side_effects_pending"
+    assert data["details"]["action_id"].startswith("act-")
+
+
+@pytest.mark.asyncio
+async def test_close_reporting_outbox_failed_blocked_by_convergence(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """FAILED outbox is blocked by side-effect convergence before writeback predicate."""
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        outbox_status=WritebackStatus.FAILED,
+    )
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "outbox failed convergence test"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 409
+    data = resp.json()
+    assert data["error_code"] == "closed_side_effects_pending"
+    assert data["details"]["action_id"].startswith("act-")
+
+
+@pytest.mark.asyncio
+async def test_close_reporting_outbox_conflict_blocked_by_convergence(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """CONFLICT outbox is blocked by side-effect convergence before writeback predicate."""
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        outbox_status=WritebackStatus.CONFLICT,
+    )
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "outbox conflict convergence test"},
         headers=_hdr(),
     )
     assert resp.status_code == 409
