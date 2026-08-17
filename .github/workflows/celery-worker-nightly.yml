@@ -61,6 +61,10 @@ jobs:
         run: uv sync --frozen --extra dev
 
       - name: Apply migrations
+        # ISSUE-375: GET /tasks/{id} falls through to investigation_intent when
+        # Redis/Celery miss. test_get_task_unknown_id_returns_404 does not
+        # request session_factory, so it will not trigger the pytest migrate
+        # fixture; schema must exist before the matrix runs.
         run: uv run --frozen python -m alembic upgrade head
 
       - name: ISSUE-117 Phase B redelivery matrix (unit/integration)
