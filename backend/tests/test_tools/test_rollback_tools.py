@@ -27,7 +27,7 @@ from app.tools.mock_state import (
     MockEnvironmentState,
     MockObservationRecord,
 )
-from app.tools.registry import ToolRegistry, tool_registry
+from app.tools.registry import ToolNotFoundError, ToolRegistry, tool_registry
 from app.tools.specs import ROLLBACK_SOURCE_MAP, ROLLBACK_TOOL_METAS
 from app.tools.verify._common import MockVerificationRuntime
 
@@ -114,6 +114,9 @@ def test_registry_and_manifest_publish_all_baseline_rollback_tools(
             managed = registry.resolve_binding(tool_name, ExecutionOwner.XDR_MANAGED, [])
             assert managed.provider_name == "mock_xdr"
             assert managed.execution_channel is ExecutionChannel.DISPOSITION_ADAPTER
+        else:
+            with pytest.raises(ToolNotFoundError):
+                registry.resolve_binding(tool_name, ExecutionOwner.XDR_MANAGED, [])
         assert ROLLBACK_SOURCE_MAP[tool_name]
 
 

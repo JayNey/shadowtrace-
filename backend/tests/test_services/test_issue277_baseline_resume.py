@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -101,8 +102,19 @@ async def test_maybe_resume_manual_resolution_enqueues_durable_intent() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "resume_intent",
+    [
+        object(),
+        SimpleNamespace(intent_id=None),
+        SimpleNamespace(intent_id=""),
+        SimpleNamespace(intent_id=" "),
+    ],
+    ids=["missing-attr", "none", "empty", "whitespace"],
+)
 async def test_maybe_resume_manual_resolution_requires_intent_id(
     monkeypatch: pytest.MonkeyPatch,
+    resume_intent: object,
 ) -> None:
     """Missing intent_id on resume intent must not silently schedule dispatch."""
     resume_calls: list[str] = []
@@ -134,7 +146,7 @@ async def test_maybe_resume_manual_resolution_requires_intent_id(
         async def create_or_replay_resume_intent(self, event_id: str, **_kwargs: object):
             del _kwargs
             created.append(event_id)
-            return object()
+            return resume_intent
 
         def schedule_dispatch(
             self,

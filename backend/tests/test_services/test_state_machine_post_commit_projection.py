@@ -280,6 +280,8 @@ def _build_service(
 ) -> tuple[StateMachineService, _DurableState, _ProjectionStore]:
     state = _DurableState(row=_Row(status=initial.value))
     store = _ProjectionStore()
+    # Isolate CLOSED pre-reconcile: the mock session.begin() would otherwise
+    # increment committed_transactions without touching row_version.
     monkeypatch.setattr(
         "app.services.state_machine_service.reconcile_stale_executions_before_close",
         _noop_reconcile_stale_executions,
