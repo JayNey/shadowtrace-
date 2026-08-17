@@ -97,8 +97,9 @@ _REQUIRED_DOCUMENTED_CODES: frozenset[str] = frozenset(
         "report_quality_conflict",
         "report_prerequisites_missing",
         "report_prerequisites_invalid",
-        # ISSUE-277 / ISSUE-305 — graph resume + non-executable plan steps
+        # ISSUE-368 — Mock XDR entity-effect readback correlation
         "correlation_mismatch",
+        # ISSUE-305 — SuperAgent non-executable plan step
         "plan_step_not_executable",
     }
 )
