@@ -30,7 +30,18 @@ from app.models.enums import (
     OutboxDeliveryStatus,
     SourceObjectKind,
 )
-from app.services.disposition_sync_service import DispositionSyncService
+from app.services.disposition_sync_service import (
+    OUTBOX_SUPERSEDED_ERROR_CODE,
+    DispositionSyncService,
+)
+
+
+def _selects_outbox_event_id(stmt: Any) -> bool:
+    """True for ``select(DispositionOutbox.event_id)`` used by the ISSUE-284 lock."""
+    cols = list(getattr(stmt, "selected_columns", ()))
+    if len(cols) != 1:
+        return False
+    return getattr(cols[0], "key", None) == "event_id"
 
 
 def _command(
@@ -290,11 +301,11 @@ async def test_finalize_superseded_head_records_dead_letter_metric(
 
     from app.services import disposition_sync_service as mod
 
-    recorded: list[str] = []
+    recorded: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
         mod,
         "record_writeback_dead_letter",
-        lambda *, adapter, error_code=None: recorded.append(adapter),
+        lambda *, adapter, error_code=None: recorded.append((adapter, error_code)),
     )
     prior = _prior_head()
     prior.delivery_status = OutboxDeliveryStatus.WAITING_RETRY.value
@@ -309,9 +320,9 @@ async def test_finalize_superseded_head_records_dead_letter_metric(
     )
 
     assert prior.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
-    assert prior.last_error_code == "superseded_by_new_head"
+    assert prior.last_error_code == OUTBOX_SUPERSEDED_ERROR_CODE
     assert prior.locked_by is None
-    assert recorded == ["mock_xdr"]
+    assert recorded == [("mock_xdr", OUTBOX_SUPERSEDED_ERROR_CODE)]
 
 
 @pytest.mark.asyncio
@@ -323,11 +334,11 @@ async def test_block_superseded_outbox_terminates_ready_and_leased(
 
     from app.services import disposition_sync_service as mod
 
-    recorded: list[str] = []
+    recorded: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
         mod,
         "record_writeback_dead_letter",
-        lambda *, adapter, error_code=None: recorded.append(adapter),
+        lambda *, adapter, error_code=None: recorded.append((adapter, error_code)),
     )
     service = _service()
     service._resolve_adapter = lambda _outbox: SimpleNamespace(name="mock_xdr")  # type: ignore[method-assign]
@@ -348,7 +359,10 @@ async def test_block_superseded_outbox_terminates_ready_and_leased(
     assert service._block_superseded_outbox(leased, now=now) is OutboxDeliveryStatus.DEAD_LETTER
     assert leased.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
     assert leased.locked_by is None
-    assert recorded == ["mock_xdr", "mock_xdr"]
+    assert recorded == [
+        ("mock_xdr", OUTBOX_SUPERSEDED_ERROR_CODE),
+        ("mock_xdr", OUTBOX_SUPERSEDED_ERROR_CODE),
+    ]
 
 
 @pytest.mark.asyncio
@@ -456,11 +470,8 @@ async def test_deliver_after_supersede_never_calls_adapter_submit() -> None:
             return None
 
         async def scalar(self, stmt: Any) -> Any:
-            # First scalar resolves event_id for SecurityEvent lock; second loads outbox.
-            if not hasattr(self, "_scalar_calls"):
-                self._scalar_calls = 0
-            self._scalar_calls += 1
-            if self._scalar_calls == 1:
+            # ISSUE-284: event_id scalar precedes SecurityEvent lock; entity load follows.
+            if _selects_outbox_event_id(stmt):
                 return outbox.event_id
             return outbox
 
@@ -487,7 +498,7 @@ async def test_deliver_after_supersede_never_calls_adapter_submit() -> None:
 
     assert submit_calls == 0
     assert outbox.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
-    assert outbox.last_error_code == "superseded_by_new_head"
+    assert outbox.last_error_code == OUTBOX_SUPERSEDED_ERROR_CODE
     assert outbox.locked_by is None
 
 

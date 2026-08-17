@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -928,6 +929,21 @@ def test_writeback_response_never_exposes_raw_result(client: TestClient) -> None
     resp = client.get("/api/v1/writebacks/wbk-0a1b2c3d", headers=_hdr("analyst"))
     assert resp.status_code == 200
     assert "raw_result" not in resp.json()
+
+
+def test_mock_disposition_sync_resolve_writeback_signature_matches_production() -> None:
+    """ISSUE-372: shared authz/contracts mock must accept production kwargs."""
+    from app.services.disposition_sync_service import DispositionSyncService
+
+    def _params(fn: Any) -> list[tuple[str, inspect._ParameterKind, object]]:
+        items = list(inspect.signature(fn).parameters.values())
+        if items and items[0].name == "self":
+            items = items[1:]
+        return [(p.name, p.kind, p.default) for p in items]
+
+    assert _params(_MockDispositionSyncService.resolve_writeback) == _params(
+        DispositionSyncService.resolve_writeback
+    )
 
 
 def test_execution_job_partial_success(client: TestClient) -> None:
