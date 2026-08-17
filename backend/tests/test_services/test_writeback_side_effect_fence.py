@@ -8,22 +8,42 @@ from app.core.config import Settings
 from app.core.errors import ValidationError
 from app.models.enums import ExecutionOwner
 from app.services.writeback_side_effect_fence import (
+    assert_action_execution_not_frozen,
     assert_live_side_effects_allowed,
     assert_writeback_side_effects_allowed,
     assert_xdr_writeback_allowed,
 )
 
 
-def test_live_side_effects_fence_blocks_when_enabled() -> None:
+def test_execution_fence_blocks_when_frozen() -> None:
     settings = Settings.model_validate({"BLOCK_LIVE_ACTION_EXECUTION": True})
     with pytest.raises(ValidationError, match="live action execution is frozen"):
-        assert_live_side_effects_allowed(settings=settings, action_id="act-test")
+        assert_action_execution_not_frozen(settings=settings, action_id="act-test")
+
+
+def test_execution_fence_allows_default_mock_settings() -> None:
+    settings = Settings.model_validate({"BLOCK_LIVE_ACTION_EXECUTION": False})
+    assert settings.block_live_action_execution is False
+    assert_action_execution_not_frozen(settings=settings, action_id="act-test")
 
 
 def test_allow_live_side_effects_does_not_block_execution_fence() -> None:
     """ALLOW_LIVE_SIDE_EFFECTS gates tool registration only (ISSUE-369)."""
     settings = Settings.model_validate({"ALLOW_LIVE_SIDE_EFFECTS": True})
+    assert_action_execution_not_frozen(settings=settings, action_id="act-test")
     assert_live_side_effects_allowed(settings=settings, action_id="act-test")
+
+
+def test_fence_blocks_when_allow_and_block_both_true() -> None:
+    """The two flags are independent: ALLOW true does not cancel BLOCK true."""
+    settings = Settings.model_validate(
+        {
+            "ALLOW_LIVE_SIDE_EFFECTS": True,
+            "BLOCK_LIVE_ACTION_EXECUTION": True,
+        }
+    )
+    with pytest.raises(ValidationError, match="live action execution is frozen"):
+        assert_action_execution_not_frozen(settings=settings, action_id="act-test")
 
 
 def test_xdr_writeback_fence_blocks_live_mode_without_flag() -> None:
@@ -93,7 +113,6 @@ def test_combined_fence_blocks_live_xdr_without_writeback_flag() -> None:
         {
             "DISPOSITION_MODE": "live_xdr",
             "ALLOW_XDR_WRITEBACK": False,
-            "ALLOW_LIVE_SIDE_EFFECTS": False,
         }
     )
     with pytest.raises(ValidationError, match="xdr writeback is not enabled"):
@@ -104,7 +123,7 @@ def test_combined_fence_blocks_live_xdr_without_writeback_flag() -> None:
         )
 
 
-def test_combined_fence_blocks_live_side_effects() -> None:
+def test_combined_fence_blocks_when_execution_frozen() -> None:
     live_blocked = Settings.model_validate(
         {
             "DISPOSITION_MODE": "mock_xdr",
@@ -125,7 +144,6 @@ def test_combined_fence_skips_xdr_gate_when_execution_owner_none() -> None:
         {
             "DISPOSITION_MODE": "live_xdr",
             "ALLOW_XDR_WRITEBACK": False,
-            "ALLOW_LIVE_SIDE_EFFECTS": False,
         }
     )
     assert_writeback_side_effects_allowed(

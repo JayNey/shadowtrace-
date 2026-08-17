@@ -140,7 +140,7 @@ make smoke-demo                # exit 0 并打印 URL/端口表
 
 **停止 demo 栈：** 使用 `make up-demo` 后必须用 **`make down-demo`** 停止 worker/scheduler/observability；仅 `make down` 只会停 core，demo 容器可能残留（Makefile 会提示）。
 
-**约束：** demo profile 为 Mock-only。存在 `.env.live` 或 `ALLOW_LIVE_SIDE_EFFECTS=true` / `AUTO_*=true` / `SIMULATION_ENABLED=false` / 非 mock `SOURCE_MODE` 时 `make up-demo` / `make bootstrap-demo` / `make smoke-demo` **fail-closed**（安全策略，非 EventStatus CLOSED）。
+**约束：** demo profile 为 Mock-only。存在 `.env.live` 或 `ALLOW_LIVE_SIDE_EFFECTS=true` / `BLOCK_LIVE_ACTION_EXECUTION=true` / `ALLOW_XDR_WRITEBACK=true` / `AUTO_*=true` / `SIMULATION_ENABLED=false` / 非 mock `SOURCE_MODE` 时 `make up-demo` / `make bootstrap-demo` / `make smoke-demo` **fail-closed**（安全策略，非 EventStatus CLOSED）。
 
 ---
 
@@ -484,7 +484,8 @@ LLM_API_KEY=sk-your-key-here
 LLM_PRIMARY_MODEL=your-model-id
 SOURCE_MODE=live_crowdstrike    # 替换为实际 provider
 TOOL_MODE=live
-ALLOW_LIVE_SIDE_EFFECTS=true    # 显式授权
+ALLOW_LIVE_SIDE_EFFECTS=true    # 注册 live ToolProvider，不放行 execute_plan
+BLOCK_LIVE_ACTION_EXECUTION=false  # true 会冻结 ActionExecution / 写回投递
 ```
 
 `LLM_API_BASE_URL` 是 **chat/completions 路径前缀**（不含 `/chat/completions` 后缀）。火山 Ark 示例：`https://ark.cn-beijing.volces.com/api/v3`。

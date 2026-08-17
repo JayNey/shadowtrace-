@@ -60,7 +60,7 @@ cd backend && uv sync --frozen --extra dev
 cd frontend && pnpm install && pnpm dev
 ```
 
-默认配置见 `.env.example`（`SOURCE_MODE=mock_xdr`、`DISPOSITION_MODE=mock_xdr`、`SIMULATION_ENABLED=true`；`ALLOW_LIVE_SIDE_EFFECTS` / `ALLOW_XDR_WRITEBACK` 默认 false）。本阶段无真实 XDR，走 Mock 契约。
+默认配置见 `.env.example`（`SOURCE_MODE=mock_xdr`、`DISPOSITION_MODE=mock_xdr`、`SIMULATION_ENABLED=true`；`ALLOW_LIVE_SIDE_EFFECTS` / `BLOCK_LIVE_ACTION_EXECUTION` / `ALLOW_XDR_WRITEBACK` 默认 false）。本阶段无真实 XDR，走 Mock 契约。
 
 ## 一、项目定位
 

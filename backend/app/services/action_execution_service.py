@@ -50,7 +50,7 @@ from app.services.execution_job_persistence import (
 from app.services.playbook_approval_binding import validate_approval_binding
 from app.services.state_machine_service import StateMachineService
 from app.services.writeback_side_effect_fence import (
-    assert_live_side_effects_allowed,
+    assert_action_execution_not_frozen,
     assert_writeback_side_effects_allowed,
 )
 from app.tools.executor import ToolExecutor, ensure_executor_job_store
@@ -231,7 +231,7 @@ class ActionExecutionService:
         plan_revision: int | None = None,
         operator: str = _EXECUTION_OPERATOR,
     ) -> ExecutionSummary:
-        assert_live_side_effects_allowed()
+        assert_action_execution_not_frozen()
         await self.reconcile_stale_executions(limit=20, event_id=event_id)
         revision = plan_revision or await self._current_revision(event_id)
         immediate = await self._load_claimable_actions(event_id, revision)

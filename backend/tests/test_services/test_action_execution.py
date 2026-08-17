@@ -458,6 +458,23 @@ async def test_empty_immediate_transitions_to_verifying(
 
 
 @pytest.mark.asyncio
+async def test_execute_plan_rejected_when_live_action_execution_frozen(
+    execution_service: ActionExecutionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-369: BLOCK_LIVE_ACTION_EXECUTION freezes execute_plan before any work."""
+    from app.core.config import Settings
+
+    blocked = Settings.model_validate({"BLOCK_LIVE_ACTION_EXECUTION": True})
+    monkeypatch.setattr(
+        "app.services.writeback_side_effect_fence.get_settings",
+        lambda: blocked,
+    )
+    with pytest.raises(ValidationError, match="live action execution is frozen"):
+        await execution_service.execute_plan("evt-frozen")
+
+
+@pytest.mark.asyncio
 async def test_xdr_managed_execute_plan_submits_outbox(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,

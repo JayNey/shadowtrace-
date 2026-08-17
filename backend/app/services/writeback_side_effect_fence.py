@@ -9,7 +9,7 @@ from app.models.enums import ExecutionOwner
 WRITEBACK_FENCE_BLOCKED_ERROR_CODE = "writeback_fence_blocked"
 
 
-def assert_live_side_effects_allowed(
+def assert_action_execution_not_frozen(
     *,
     settings: Settings | None = None,
     action_id: str | None = None,
@@ -29,6 +29,9 @@ def assert_live_side_effects_allowed(
             "set BLOCK_LIVE_ACTION_EXECUTION=false to allow execute_plan",
             details=details,
         )
+
+
+assert_live_side_effects_allowed = assert_action_execution_not_frozen
 
 
 def assert_xdr_writeback_allowed(
@@ -62,7 +65,7 @@ def assert_writeback_side_effects_allowed(
     ``execution_owner=None`` (system/verification actions) skips the XDR gate;
     live side-effect fence still applies.
     """
-    assert_live_side_effects_allowed(settings=settings, action_id=action_id)
+    assert_action_execution_not_frozen(settings=settings, action_id=action_id)
     if execution_owner is None:
         return
     assert_xdr_writeback_allowed(
@@ -74,6 +77,7 @@ def assert_writeback_side_effects_allowed(
 
 __all__ = [
     "WRITEBACK_FENCE_BLOCKED_ERROR_CODE",
+    "assert_action_execution_not_frozen",
     "assert_live_side_effects_allowed",
     "assert_writeback_side_effects_allowed",
     "assert_xdr_writeback_allowed",

@@ -45,7 +45,7 @@ ShadowTrace = 独立部署的多 Agent 安全运营系统：Mock XDR 输入 → 
 4. 每个会产生外部副作用的 response/rollback Action **只能选一个** `ExecutionOwner`：`XDR_MANAGED` 或 `DIRECT_TOOL`，禁止双下发。`DIRECT_TOOL` 只允许同步 `EXECUTION_RESULT_RECORD`，严禁再映射成 `ENTITY_ACTION_SUBMIT`。
 5. 开发默认且本阶段唯一合格路径：`SOURCE_MODE=mock_xdr` + `DISPOSITION_MODE=mock_xdr` + MockToolProvider。Mock 必须模拟外部 ID、分页、异步、延迟、部分成功/失败；**禁止**「写入后立刻读回成功」的自证闭环。
 6. 任何 live 路径：能力默认 `UNKNOWN`；未验证则 readiness 非 READY / `writeback_unsupported`，阻断自动处置；**禁止**把 `required` 降成 `not_required`，禁止静默回退 Mock 后返回成功。
-7. `ALLOW_LIVE_SIDE_EFFECTS` / `ALLOW_XDR_WRITEBACK` **必须保持默认 false**；本阶段不要为了「演示真机」去打开它们。分析写回无开关、永远禁止。
+7. `ALLOW_LIVE_SIDE_EFFECTS` / `BLOCK_LIVE_ACTION_EXECUTION` / `ALLOW_XDR_WRITEBACK` **必须保持默认 false**；本阶段不要为了「演示真机」去打开 live 工具或写回，也不要打开执行冻结（会停 Mock `execute_plan`）。分析写回无开关、永远禁止。
 
 ### B. 命名与结构（简介第 4 节）
 

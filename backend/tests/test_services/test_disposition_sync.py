@@ -3268,7 +3268,7 @@ async def test_deliver_outbox_sync_ready_blocked_when_writeback_fence_closed(
 
 
 @pytest.mark.asyncio
-async def test_deliver_outbox_live_side_effects_blocked_via_worker(
+async def test_deliver_outbox_blocked_when_action_execution_frozen(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,
     mock_xdr_client: httpx.AsyncClient,
