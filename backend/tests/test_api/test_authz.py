@@ -241,10 +241,7 @@ def test_dev_token_rejected_in_production(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     apply_production_env(monkeypatch)
-    # ISSUE-217: a non-empty DEV_AUTH_TOKENS is itself a production
-    # fail-closed violation, so clear it to exercise the auth-layer gate here.
     monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "false")
-    monkeypatch.setenv("DEV_AUTH_TOKENS", "")
     get_settings.cache_clear()
     resp = client.get("/api/v1/events", headers=_hdr("admin"))
     assert resp.status_code == 401
@@ -261,7 +258,6 @@ def test_dev_token_rejected_when_app_env_has_surrounding_whitespace(
     """
     apply_production_env(monkeypatch, APP_ENV="  production  ")
     monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "false")
-    monkeypatch.setenv("DEV_AUTH_TOKENS", "")
     get_settings.cache_clear()
     resp = client.get("/api/v1/events", headers=_hdr("admin"))
     assert resp.status_code == 401
@@ -280,9 +276,6 @@ def test_is_production_strips_surrounding_whitespace(
 
     apply_production_env(monkeypatch)
     monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "false")
-    # The autouse _dev_auth fixture sets DEV_AUTH_TOKENS, which is itself a
-    # production fail-closed violation; clear it to reach the production cases.
-    monkeypatch.setenv("DEV_AUTH_TOKENS", "")
 
     for env, expected in (
         ("production", True),

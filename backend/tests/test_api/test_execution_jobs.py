@@ -42,6 +42,7 @@ from app.services.execution_job_query_service import (
     ExecutionJobQueryService,
     project_execution_job_response,
 )
+from tests.test_support.production_settings import apply_production_env
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.environ.get(
@@ -376,8 +377,7 @@ async def test_fixture_requires_tenant_scope(
 
 
 def test_production_rejects_execution_job_fixture_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("EXECUTION_JOB_FIXTURE_ENABLED", "true")
+    apply_production_env(monkeypatch, EXECUTION_JOB_FIXTURE_ENABLED=True)
     with pytest.raises(Exception, match="execution_job_fixture_enabled=true"):
         Settings()
 

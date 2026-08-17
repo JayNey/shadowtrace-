@@ -28,7 +28,6 @@ from app.core.errors import LLMError
 from app.core.llm.base import InMemoryLLMCallAuditRecorder
 from app.core.llm.mock_client import MockLLMClient
 from app.models.knowledge import KnowledgeChunk, RetrievalResult, RetrievedChunk
-from tests.test_support.production_settings import production_settings
 from app.rag.citation_tracer import CitationTracer
 from app.rag.context import RetrievalContext
 from app.rag.hybrid_retriever import HybridRetriever
@@ -37,6 +36,7 @@ from app.rag.query_rewriter import QueryRewriter
 from app.rag.reranker import MockReranker, Reranker
 from app.rag.rrf_fusion import rrf_fuse
 from app.services.knowledge_store import KnowledgeStore
+from tests.test_support.production_settings import production_settings
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.environ.get(
@@ -612,8 +612,10 @@ class TestPipelineDegradation:
         assert "plan_kb_scope_mismatch" in result.degraded_steps
 
     @pytest.mark.asyncio
-    async def test_rejects_release_pinned_kb_without_plan_in_production(self) -> None:
-        settings = production_settings()
+    async def test_rejects_release_pinned_kb_without_plan_in_production(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = production_settings(monkeypatch)
         pipeline = RetrievalPipeline(
             rewriter=QueryRewriter(
                 MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
@@ -633,9 +635,11 @@ class TestPipelineDegradation:
         assert "plan_required_in_production" in result.degraded_steps
 
     @pytest.mark.asyncio
-    async def test_allows_case_kb_without_plan_in_production(self) -> None:
+    async def test_allows_case_kb_without_plan_in_production(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         chunks = [_make_chunk("chk-fp", "fp_case_kb", "benign admin tool", score=0.9)]
-        settings = production_settings()
+        settings = production_settings(monkeypatch)
         pipeline = RetrievalPipeline(
             rewriter=QueryRewriter(
                 MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),

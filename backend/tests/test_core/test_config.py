@@ -13,6 +13,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from app.core.config import Settings, TaskMode, is_mock_disposition_mode, is_mock_source_mode
 from app.core.errors import ConfigurationError
+from tests.test_support.production_settings import production_settings_kwargs
 
 
 @pytest.fixture(autouse=True)
@@ -27,20 +28,7 @@ def _no_dev_auth_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _base_kwargs(**overrides: object) -> dict[str, object]:
-    kwargs: dict[str, object] = {
-        "APP_ENV": "production",
-        "SOURCE_MODE": "live_edr",
-        "TOOL_MODE": "live",
-        "DISPOSITION_MODE": "live_xdr",
-        "DISPOSITION_ADAPTER_KIND": "http",
-        "LLM_MODE": "openai_compatible",
-        "EMBEDDING_MODE": "remote",
-        "SIMULATION_ENABLED": False,
-        "SOCKETIO_CORS_ALLOWED_ORIGINS": "https://app.example",
-        "TASK_MODE": "celery",
-    }
-    kwargs.update(overrides)
-    return kwargs
+    return production_settings_kwargs(**overrides)
 
 
 def test_production_with_all_live_modes_is_accepted() -> None:

@@ -7,21 +7,14 @@ import pytest
 from app.core.config import Settings
 from app.core.errors import ConfigurationError
 from app.playbook.resources import get_loaded_playbook_resources
+from tests.test_support.production_settings import production_settings
 
 
-def test_production_settings_reject_playbook_fixture_fallback() -> None:
+def test_production_settings_reject_playbook_fixture_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with pytest.raises(ConfigurationError, match="playbook_fixture_fallback"):
-        Settings(
-            app_env="production",
-            simulation_enabled=False,
-            source_mode="live_xdr",
-            tool_mode="live",
-            disposition_mode="live_xdr",
-            disposition_adapter_kind="live",
-            llm_mode="openai_compatible",
-            embedding_mode="remote",
-            playbook_fixture_fallback=True,
-        )
+        production_settings(monkeypatch, playbook_fixture_fallback=True)
 
 
 def test_playbook_fixture_fallback_marks_degraded() -> None:

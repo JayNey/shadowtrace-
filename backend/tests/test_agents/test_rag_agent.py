@@ -21,7 +21,6 @@ from app.core.errors import (
     GuardrailViolationError,
     ShadowTraceError,
 )
-from tests.test_support.production_settings import production_settings
 from app.models.agent_io import (
     CollectionStatus,
     EvidenceOutput,
@@ -36,6 +35,7 @@ from app.models.evidence import Evidence
 from app.models.knowledge import RetrievalResult, RetrievedChunk
 from app.models.knowledge_release import KnowledgeRelease
 from app.models.workflow import FP_LOW_THRESHOLD
+from tests.test_support.production_settings import production_settings
 
 # --------------------------------------------------------------------------- #
 # Mock helpers
@@ -1430,7 +1430,9 @@ class TestRAGAgentReleasePinning:
         assert len([c for c in pipeline.calls if c["kb_names"] != ["attack_kb"]]) == 3
 
     @pytest.mark.asyncio
-    async def test_production_blocks_attack_kb_without_active_release(self):
+    async def test_production_blocks_attack_kb_without_active_release(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         from unittest.mock import AsyncMock, MagicMock
 
         release_service = MagicMock()
@@ -1439,7 +1441,7 @@ class TestRAGAgentReleasePinning:
         wm = _MockBoundWorkingMemory()
         results = _make_full_results()
         pipeline = _MockPipeline(results=results)
-        settings = production_settings()
+        settings = production_settings(monkeypatch)
         agent = RAGAgent(
             working_memory=wm,
             pipeline=pipeline,
@@ -1536,7 +1538,9 @@ class TestRAGAgentReleasePinning:
         assert len(output.similar_cases) >= 1
 
     @pytest.mark.asyncio
-    async def test_production_blocks_playbook_kb_without_active_release(self):
+    async def test_production_blocks_playbook_kb_without_active_release(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         from unittest.mock import AsyncMock, MagicMock
 
         playbook_release_service = MagicMock()
@@ -1545,7 +1549,7 @@ class TestRAGAgentReleasePinning:
         wm = _MockBoundWorkingMemory()
         results = _make_full_results()
         pipeline = _MockPipeline(results=results)
-        settings = production_settings()
+        settings = production_settings(monkeypatch)
         agent = RAGAgent(
             working_memory=wm,
             pipeline=pipeline,

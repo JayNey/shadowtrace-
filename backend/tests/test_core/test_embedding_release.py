@@ -11,6 +11,7 @@ from app.core.config import Settings
 from app.core.embedding.release import build_embedding_release, compute_config_hash
 from app.core.errors import ConfigurationError
 from app.models.embedding import EmbeddingProviderMode, VectorDistanceMetric, VectorNormalization
+from tests.test_support.production_settings import production_settings
 
 
 def test_build_embedding_release_from_defaults() -> None:
@@ -28,18 +29,9 @@ def test_compute_config_hash_is_deterministic() -> None:
     assert compute_config_hash(settings) == compute_config_hash(settings)
 
 
-def test_production_rejects_mock_embedding_mode() -> None:
+def test_production_rejects_mock_embedding_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ConfigurationError, match="embedding_mode=mock"):
-        Settings(
-            app_env="production",
-            simulation_enabled=False,
-            source_mode="xdr",
-            tool_mode="live",
-            disposition_mode="xdr",
-            disposition_adapter_kind="http",
-            llm_mode="openai_compatible",
-            embedding_mode="mock",
-        )
+        production_settings(monkeypatch, embedding_mode="mock")
 
 
 @pytest.mark.asyncio

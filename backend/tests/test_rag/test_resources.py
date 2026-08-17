@@ -25,6 +25,7 @@ from app.rag.resources import (
     warmup_retrieval_resources,
 )
 from app.services.knowledge_store import KnowledgeStore
+from tests.test_support.production_settings import production_settings
 
 
 @pytest.fixture(autouse=True)
@@ -34,19 +35,11 @@ def _clear_resources() -> None:
     reset_loaded_retrieval_resources()
 
 
-def test_production_settings_reject_fixture_fallback() -> None:
+def test_production_settings_reject_fixture_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with pytest.raises(ConfigurationError, match="retrieval_fixture_fallback"):
-        Settings(
-            app_env="production",
-            simulation_enabled=False,
-            source_mode="live_xdr",
-            tool_mode="live",
-            disposition_mode="live_xdr",
-            disposition_adapter_kind="live",
-            llm_mode="openai_compatible",
-            embedding_mode="remote",
-            retrieval_fixture_fallback=True,
-        )
+        production_settings(monkeypatch, retrieval_fixture_fallback=True)
 
 
 def test_fixture_fallback_skips_pipeline_in_non_production() -> None:
