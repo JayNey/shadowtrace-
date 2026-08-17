@@ -484,6 +484,7 @@ async def _seed_reporting_required_with_running_side_effect(
                     status=ActionStatus.APPROVED.value,
                 )
             )
+            await session.flush()
             session.add(
                 orm.ActionExecutionJob(
                     job_id=job_id,

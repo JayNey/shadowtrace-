@@ -42,6 +42,7 @@ from app.services.execution_job_query_service import (
     ExecutionJobQueryService,
     project_execution_job_response,
 )
+from tests.test_support.db_isolation import truncate_business_tables
 from tests.test_support.production_settings import apply_production_env
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -110,18 +111,9 @@ async def session_factory(
 
 @pytest_asyncio.fixture
 async def clean_state(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
-    from sqlalchemy import text
-
-    from app.db.base import Base
-
-    quoted = ", ".join(f'"{table}"' for table in sorted(Base.metadata.tables))
-    async with session_factory() as session:
-        async with session.begin():
-            await session.execute(text(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE"))
+    await truncate_business_tables(session_factory)
     yield
-    async with session_factory() as session:
-        async with session.begin():
-            await session.execute(text(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE"))
+    await truncate_business_tables(session_factory)
 
 
 def _source_ref(*, tenant_id: str = "tenant-a") -> dict[str, Any]:
