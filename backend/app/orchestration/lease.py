@@ -1,7 +1,7 @@
 """EventLease — Redis-based distributed lease to prevent duplicate orchestration (ISSUE-054).
 
-Acquire uses ``SET NX EX`` for atomicity; release uses a Lua script to check
-owner identity before deleting. When Redis is unavailable ``acquire`` raises
+Acquire uses ``SET NX EX`` for atomicity; renew and release use Lua scripts to
+check owner identity before EXPIRE/DEL. When Redis is unavailable ``acquire`` raises
 ``DependencyUnavailableError`` (HTTP 503); duplicate triggers return ``False``
 (HTTP 409).
 
@@ -38,6 +38,20 @@ end
 return 0
 """
 
+# Lua script: atomically extend TTL only when the value matches owner_id.
+# Returns: 1 = renewed, 0 = owner mismatch, -1 = key absent.
+_RENEW_SCRIPT = """
+local val = redis.call("GET", KEYS[1])
+if val == false then
+    return -1
+end
+if val == ARGV[1] then
+    redis.call("EXPIRE", KEYS[1], tonumber(ARGV[2]))
+    return 1
+end
+return 0
+"""
+
 
 def _lease_key(event_id: str) -> str:
     return f"{LEASE_KEY_PREFIX}{event_id}"
@@ -61,20 +75,20 @@ class EventLease:
 
     def __init__(self, redis_client: RedisClient | None) -> None:
         self._redis_client = redis_client
-        self._release_script: Any = None  # cached registered Lua script
-        self._release_script_client_id: int | None = None
+        self._lua_scripts: dict[tuple[int, str], Any] = {}
 
     def _raw_redis(self) -> Any | None:
         if self._redis_client is None:
             return None
         return self._redis_client.get_client()
 
-    def _release_script_for(self, redis: Any) -> Any:
-        client_id = id(redis)
-        if self._release_script is None or self._release_script_client_id != client_id:
-            self._release_script = redis.register_script(_RELEASE_SCRIPT)
-            self._release_script_client_id = client_id
-        return self._release_script
+    def _script_for(self, redis: Any, source: str) -> Any:
+        cache_key = (id(redis), source)
+        script = self._lua_scripts.get(cache_key)
+        if script is None:
+            script = redis.register_script(source)
+            self._lua_scripts[cache_key] = script
+        return script
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -121,12 +135,17 @@ class EventLease:
             )
         return bool(acquired)
 
-    async def renew(self, event_id: str, owner_id: str) -> bool:
+    async def renew(
+        self,
+        event_id: str,
+        owner_id: str,
+        ttl_s: int = DEFAULT_LEASE_TTL_S,
+    ) -> bool:
         """Extend the lease TTL — only when *owner_id* still matches.
 
-        Returns ``True`` when the lease was successfully renewed.  Returns
-        ``False`` when the key is absent (lease lost / expired / released by
-        another party) or the owner no longer matches.
+        Uses a Lua compare-and-expire so a TOCTOU window cannot extend another
+        worker's lease after expiry. Returns ``True`` when renewed. Returns
+        ``False`` when the key is absent or the owner no longer matches.
 
         Raises :class:`~app.core.errors.DependencyUnavailableError` when Redis
         is unavailable so :meth:`start_renewal` can count consecutive errors
@@ -145,31 +164,30 @@ class EventLease:
                 details={"event_id": event_id, "dependency": "redis", "operation": "renew"},
             )
         key = _lease_key(event_id)
-        current = await redis.get(key)
-        if current is None:
-            # Lease already expired / released — cannot renew what we don't own.
+        script = self._script_for(redis, _RENEW_SCRIPT)
+        result: Any = await script(keys=[key], args=[owner_id, str(ttl_s)])
+        code = int(result) if result is not None else -1
+        if code == 1:
+            logger.debug(
+                "EventLease: renewed lease for event=%s owner=%s ttl=%ds",
+                event_id,
+                owner_id,
+                ttl_s,
+            )
+            return True
+        if code == -1:
             logger.warning(
                 "EventLease.renew: lease key absent for event=%s — "
                 "lease may have expired or been released by another worker",
                 event_id,
             )
             return False
-        decoded = current.decode("utf-8") if isinstance(current, bytes) else current
-        if decoded != owner_id:
-            logger.warning(
-                "EventLease.renew: owner mismatch for event=%s (expected=%s, actual=%s)",
-                event_id,
-                owner_id,
-                decoded,
-            )
-            return False
-        await redis.expire(key, DEFAULT_LEASE_TTL_S)
-        logger.debug(
-            "EventLease: renewed lease for event=%s owner=%s",
+        logger.warning(
+            "EventLease.renew: owner mismatch for event=%s (caller=%s)",
             event_id,
             owner_id,
         )
-        return True
+        return False
 
     async def release(self, event_id: str, owner_id: str) -> bool:
         """Release the lease when *owner_id* matches.
@@ -183,7 +201,7 @@ class EventLease:
         if redis is None:
             return False
         key = _lease_key(event_id)
-        script = self._release_script_for(redis)
+        script = self._script_for(redis, _RELEASE_SCRIPT)
         result: Any = await script(keys=[key], args=[owner_id])
         code = int(result) if result is not None else -1
         if code == 1:

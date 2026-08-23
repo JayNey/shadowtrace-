@@ -752,22 +752,12 @@ async def test_resume_reporting_with_checkpoint_invokes_graph_not_execute() -> N
 
 
 @pytest.mark.asyncio
-async def test_resume_executing_without_graph_still_delegates_execute() -> None:
-    """ISSUE-247 must not break approve→EXECUTING_RESPONSE graph=None fallback."""
+async def test_resume_executing_without_graph_fails_closed() -> None:
+    """Post-triage resume must not restart the full investigation graph."""
     agent = MagicMock()
     agent._investigation_graph = None
 
-    with (
-        patch(
-            "app.services.investigation_guidance.resolve_include_response_execution_for_resume",
-            new_callable=AsyncMock,
-            return_value=True,
-        ),
-        patch(
-            "app.tasks.investigation_tasks.execute_investigation",
-            new_callable=AsyncMock,
-        ) as execute,
-    ):
+    with pytest.raises(GraphResumeFailedError) as exc_info:
         await resume_investigation_from_checkpoint(
             _SessionFactory(EventStatus.EXECUTING_RESPONSE.value),
             "evt-247-executing-fallback",
@@ -775,7 +765,4 @@ async def test_resume_executing_without_graph_still_delegates_execute() -> None:
             get_workflow_runtime=AsyncMock(return_value=MagicMock()),
         )
 
-    execute.assert_awaited_once_with(
-        "evt-247-executing-fallback",
-        include_response_execution=True,
-    )
+    assert exc_info.value.error_type == "graph_unavailable"

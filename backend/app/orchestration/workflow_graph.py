@@ -511,6 +511,14 @@ async def _mark_graph_failed(
         logger.exception("failed to mark event=%s FAILED", event_id)
 
 
+def _execution_summary_succeeded(summary: Any) -> bool:
+    """Treat execute_plan as failed when any action is FAILED (swallowed per-action errors)."""
+    if summary is None:
+        return False
+    counts = getattr(summary, "action_counts", None) or {}
+    return int(counts.get(ActionStatus.FAILED.value, 0) or 0) == 0
+
+
 def _wrap_node(
     services: dict[str, Any],
     fn: Callable[[InvestigationState], Coroutine[Any, Any, InvestigationState]],
@@ -1889,8 +1897,7 @@ def build_investigation_graph(
                 state["event_id"],
                 plan_revision=plan_revision,
             )
-            # Track whether any IMMEDIATE actions were executed.
-            execution_ok = summary is not None
+            execution_ok = _execution_summary_succeeded(summary)
         except SoftTimeLimitExceeded:
             # ISSUE-314: side-effect phase soft-limit must reach task owner.
             raise

@@ -72,7 +72,9 @@ class InMemoryFakeRedis:
         entry.expires_at = self._clock() + ttl
         return True
 
-    def register_script(self, _script: str) -> Any:
+    def register_script(self, script: str) -> Any:
+        is_renew = "EXPIRE" in script.upper()
+
         async def _release(*, keys: list[str], args: list[str]) -> int:
             key = keys[0]
             owner_id = args[0]
@@ -85,7 +87,20 @@ class InMemoryFakeRedis:
             del self._entries[key]
             return 1
 
-        return _release
+        async def _renew(*, keys: list[str], args: list[str]) -> int:
+            key = keys[0]
+            owner_id = args[0]
+            ttl = int(args[1]) if len(args) > 1 else 0
+            self._purge_expired(key)
+            entry = self._entries.get(key)
+            if entry is None:
+                return -1
+            if entry.value != owner_id:
+                return 0
+            entry.expires_at = self._clock() + ttl
+            return 1
+
+        return _renew if is_renew else _release
 
 
 class InMemoryFakeRedisClient:

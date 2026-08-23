@@ -184,9 +184,10 @@ class FileStateFirewallAdapter(BaseToolAdapter):
         lock_path = self._path.with_name(f"{self._path.name}.lock")
         with lock_path.open("a+b") as lock_file:
             flock = getattr(fcntl, "flock", None)
-            if flock is None:
+            lock_ex = getattr(fcntl, "LOCK_EX", None)
+            if flock is None or lock_ex is None:
                 raise RuntimeError("file_state_firewall requires fcntl.flock")
-            flock(lock_file.fileno(), fcntl.LOCK_EX)
+            flock(lock_file.fileno(), lock_ex)
             state = self._read_state()
             existing = state["idempotency"].get(idem_hash)
             if existing is not None:

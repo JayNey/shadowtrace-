@@ -44,11 +44,25 @@ class _FakeRedis:
     async def set(self, *args: object, **kwargs: object) -> bool:
         return True
 
-    def register_script(self, _script: str) -> object:
-        async def _release(*args: object, **kwargs: object) -> int:
+    def register_script(self, script: str) -> object:
+        is_renew = "EXPIRE" in script.upper()
+
+        async def _run(*, keys: list[str], args: list[str]) -> int:
+            key = keys[0]
+            owner_id = args[0]
+            if is_renew:
+                current = await self.get(key)
+                if current is None:
+                    return -1
+                decoded = current.decode("utf-8") if isinstance(current, bytes) else current
+                if decoded != owner_id:
+                    return 0
+                ttl = int(args[1]) if len(args) > 1 else 600
+                await self.expire(key, ttl)
+                return 1
             return 1
 
-        return _release
+        return _run
 
 
 class _FakeRedisClient:

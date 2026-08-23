@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import get_settings
 from app.core.redis_client import RedisClient
 from app.db.session_provider import get_session_provider, reset_session_provider
+from app.orchestration.graph_invocation import set_nested_resume_runner
 
 if TYPE_CHECKING:
     from app.services.execution_job_query_service import ExecutionJobQueryService
@@ -416,18 +417,46 @@ DetectionPromotionDep = Annotated[Any, Depends(get_detection_promotion_service)]
 def _get_adapter_registry() -> Any:
     global _adapter_registry
     if _adapter_registry is None:
-        from app.adapters.mock_xdr import MockXDRDispositionAdapter
+        import os
+
         from app.adapters.registry import DispositionAdapterRegistry
+        from app.core.config import is_mock_disposition_mode
 
         settings = get_settings()
         registry = DispositionAdapterRegistry()
-        base_url = settings.disposition_base_url or "http://mock-xdr"
-        adapter = MockXDRDispositionAdapter(
-            base_url=base_url,
-            read_token="mock-read-token",
-            write_token="mock-write-token",
-        )
-        registry.register("mock_xdr", adapter)
+        if is_mock_disposition_mode(settings.disposition_mode):
+            from app.adapters.mock_xdr import MockXDRDispositionAdapter
+
+            adapter = MockXDRDispositionAdapter(
+                base_url=settings.disposition_base_url or "http://mock-xdr",
+                read_token=os.environ.get("MOCK_XDR_READ_TOKEN", "mock-read-token"),
+                write_token=os.environ.get("MOCK_XDR_WRITE_TOKEN", "mock-write-token"),
+            )
+            registry.register("mock_xdr", adapter)
+        else:
+            from app.adapters.disposition.http_adapter import HttpDispositionAdapter
+            from app.tools.adapters.base import AdapterConfig
+
+            kind = (settings.disposition_adapter_kind or "generic_http_disposition").strip()
+            if not kind or kind.lower() == "mock":
+                kind = "generic_http_disposition"
+            credential_ref = (settings.disposition_credential_ref or "").strip()
+            if credential_ref and (
+                not credential_ref.replace("_", "").isalnum()
+                or credential_ref.upper() != credential_ref
+            ):
+                credential_ref = ""
+            registry.register(
+                kind,
+                HttpDispositionAdapter(
+                    AdapterConfig(
+                        endpoint=settings.disposition_base_url or "http://127.0.0.1",
+                        credential_ref=credential_ref,
+                        enabled=False,
+                    ),
+                    allow_side_effects=False,
+                ),
+            )
         _adapter_registry = registry
     return _adapter_registry
 
@@ -481,6 +510,9 @@ async def _resume_investigation(event_id: str) -> None:
         get_workflow_runtime=_get_workflow_runtime,
         degraded_flags=_get_degraded_flags(),
     )
+
+
+set_nested_resume_runner(_resume_investigation)
 
 
 async def get_manual_resolution_service() -> Any:

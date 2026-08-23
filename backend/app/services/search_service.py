@@ -305,6 +305,7 @@ class SearchService:
                         if ts_col_attr is not None
                         else doc_id_expr.asc()
                     )
+                    .limit(min(max(page * page_size, page_size), 500))
                 )
 
                 result = await session.execute(stmt)

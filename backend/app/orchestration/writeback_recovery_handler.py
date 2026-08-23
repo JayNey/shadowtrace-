@@ -508,7 +508,18 @@ class WritebackRecoveryHandler:
                 writeback.lookup_count += 1
                 if writeback.lookup_count >= writeback.max_lookups:
                     return await self._handle_escalate(event_id, writeback, result, op)
-                return result
+                await self._runtime.set_execution_substate(
+                    event_id,
+                    ExecutionSubstate.WAITING_WRITEBACK,
+                    event_status=EventStatus.VERIFYING,
+                )
+                return WritebackRecoveryResult(
+                    action=WritebackRecoveryAction.WAIT,
+                    writeback_id=writeback.writeback_id,
+                    writeback_status=writeback.current_status,
+                    reason="lookup_exception_wait",
+                    lookup_attempt=writeback.lookup_count,
+                )
 
         if result.action is WritebackRecoveryAction.RETRY:
             if self._disposition_sync is None:
@@ -572,7 +583,18 @@ class WritebackRecoveryHandler:
                 writeback.retry_count += 1
                 if writeback.retry_count >= writeback.max_retries:
                     return await self._handle_escalate(event_id, writeback, result, op)
-                return result
+                await self._runtime.set_execution_substate(
+                    event_id,
+                    ExecutionSubstate.WAITING_WRITEBACK,
+                    event_status=EventStatus.VERIFYING,
+                )
+                return WritebackRecoveryResult(
+                    action=WritebackRecoveryAction.WAIT,
+                    writeback_id=writeback.writeback_id,
+                    writeback_status=writeback.current_status,
+                    reason="retry_exception_wait",
+                    retry_attempt=writeback.retry_count,
+                )
 
         if result.action is WritebackRecoveryAction.MANUAL:
             return await self._handle_escalate(event_id, writeback, result, op)
@@ -1112,8 +1134,16 @@ async def writeback_recovery_graph_node(
             "verify_pending_writeback_action_ids": pending_actions,
             "verify_failed_writebacks": remaining_recoverable,
             "verify_writeback_status_map": status_map or None,
-            "writeback_lookup_count": wb_state.lookup_count,
-            "writeback_retry_count": wb_state.retry_count,
+            "writeback_lookup_count": (
+                0
+                if result.action in (WritebackRecoveryAction.NOOP, WritebackRecoveryAction.MANUAL)
+                else wb_state.lookup_count
+            ),
+            "writeback_retry_count": (
+                0
+                if result.action in (WritebackRecoveryAction.NOOP, WritebackRecoveryAction.MANUAL)
+                else wb_state.retry_count
+            ),
         },
     )
 

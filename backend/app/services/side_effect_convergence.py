@@ -334,7 +334,7 @@ def _action_side_effect_blocks_convergence(
     job = jobs_by_action.get(action_row.action_id)
 
     if policy is SideEffectConvergencePolicy.EXECUTION_JOB_ONLY:
-        if _job_terminal_success(job) or _action_terminal_success(action_row):
+        if _job_terminal_success(job):
             return None, policy
         if job is not None:
             return SideEffectConvergenceReason.IN_FLIGHT_JOB, policy

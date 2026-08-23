@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.config import get_settings, is_mock_tool_mode
+from app.core.config import get_settings, is_mock_disposition_mode, is_mock_tool_mode
 from app.core.errors import EventNotFoundError, InvalidStateTransitionError, ValidationError
 from app.core.event_bus import EventBus
 from app.db import models as orm
@@ -64,6 +64,7 @@ _ACTIVE_OUTBOX_DELIVERY = frozenset(
         OutboxDeliveryStatus.LEASED.value,
         OutboxDeliveryStatus.WAITING_RETRY.value,
         OutboxDeliveryStatus.PAUSED.value,
+        OutboxDeliveryStatus.DELIVERED.value,
     }
 )
 _RECLAIMABLE_ACTION_CATEGORIES = (
@@ -536,7 +537,11 @@ class ActionExecutionService:
                         job_id=job_id,
                         event_id=action.event_id,
                         action_id=action.action_id,
-                        provider_name="mock_xdr",
+                        provider_name=(
+                            "mock_xdr"
+                            if is_mock_disposition_mode(get_settings().disposition_mode)
+                            else (get_settings().disposition_adapter_kind or "xdr_managed")
+                        ),
                         idempotency_key=idempotency_key,
                         status=ExecutionJobStatus.RUNNING.value,
                         claimed_by=operator,
@@ -618,7 +623,11 @@ class ActionExecutionService:
                         job_id=job_id,
                         event_id=action.event_id,
                         action_id=action.action_id,
-                        provider_name="mock_tool_provider",
+                        provider_name=(
+                            "mock_tool_provider"
+                            if is_mock_tool_mode(get_settings().tool_mode)
+                            else "direct_tool_provider"
+                        ),
                         idempotency_key=idempotency_key,
                         status=ExecutionJobStatus.RUNNING.value,
                         claimed_by=operator,

@@ -111,6 +111,7 @@ export function useEventDetail(eventId: string | undefined) {
   const [evidenceDetail, setEvidenceDetail] = useState<EventEvidenceResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const mountedRef = useRef(true);
+  const requestGenRef = useRef(0);
   const eventRef = useRef<EventDetailResponse | null>(null);
   const actionsRef = useRef<Action[]>([]);
 
@@ -123,6 +124,7 @@ export function useEventDetail(eventId: string | undefined) {
         setLoading(false);
         return { actionsOk: false, eventOk: false };
       }
+      const gen = requestGenRef.current;
       const isAll = resource === "all";
       if (isAll) setLoading(true);
 
@@ -149,7 +151,9 @@ export function useEventDetail(eventId: string | undefined) {
           dispositionsPromise,
           connectorsPromise,
         ]);
-      if (!mountedRef.current) return { actionsOk: false, eventOk: false };
+      if (!mountedRef.current || requestGenRef.current !== gen) {
+        return { actionsOk: false, eventOk: false };
+      }
 
       let actionsOk = false;
       let eventOk = false;
@@ -181,11 +185,11 @@ export function useEventDetail(eventId: string | undefined) {
       if ((isAll || resource === "event") && shouldFetchEventEvidence(nextEvent)) {
         try {
           const evidenceResult = await getEventEvidence(eventId);
-          if (mountedRef.current) {
+          if (mountedRef.current && requestGenRef.current === gen) {
             setEvidenceDetail(evidenceResult.data);
           }
         } catch {
-          if (mountedRef.current) {
+          if (mountedRef.current && requestGenRef.current === gen) {
             setEvidenceDetail(null);
           }
         }
@@ -196,7 +200,7 @@ export function useEventDetail(eventId: string | undefined) {
       if (isAll && nextEvent?.event.current_primary_source_record_id) {
         void getSourceRecord(nextEvent.event.current_primary_source_record_id)
           .then((response) => {
-            if (mountedRef.current) setSourceRecord(response.data);
+            if (mountedRef.current && requestGenRef.current === gen) setSourceRecord(response.data);
           })
           .catch(() => undefined);
       }
@@ -211,7 +215,7 @@ export function useEventDetail(eventId: string | undefined) {
         const fetched = await Promise.allSettled(
           [...jobIds].map((jobId) => getExecutionJob(jobId)),
         );
-        if (mountedRef.current) {
+        if (mountedRef.current && requestGenRef.current === gen) {
           const apiJobs = fetched.flatMap((result) =>
             result.status === "fulfilled" ? [result.value.data] : [],
           );
@@ -231,7 +235,7 @@ export function useEventDetail(eventId: string | undefined) {
         const fetched = await Promise.allSettled(
           [...writebackIds].map((writebackId) => getWriteback(writebackId)),
         );
-        if (mountedRef.current) {
+        if (mountedRef.current && requestGenRef.current === gen) {
           const apiWritebacks = fetched.flatMap((result) =>
             result.status === "fulfilled" ? [result.value.data] : [],
           );
@@ -239,7 +243,7 @@ export function useEventDetail(eventId: string | undefined) {
         }
       }
 
-      if (isAll && mountedRef.current) setLoading(false);
+      if (isAll && mountedRef.current && requestGenRef.current === gen) setLoading(false);
       return { actionsOk, eventOk };
     },
     [eventId],
@@ -247,9 +251,11 @@ export function useEventDetail(eventId: string | undefined) {
 
   useEffect(() => {
     mountedRef.current = true;
+    requestGenRef.current += 1;
     void refresh("all");
     return () => {
       mountedRef.current = false;
+      requestGenRef.current += 1;
     };
   }, [refresh]);
 
@@ -288,7 +294,11 @@ export function useEventDetail(eventId: string | undefined) {
         void refresh("event");
       }
     });
-    return unsubscribe;
+    return () => {
+      unsubscribe();
+      socketClient.forgetEvent(eventId);
+      socketClient.ensureGlobalRoom();
+    };
   }, [eventId, refresh]);
 
   return {

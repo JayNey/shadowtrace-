@@ -24,8 +24,9 @@ from app.adapters.disposition.error_classification import (
     is_deterministic_adapter_rejection_code,
 )
 from app.adapters.registry import DispositionAdapterRegistry
-from app.core.config import get_settings
+from app.core.config import get_settings, is_mock_disposition_mode
 from app.core.errors import (
+    AdapterNotFoundError,
     DependencyUnavailableError,
     EventNotFoundError,
     GuardrailViolationError,
@@ -1347,7 +1348,15 @@ class DispositionSyncService:
                         "source_locator": command.source_locator,
                     },
                 )
-                adapter = self._resolve_adapter(outbox)
+                try:
+                    adapter = self._resolve_adapter(outbox)
+                except AdapterNotFoundError as exc:
+                    self._block_outbox_for_writeback_fence(
+                        outbox,
+                        now=datetime.now(UTC),
+                        error_detail=str(exc),
+                    )
+                    return
                 adapter.validate_command(command)
                 adapter_label = adapter.name
                 with disposition_span(
@@ -1556,7 +1565,10 @@ class DispositionSyncService:
         current = ActionStatus(action.status)
         if current is not ActionStatus.EXECUTING:
             return
-        if receipt.status in {WritebackStatus.CONFIRMED, WritebackStatus.ACCEPTED}:
+        if receipt.status is WritebackStatus.ACCEPTED:
+            # ACCEPTED is provider-received, not terminal success.
+            return
+        if receipt.status is WritebackStatus.CONFIRMED:
             target = ActionStatus.SUCCESS
         elif receipt.status is WritebackStatus.PARTIAL:
             target = ActionStatus.PARTIAL_SUCCESS
@@ -1673,21 +1685,28 @@ class DispositionSyncService:
         return mapped
 
     @staticmethod
+    def _entity_effect_readback_enabled(
+        adapter: BaseDispositionAdapter,
+        receipt: DispositionReceipt,
+    ) -> bool:
+        caps = adapter.capabilities()
+        if not caps.supports_entity_effect_readback:
+            return False
+        settings = get_settings()
+        if is_mock_disposition_mode(settings.disposition_mode):
+            return (
+                settings.simulation_enabled
+                and adapter.name == "mock_xdr"
+                and bool(receipt.simulated)
+            )
+        return not bool(receipt.simulated)
+
+    @staticmethod
     def _mock_entity_effect_readback_enabled(
         adapter: BaseDispositionAdapter,
         receipt: DispositionReceipt,
     ) -> bool:
-        settings = get_settings()
-        if settings.disposition_mode.strip().lower() != "mock_xdr":
-            return False
-        if not settings.simulation_enabled:
-            return False
-        if adapter.name != "mock_xdr":
-            return False
-        if not receipt.simulated:
-            return False
-        caps = adapter.capabilities()
-        return caps.supports_entity_effect_readback
+        return DispositionSyncService._entity_effect_readback_enabled(adapter, receipt)
 
     async def reconcile_pending_entity_effects(self, *, limit: int = 10) -> int:
         """Poll independently-applied provider effects for delivered entity commands."""
@@ -1940,7 +1959,7 @@ class DispositionSyncService:
             return None
         if receipt.status is not WritebackStatus.ACCEPTED:
             return None
-        if not self._mock_entity_effect_readback_enabled(adapter, receipt):
+        if not self._entity_effect_readback_enabled(adapter, receipt):
             return None
         completion = await adapter.read_entity_effect_completion(command, receipt)
         return completion
@@ -2359,7 +2378,15 @@ class DispositionSyncService:
     def _resolve_adapter(self, outbox: orm.DispositionOutbox) -> BaseDispositionAdapter:
         payload = outbox.command_payload or {}
         locator = payload.get("source_locator") or {}
-        product = str(locator.get("source_product") or "mock_xdr")
+        product = str(locator.get("source_product") or "").strip()
+        if not product:
+            raise AdapterNotFoundError(
+                "disposition adapter product missing on outbox",
+                details={
+                    "outbox_id": getattr(outbox, "outbox_id", None),
+                    "writeback_id": getattr(outbox, "writeback_id", None),
+                },
+            )
         return self._adapters.get(product)
 
     async def _sync_writeback_summary(self, event_id: str) -> None:

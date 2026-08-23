@@ -75,7 +75,21 @@ async def test_renew_extends_fake_redis_lease_ttl() -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_rejects_unsupported_options() -> None:
+async def test_renew_does_not_extend_foreign_lease_after_expiry() -> None:
+    now = [300.0]
+    fake = InMemoryFakeRedis(clock=lambda: now[0])
+    lease = _lease_with_fake(fake)
+    event_id = "evt-fake-ttl-renew-stolen"
+    first_owner = generate_owner_id()
+    second_owner = generate_owner_id()
+
+    assert await lease.acquire(event_id, first_owner, ttl_s=10) is True
+    now[0] += 10
+    assert await lease.acquire(event_id, second_owner, ttl_s=10) is True
+    assert await lease.renew(event_id, first_owner) is False
+    assert await lease.get_owner(event_id) == second_owner
+    now[0] += 9
+    assert await lease.get_owner(event_id) == second_owner
     fake = InMemoryFakeRedis()
 
     with pytest.raises(TypeError, match="unsupported.*px"):

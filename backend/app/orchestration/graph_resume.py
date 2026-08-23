@@ -399,6 +399,12 @@ async def prepare_graph_resume_state(
         return True
 
     if status_value != EventStatus.EXECUTING_RESPONSE.value:
+        if status_value == EventStatus.WAITING_APPROVAL.value:
+            logger.warning(
+                "prepare_graph_resume: still WAITING_APPROVAL event=%s; refusing resume",
+                event_id,
+            )
+            return False
         logger.warning(
             "prepare_graph_resume: unexpected DB status=%s event=%s; skipping checkpoint patch",
             status_value,
@@ -641,10 +647,22 @@ async def resume_investigation_from_checkpoint(
             await invoke_investigation_graph(graph, None, reporting_config)
         return
 
+    if status_value == EventStatus.WAITING_APPROVAL.value:
+        raise GraphResumeFailedError(
+            "cannot resume while event is still WAITING_APPROVAL",
+            event_id=event_id,
+            error_type="waiting_approval",
+        )
+
     if graph is None:
-        # Only safe for pre-graph statuses; post-analysis handled above.
-        await _delegate_execute_investigation(session_factory, event_id)
-        return
+        if status_value in _GRAPH_NEVER_STARTED_STATUSES:
+            await _delegate_execute_investigation(session_factory, event_id)
+            return
+        raise GraphResumeFailedError(
+            f"investigation graph unavailable for status {status_value}",
+            event_id=event_id,
+            error_type="graph_unavailable",
+        )
 
     config: RunnableConfig = {"configurable": {"thread_id": event_id}}
     runtime = await get_workflow_runtime()

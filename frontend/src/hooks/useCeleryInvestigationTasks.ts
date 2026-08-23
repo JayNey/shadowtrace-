@@ -75,7 +75,7 @@ export function useCeleryInvestigationTasks(
       const entries = [...current.entries()];
       const results = await Promise.all(
         entries.map(async ([eventId, track]) => {
-          if (isTerminalTaskState(track.state)) {
+          if (isTerminalTaskState(track.state) || track.poll_interrupted) {
             return [eventId, track] as const;
           }
           try {
@@ -142,7 +142,7 @@ export function useCeleryInvestigationTasks(
     void pollOnce();
     const timer = window.setInterval(() => {
       const active = [...tracksRef.current.values()].some(
-        (track) => !isTerminalTaskState(track.state),
+        (track) => !isTerminalTaskState(track.state) && !track.poll_interrupted,
       );
       if (!active) return;
       void pollOnce();

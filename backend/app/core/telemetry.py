@@ -203,7 +203,7 @@ def setup_telemetry(
         try:
             from opentelemetry.instrumentation.celery import CeleryInstrumentor
 
-            CeleryInstrumentor().instrument()  # type: ignore[no-untyped-call]
+            CeleryInstrumentor().instrument()  # type: ignore[no-untyped-call, unused-ignore]
         except Exception:
             logger.warning("Celery auto-instrumentation failed", exc_info=True)
 

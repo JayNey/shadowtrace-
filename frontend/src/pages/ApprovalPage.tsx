@@ -15,6 +15,7 @@ import {
 import ApprovalCard from "../components/approval/ApprovalCard";
 import ApprovalActionModal from "../components/approval/ApprovalActionModal";
 import { ApiError } from "../services/apiClient";
+import { socketClient } from "../services/socketClient";
 import { isApprovalUiDisabled } from "../config/auth";
 import { showResumeFeedback } from "../utils/approvalFeedback";
 import type { Action } from "../types/action";
@@ -52,6 +53,10 @@ export default function ApprovalPage() {
   const [searchParams] = useSearchParams();
   const eventFilter = searchParams.get("event_id");
   const approvalDisabled = isApprovalUiDisabled();
+
+  useEffect(() => {
+    socketClient.ensureGlobalRoom();
+  }, []);
 
   useEffect(() => {
     // Deep link: query the target event directly (it may be beyond the first

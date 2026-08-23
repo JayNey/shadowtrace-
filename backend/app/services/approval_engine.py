@@ -40,7 +40,10 @@ from app.models.workflow import (
     AUTO_APPROVABLE_ACTION_LEVELS,
     validate_action_status_transition,
 )
-from app.orchestration.graph_invocation import is_in_investigation_graph
+from app.orchestration.graph_invocation import (
+    defer_nested_graph_resume,
+    is_in_investigation_graph,
+)
 from app.services.action_approval_policy import (
     action_level_rank,
     resolve_runtime_max_auto_level,
@@ -927,9 +930,11 @@ class ApprovalEngine:
                         target.value,
                         exc_info=True,
                     )
+                    return "failed"
 
         if self._resume is not None:
             if is_in_investigation_graph(event_id=event_id):
+                defer_nested_graph_resume(event_id)
                 logger.debug(
                     "defer resume_investigation while graph active event=%s",
                     event_id,

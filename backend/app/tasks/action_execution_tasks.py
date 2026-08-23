@@ -26,9 +26,8 @@ RECONCILE_STALE_EXECUTIONS_TASK = "shadowtrace.reconcile_stale_executions"
 EXECUTION_QUEUE = "investigation"
 
 
-async def _build_execution_service() -> ActionExecutionService:
+async def _build_execution_service(redis: RedisClient) -> ActionExecutionService:
     factory = get_session_factory()
-    redis = RedisClient()
     store = EventContextStore(redis, factory)
     degraded = create_degraded_flag_service(store, factory)
     audit = EventAuditLogService(factory)
@@ -61,7 +60,7 @@ async def _mock_registry() -> ToolRegistry:
 async def _reconcile_once_async() -> dict[str, Any]:
     redis = RedisClient()
     try:
-        service = await _build_execution_service()
+        service = await _build_execution_service(redis)
         reconciled = await service.reconcile_stale_executions(limit=20)
         return {"reconciled": reconciled}
     finally:

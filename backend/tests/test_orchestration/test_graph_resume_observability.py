@@ -286,6 +286,34 @@ async def test_execute_graph_resume_skips_nested_active_graph() -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_graph_resume_flushes_nested_defer_after_unbind() -> None:
+    flushed: list[str] = []
+
+    async def _runner(event_id: str) -> None:
+        flushed.append(event_id)
+
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        set_nested_resume_runner,
+    )
+
+    set_nested_resume_runner(_runner)
+    try:
+        async with bind_investigation_graph("evt-nested-flush"):
+            await execute_graph_resume_with_retry(
+                "evt-nested-flush",
+                session_factory=_SessionFactory(),
+                get_super_agent=AsyncMock(),
+                get_workflow_runtime=AsyncMock(),
+                degraded_flags=MagicMock(),
+            )
+            assert flushed == []
+        assert flushed == ["evt-nested-flush"]
+    finally:
+        set_nested_resume_runner(None)
+
+
+@pytest.mark.asyncio
 async def test_execute_graph_resume_state_mismatch_is_not_retried() -> None:
     degraded = MagicMock()
     degraded.set_flag = AsyncMock(return_value=[])

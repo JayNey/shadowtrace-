@@ -15,6 +15,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from pydantic import ValidationError
 
 from app.core.errors import BudgetExceededError, is_retryable
+from app.core.errors import ValidationError as ShadowTraceValidationError
 from app.core.event_bus import EventBus
 from app.core.telemetry import traced_operation
 from app.models.enums import ExecutionJobStatus, ExecutionOwner, ToolCategory
@@ -628,11 +629,24 @@ class ToolExecutor:
             updated.status = ExecutionJobStatus.TIMED_OUT
         elif result.status is ToolResultStatus.FAILED:
             updated.status = ExecutionJobStatus.FAILED
-        await self.job_store.cas_update_job(
+        applied = await self.job_store.cas_update_job(
             execution_job_id,
             updated,
             expected_status=current.status,
         )
+        if not applied:
+            logger.error(
+                "job CAS missed after side-effect dispatch job=%s expected=%s",
+                execution_job_id,
+                current.status.value,
+            )
+            raise ShadowTraceValidationError(
+                "execution job changed during tool dispatch",
+                details={
+                    "execution_job_id": execution_job_id,
+                    "expected_status": current.status.value,
+                },
+            )
 
     @staticmethod
     def _should_retry(

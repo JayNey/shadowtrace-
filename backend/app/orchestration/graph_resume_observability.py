@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import InvalidStateTransitionError, ValidationError
 from app.db import models as orm
-from app.orchestration.graph_invocation import is_in_investigation_graph
+from app.orchestration.graph_invocation import defer_nested_graph_resume, is_in_investigation_graph
 from app.orchestration.graph_resume import (
     GetSuperAgent,
     GetWorkflowRuntime,
@@ -198,8 +198,9 @@ async def execute_graph_resume_with_retry(
 ) -> None:
     """Resume with limited retries; record degraded + audit before raising."""
     if is_in_investigation_graph(event_id=event_id):
+        defer_nested_graph_resume(event_id)
         logger.warning(
-            "skip nested graph resume while graph active event=%s",
+            "defer nested graph resume while graph active event=%s",
             event_id,
         )
         return

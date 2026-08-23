@@ -285,6 +285,15 @@ def register_handlers(
             await _emit_auth_error(sio, sid, "subscribe requires a valid event_id string")
             return
 
+        if not session.principal.has_read_access():
+            logger.info(
+                "socketio subscribe rejected sid=%s subject=%s — missing read role",
+                sid,
+                session.principal.subject,
+            )
+            await _emit_auth_error(sio, sid, "not authorized to subscribe")
+            return
+
         if not await _event_readable(event_id):
             logger.info(
                 "socketio subscribe rejected sid=%s subject=%s event_id=%s — not found",
