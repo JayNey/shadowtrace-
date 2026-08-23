@@ -511,12 +511,32 @@ async def _mark_graph_failed(
         logger.exception("failed to mark event=%s FAILED", event_id)
 
 
+_IN_FLIGHT_EXECUTE_STATUSES = frozenset(
+    {
+        ActionStatus.EXECUTING,
+        ActionStatus.UNKNOWN,
+    }
+)
+
+
 def _execution_summary_succeeded(summary: Any) -> bool:
-    """Treat execute_plan as failed when any action is FAILED (swallowed per-action errors)."""
+    """Fail execute_plan when counts are empty, FAILED, or still in-flight.
+
+    ACCEPTED writebacks leave actions in EXECUTING; that must not look like
+    success. Remaining PENDING/WAITING_APPROVAL actions on the same revision
+    are later-phase work and do not fail this node.
+    """
     if summary is None:
         return False
     counts = getattr(summary, "action_counts", None) or {}
-    return int(counts.get(ActionStatus.FAILED.value, 0) or 0) == 0
+    if not counts:
+        return False
+    if int(counts.get(ActionStatus.FAILED.value, 0) or 0) > 0:
+        return False
+    for status in _IN_FLIGHT_EXECUTE_STATUSES:
+        if int(counts.get(status.value, 0) or 0) > 0:
+            return False
+    return True
 
 
 def _wrap_node(

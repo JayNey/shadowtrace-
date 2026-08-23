@@ -148,10 +148,15 @@ async def execute_investigation(
     *event_id* with *owner_id*; SuperAgent will skip its own acquire and only
     start renewal (ISSUE-186).
     """
-    from app.api.v1.deps import _get_session_factory, get_super_agent
+    from app.api.v1.deps import (
+        _get_session_factory,
+        ensure_nested_resume_runner,
+        get_super_agent,
+    )
     from app.services.evidence_projection import EvidenceProjection, bind_evidence_projection
     from app.services.investigation_guidance import record_investigation_workflow_path
 
+    ensure_nested_resume_runner()
     session_factory = _get_session_factory()
     if include_response_execution:
         await record_investigation_workflow_path(

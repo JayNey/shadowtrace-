@@ -278,7 +278,7 @@ class ReadOnlyReActExecutor:
                 name,
                 dict(action.params),
                 self._event_id,
-        agent_name=self._agent_name,
+                agent_name=self._agent_name,
             )
         except ToolCallGrantDeniedError as exc:
             raise ReActActionDenied(

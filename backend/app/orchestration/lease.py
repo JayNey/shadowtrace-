@@ -16,7 +16,7 @@ import logging
 import secrets
 from typing import Any
 
-from app.core.errors import DependencyUnavailableError
+from app.core.errors import DependencyUnavailableError, ValidationError
 from app.core.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,25 @@ return 0
 """
 
 
+def classify_lease_lua_script(source: str) -> str:
+    """Return ``renew`` or ``release`` for a registered EventLease Lua script."""
+    normalized = source.strip()
+    if normalized == _RENEW_SCRIPT.strip():
+        return "renew"
+    if normalized == _RELEASE_SCRIPT.strip():
+        return "release"
+    raise ValueError("unknown lease lua script")
+
+
+def _require_positive_ttl(ttl_s: int) -> int:
+    if ttl_s <= 0:
+        raise ValidationError(
+            "lease ttl_s must be a positive integer",
+            details={"ttl_s": ttl_s},
+        )
+    return ttl_s
+
+
 def _lease_key(event_id: str) -> str:
     return f"{LEASE_KEY_PREFIX}{event_id}"
 
@@ -75,7 +94,8 @@ class EventLease:
 
     def __init__(self, redis_client: RedisClient | None) -> None:
         self._redis_client = redis_client
-        self._lua_scripts: dict[tuple[int, str], Any] = {}
+        self._lua_scripts: dict[str, Any] = {}
+        self._lua_client_id: int | None = None
 
     def _raw_redis(self) -> Any | None:
         if self._redis_client is None:
@@ -83,11 +103,14 @@ class EventLease:
         return self._redis_client.get_client()
 
     def _script_for(self, redis: Any, source: str) -> Any:
-        cache_key = (id(redis), source)
-        script = self._lua_scripts.get(cache_key)
+        client_id = id(redis)
+        if self._lua_client_id != client_id:
+            self._lua_scripts.clear()
+            self._lua_client_id = client_id
+        script = self._lua_scripts.get(source)
         if script is None:
             script = redis.register_script(source)
-            self._lua_scripts[cache_key] = script
+            self._lua_scripts[source] = script
         return script
 
     # ------------------------------------------------------------------ #
@@ -118,6 +141,7 @@ class EventLease:
                 error_code="dependency_unavailable",
                 details={"event_id": event_id, "dependency": "redis"},
             )
+        ttl_s = _require_positive_ttl(ttl_s)
         key = _lease_key(event_id)
         acquired = await redis.set(key, owner_id, nx=True, ex=ttl_s)
         if acquired:
@@ -163,6 +187,7 @@ class EventLease:
                 error_code="dependency_unavailable",
                 details={"event_id": event_id, "dependency": "redis", "operation": "renew"},
             )
+        ttl_s = _require_positive_ttl(ttl_s)
         key = _lease_key(event_id)
         script = self._script_for(redis, _RENEW_SCRIPT)
         result: Any = await script(keys=[key], args=[owner_id, str(ttl_s)])
@@ -307,4 +332,10 @@ class EventLease:
         return task
 
 
-__all__ = ["DEFAULT_LEASE_TTL_S", "EventLease", "RENEW_INTERVAL_S", "generate_owner_id"]
+__all__ = [
+    "DEFAULT_LEASE_TTL_S",
+    "EventLease",
+    "RENEW_INTERVAL_S",
+    "classify_lease_lua_script",
+    "generate_owner_id",
+]

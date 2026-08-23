@@ -73,7 +73,9 @@ class InMemoryFakeRedis:
         return True
 
     def register_script(self, script: str) -> Any:
-        is_renew = "EXPIRE" in script.upper()
+        from app.orchestration.lease import classify_lease_lua_script
+
+        kind = classify_lease_lua_script(script)
 
         async def _release(*, keys: list[str], args: list[str]) -> int:
             key = keys[0]
@@ -100,7 +102,7 @@ class InMemoryFakeRedis:
             entry.expires_at = self._clock() + ttl
             return 1
 
-        return _renew if is_renew else _release
+        return _renew if kind == "renew" else _release
 
 
 class InMemoryFakeRedisClient:

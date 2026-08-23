@@ -271,16 +271,25 @@ async def test_execute_graph_resume_skips_nested_active_graph() -> None:
     async def _get_super_agent() -> Any:
         return agent
 
-    from app.orchestration.graph_invocation import bind_investigation_graph
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        get_nested_resume_runner,
+        set_nested_resume_runner,
+    )
 
-    async with bind_investigation_graph("evt-nested"):
-        await execute_graph_resume_with_retry(
-            "evt-nested",
-            session_factory=_SessionFactory(),
-            get_super_agent=_get_super_agent,
-            get_workflow_runtime=AsyncMock(return_value=MagicMock()),
-            degraded_flags=MagicMock(),
-        )
+    previous = get_nested_resume_runner()
+    set_nested_resume_runner(AsyncMock())
+    try:
+        async with bind_investigation_graph("evt-nested"):
+            await execute_graph_resume_with_retry(
+                "evt-nested",
+                session_factory=_SessionFactory(),
+                get_super_agent=_get_super_agent,
+                get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+                degraded_flags=MagicMock(),
+            )
+    finally:
+        set_nested_resume_runner(previous)
 
     agent._investigation_graph.aget_state.assert_not_called()
 
@@ -294,9 +303,11 @@ async def test_execute_graph_resume_flushes_nested_defer_after_unbind() -> None:
 
     from app.orchestration.graph_invocation import (
         bind_investigation_graph,
+        get_nested_resume_runner,
         set_nested_resume_runner,
     )
 
+    previous = get_nested_resume_runner()
     set_nested_resume_runner(_runner)
     try:
         async with bind_investigation_graph("evt-nested-flush"):
@@ -310,7 +321,83 @@ async def test_execute_graph_resume_flushes_nested_defer_after_unbind() -> None:
             assert flushed == []
         assert flushed == ["evt-nested-flush"]
     finally:
-        set_nested_resume_runner(None)
+        set_nested_resume_runner(previous)
+
+
+@pytest.mark.asyncio
+async def test_bind_fails_closed_when_nested_resume_has_no_runner() -> None:
+    from app.orchestration.graph_invocation import (
+        NestedGraphResumeError,
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_runner,
+        set_nested_resume_runner,
+    )
+
+    previous = get_nested_resume_runner()
+    set_nested_resume_runner(None)
+    try:
+        with pytest.raises(NestedGraphResumeError):
+            async with bind_investigation_graph("evt-no-runner"):
+                assert defer_nested_graph_resume("evt-no-runner") is True
+    finally:
+        set_nested_resume_runner(previous)
+
+
+@pytest.mark.asyncio
+async def test_bind_reraises_nested_resume_flush_failure() -> None:
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_runner,
+        set_nested_resume_runner,
+    )
+
+    async def _boom(event_id: str) -> None:
+        raise RuntimeError("flush failed")
+
+    previous = get_nested_resume_runner()
+    set_nested_resume_runner(_boom)
+    try:
+        with pytest.raises(RuntimeError, match="flush failed"):
+            async with bind_investigation_graph("evt-flush-boom"):
+                assert defer_nested_graph_resume("evt-flush-boom") is True
+    finally:
+        set_nested_resume_runner(previous)
+
+
+@pytest.mark.asyncio
+async def test_bind_notifies_failure_handler_when_nested_resume_has_no_runner() -> None:
+    from app.orchestration.graph_invocation import (
+        NestedGraphResumeError,
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+
+    notified: list[tuple[str, str, list[str]]] = []
+
+    async def _handler(event_id: str, exc: BaseException, pending: list[str]) -> None:
+        notified.append((event_id, type(exc).__name__, list(pending)))
+
+    previous_runner = get_nested_resume_runner()
+    previous_handler = get_nested_resume_failure_handler()
+    set_nested_resume_runner(None)
+    set_nested_resume_failure_handler(_handler)
+    try:
+        with pytest.raises(NestedGraphResumeError):
+            async with bind_investigation_graph("evt-no-runner-obs"):
+                assert defer_nested_graph_resume("evt-no-runner-obs") is True
+    finally:
+        set_nested_resume_runner(previous_runner)
+        set_nested_resume_failure_handler(previous_handler)
+
+    assert notified == [
+        ("evt-no-runner-obs", "NestedGraphResumeError", ["evt-no-runner-obs"])
+    ]
 
 
 @pytest.mark.asyncio

@@ -254,6 +254,7 @@ class SearchService:
         pattern = f"%{query}%"
         scopes = self._resolve_fallback_scopes(scope)
         all_rows: list[tuple[str, str, str | None, datetime | None, dict[str, Any], str]] = []
+        true_total = 0
 
         async with self._session_factory() as session:
             for scope_key in scopes:
@@ -305,24 +306,31 @@ class SearchService:
                         if ts_col_attr is not None
                         else doc_id_expr.asc()
                     )
-                    .limit(min(max(page * page_size, page_size), 500))
+                    .limit(500)
                 )
 
                 result = await session.execute(stmt)
                 rows = result.all()
-                for row in rows:
+                table_total = 0
+                for row_i, row in enumerate(rows):
+                    if row_i == 0:
+                        table_total = int(row[-1] or 0)
                     idx = 0
                     doc_id = str(row[idx])
                     idx += 1
-                    event_id_val = (
-                        str(row[idx]) if len(row) > idx and row[idx] is not None else None
-                    )
-                    idx += 1
-                    ts_val = row[idx] if len(row) > idx and row[idx] is not None else None
-                    idx += 1
+                    event_id_val: str | None = None
+                    if event_id_col_attr is not None:
+                        event_id_val = (
+                            str(row[idx]) if row[idx] is not None else None
+                        )
+                        idx += 1
+                    ts_val: datetime | None = None
+                    if ts_col_attr is not None:
+                        ts_val = row[idx] if row[idx] is not None else None
+                        idx += 1
                     field_values: dict[str, Any] = {}
                     for col_name in summary_fields:
-                        if len(row) > idx:
+                        if idx < len(row) - 1:
                             field_values[col_name] = row[idx]
                             idx += 1
                     summary = self._build_fallback_summary(table_name, doc_id, field_values)
@@ -336,6 +344,7 @@ class SearchService:
                             summary,
                         )
                     )
+                true_total += table_total
 
         # Sort combined results by timestamp descending, then paginate.
         all_rows.sort(
@@ -345,7 +354,7 @@ class SearchService:
             ),
             reverse=True,
         )
-        total = len(all_rows)
+        total = true_total
         offset = (page - 1) * page_size
         page_rows = all_rows[offset : offset + page_size]
 

@@ -18,7 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import get_settings
 from app.core.redis_client import RedisClient
 from app.db.session_provider import get_session_provider, reset_session_provider
-from app.orchestration.graph_invocation import set_nested_resume_runner
+from app.orchestration.graph_invocation import (
+    NestedGraphResumeError,
+    set_nested_resume_failure_handler,
+    set_nested_resume_runner,
+)
 
 if TYPE_CHECKING:
     from app.services.execution_job_query_service import ExecutionJobQueryService
@@ -445,6 +449,10 @@ def _get_adapter_registry() -> Any:
                 not credential_ref.replace("_", "").isalnum()
                 or credential_ref.upper() != credential_ref
             ):
+                logger.error(
+                    "invalid disposition credential_ref=%r; live adapter stays disabled",
+                    credential_ref,
+                )
                 credential_ref = ""
             registry.register(
                 kind,
@@ -512,7 +520,45 @@ async def _resume_investigation(event_id: str) -> None:
     )
 
 
+async def _on_nested_resume_flush_failure(
+    event_id: str,
+    exc: BaseException,
+    pending: list[str],
+) -> None:
+    """Record graph_resume_failed when nested flush fails without prior observability."""
+    from app.orchestration.graph_resume_observability import (
+        GraphResumeFailedError,
+        GraphResumeFailureContext,
+        record_graph_resume_failure,
+    )
+
+    if isinstance(exc, GraphResumeFailedError):
+        return
+    error_type = (
+        "nested_resume_no_runner"
+        if isinstance(exc, NestedGraphResumeError)
+        else type(exc).__name__
+    )
+    for eid in pending or [event_id]:
+        await record_graph_resume_failure(
+            _get_session_factory(),
+            _get_degraded_flags(),
+            GraphResumeFailureContext(
+                event_id=eid,
+                error_type=error_type,
+                message=str(exc)[:500],
+            ),
+        )
+
+
 set_nested_resume_runner(_resume_investigation)
+set_nested_resume_failure_handler(_on_nested_resume_flush_failure)
+
+
+def ensure_nested_resume_runner() -> None:
+    """Idempotently install the production nested-resume flusher (API + workers)."""
+    set_nested_resume_runner(_resume_investigation)
+    set_nested_resume_failure_handler(_on_nested_resume_flush_failure)
 
 
 async def get_manual_resolution_service() -> Any:

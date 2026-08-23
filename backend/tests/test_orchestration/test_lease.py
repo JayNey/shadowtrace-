@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.core.errors import DependencyUnavailableError
+from app.core.errors import DependencyUnavailableError, ValidationError
 from app.orchestration.lease import EventLease
 
 _OWNER = "worker-test"
@@ -45,12 +45,14 @@ class _FakeRedis:
         return True
 
     def register_script(self, script: str) -> object:
-        is_renew = "EXPIRE" in script.upper()
+        from app.orchestration.lease import classify_lease_lua_script
+
+        kind = classify_lease_lua_script(script)
 
         async def _run(*, keys: list[str], args: list[str]) -> int:
             key = keys[0]
             owner_id = args[0]
-            if is_renew:
+            if kind == "renew":
                 current = await self.get(key)
                 if current is None:
                     return -1
@@ -77,6 +79,15 @@ class _FakeRedisClient:
 
 def _lease_with_fake(fake_redis: _FakeRedis) -> EventLease:
     return EventLease(_FakeRedisClient(fake_redis))  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_acquire_and_renew_reject_non_positive_ttl() -> None:
+    lease = _lease_with_fake(_FakeRedis())
+    with pytest.raises(ValidationError):
+        await lease.acquire("evt-ttl", _OWNER, ttl_s=0)
+    with pytest.raises(ValidationError):
+        await lease.renew("evt-ttl", _OWNER, ttl_s=-1)
 
 
 _real_asyncio_sleep = asyncio.sleep

@@ -90,7 +90,24 @@ async def test_renew_does_not_extend_foreign_lease_after_expiry() -> None:
     assert await lease.get_owner(event_id) == second_owner
     now[0] += 9
     assert await lease.get_owner(event_id) == second_owner
+
+
+@pytest.mark.asyncio
+async def test_set_rejects_unsupported_options() -> None:
     fake = InMemoryFakeRedis()
 
     with pytest.raises(TypeError, match="unsupported.*px"):
         await fake.set("key", "value", nx=True, px=1000)
+
+
+@pytest.mark.asyncio
+async def test_lease_rejects_non_positive_ttl() -> None:
+    from app.core.errors import ValidationError
+
+    fake = InMemoryFakeRedis()
+    lease = _lease_with_fake(fake)
+    owner = generate_owner_id()
+    with pytest.raises(ValidationError):
+        await lease.acquire("evt-ttl", owner, ttl_s=0)
+    with pytest.raises(ValidationError):
+        await lease.renew("evt-ttl", owner, ttl_s=-1)

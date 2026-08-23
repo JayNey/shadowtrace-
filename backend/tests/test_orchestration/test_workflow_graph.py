@@ -96,6 +96,7 @@ from app.orchestration.workflow_graph import (
     ROUTE_WRITEBACK,
     _resolve_verify_writeback_status,
     _resolve_verify_writeback_statuses,
+    _execution_summary_succeeded,
     build_investigation_graph,
     invoke_investigation_graph,
     route_after_approval,
@@ -1549,7 +1550,10 @@ class FakeActionExecution:
         operator: str | None = None,
     ) -> Any:
         self.calls.append((event_id, plan_revision))
-        return SimpleNamespace(execution_id="exec-fake")
+        return SimpleNamespace(
+            execution_id="exec-fake",
+            action_counts={ActionStatus.SUCCESS.value: 1},
+        )
 
 
 @pytest.mark.asyncio
@@ -3135,6 +3139,73 @@ async def test_execute_node_skips_plan_refresh_when_execution_ok_false() -> None
     )
     assert result["execution_ok"] is False
     assert "response_plan" not in result
+    assert result["event_status"] == EventStatus.VERIFYING.value
+
+
+def test_execution_summary_succeeded_rejects_inflight_and_empty() -> None:
+    assert _execution_summary_succeeded(None) is False
+    assert _execution_summary_succeeded(SimpleNamespace()) is False
+    assert _execution_summary_succeeded(SimpleNamespace(action_counts={})) is False
+    assert (
+        _execution_summary_succeeded(
+            SimpleNamespace(action_counts={ActionStatus.FAILED.value: 1})
+        )
+        is False
+    )
+    assert (
+        _execution_summary_succeeded(
+            SimpleNamespace(action_counts={ActionStatus.EXECUTING.value: 1})
+        )
+        is False
+    )
+    assert (
+        _execution_summary_succeeded(
+            SimpleNamespace(action_counts={ActionStatus.UNKNOWN.value: 1})
+        )
+        is False
+    )
+    assert (
+        _execution_summary_succeeded(
+            SimpleNamespace(action_counts={ActionStatus.SUCCESS.value: 1})
+        )
+        is True
+    )
+    assert (
+        _execution_summary_succeeded(
+            SimpleNamespace(
+                action_counts={
+                    ActionStatus.SUCCESS.value: 1,
+                    ActionStatus.PENDING.value: 1,
+                }
+            )
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_node_treats_executing_writeback_as_not_ok() -> None:
+    event_id = "evt-accepted-inflight"
+
+    class _AcceptedExec:
+        async def execute_plan(self, *_a: Any, **_k: Any) -> Any:
+            return SimpleNamespace(action_counts={ActionStatus.EXECUTING.value: 1})
+
+    machine = FakeStateMachine(
+        status=EventStatus.EXECUTING_RESPONSE,
+        statuses={event_id: EventStatus.EXECUTING_RESPONSE},
+    )
+    services = _services(machine)
+    services["action_execution"] = _AcceptedExec()
+    graph = build_investigation_graph(_agents(), services)
+    result = await graph.nodes[NODE_EXECUTE].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.EXECUTING_RESPONSE.value,
+            response_plan=_pending_execute_plan(event_id),
+        )
+    )
+    assert result["execution_ok"] is False
     assert result["event_status"] == EventStatus.VERIFYING.value
 
 

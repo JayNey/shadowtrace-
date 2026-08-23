@@ -514,7 +514,53 @@ async def test_rollback_action_success_verification_rolls_back_original(
     assert result.warning is None
     assert result.audit_log_id is not None
 
-    # Verify DB state
+    async with session_factory() as session:
+        original_row = await session.get(orm.Action, original.action_id)
+        assert original_row is not None
+        assert ActionStatus(original_row.status) is ActionStatus.ROLLED_BACK
+        assert original_row.rollback_status == "completed"
+
+        rb_row = await session.get(orm.Action, result.rollback_action_id)
+        assert rb_row is not None
+        assert ActionCategory(rb_row.action_category) is ActionCategory.ROLLBACK
+        assert rb_row.tool_name == "unblock_ip"
+        assert ActionStatus(rb_row.status) is ActionStatus.SUCCESS
+        assert rb_row.source_action_id == original.action_id
+
+
+@pytest.mark.asyncio
+async def test_rollback_skipped_readback_still_cas_original(
+    session_factory: async_sessionmaker[AsyncSession],
+    audit: EventAuditLogService,
+    cleanup: None,
+) -> None:
+    """No independent readback tool must not fail a successful rollback."""
+    event_id = await _seed_event(session_factory)
+    original = await _seed_response_action(
+        session_factory,
+        event_id=event_id,
+        tool_name="block_ip",
+        status=ActionStatus.SUCCESS,
+    )
+
+    execute = _mock_execute_hook(session_factory, succeed=True)
+    svc = _rollback_service(
+        session_factory,
+        audit,
+        execute=execute,
+        verify=_mock_verify_hook(skipped=True),
+    )
+
+    result = await svc.rollback_action(
+        original.action_id,
+        operator="test-op",
+        reason="skipped readback",
+    )
+
+    assert result.rollback_effect_status == "skipped"
+    assert result.rolled_back is True
+    assert result.warning is None
+
     async with session_factory() as session:
         original_row = await session.get(orm.Action, original.action_id)
         assert original_row is not None

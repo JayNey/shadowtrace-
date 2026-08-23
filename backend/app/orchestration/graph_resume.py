@@ -400,11 +400,17 @@ async def prepare_graph_resume_state(
 
     if status_value != EventStatus.EXECUTING_RESPONSE.value:
         if status_value == EventStatus.WAITING_APPROVAL.value:
+            from app.orchestration.graph_resume_observability import GraphResumeFailedError
+
             logger.warning(
                 "prepare_graph_resume: still WAITING_APPROVAL event=%s; refusing resume",
                 event_id,
             )
-            return False
+            raise GraphResumeFailedError(
+                "cannot resume while event is still WAITING_APPROVAL",
+                event_id=event_id,
+                error_type="waiting_approval",
+            )
         logger.warning(
             "prepare_graph_resume: unexpected DB status=%s event=%s; skipping checkpoint patch",
             status_value,

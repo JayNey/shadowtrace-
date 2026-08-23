@@ -766,3 +766,20 @@ async def test_resume_executing_without_graph_fails_closed() -> None:
         )
 
     assert exc_info.value.error_type == "graph_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_prepare_waiting_approval_raises_distinct_error() -> None:
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=MagicMock(values={"halted": True}))
+    runtime = MagicMock()
+
+    with pytest.raises(GraphResumeFailedError) as exc_info:
+        await prepare_graph_resume_state(
+            _SessionFactory(EventStatus.WAITING_APPROVAL.value),
+            graph,
+            "evt-waiting-approval",
+            runtime,
+        )
+
+    assert exc_info.value.error_type == "waiting_approval"
