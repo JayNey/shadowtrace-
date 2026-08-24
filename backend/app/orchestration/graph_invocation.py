@@ -9,6 +9,7 @@ and approval wakeups are not dropped.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -34,10 +35,18 @@ _nested_resume_failure_handler: NestedResumeFailureHandler | None = None
 class NestedGraphResumeError(RuntimeError):
     """Deferred nested resume could not be flushed fail-closed."""
 
-    def __init__(self, message: str, *, event_id: str, pending: list[str]) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        event_id: str,
+        pending: list[str],
+        error_type: str = "nested_resume_no_runner",
+    ) -> None:
         super().__init__(message)
         self.event_id = event_id
         self.pending = pending
+        self.error_type = error_type
 
 
 def set_nested_resume_runner(runner: NestedResumeRunner | None) -> None:
@@ -108,6 +117,15 @@ def defer_nested_graph_resume(event_id: str) -> bool:
     return True
 
 
+def _is_task_cancellation(exc: BaseException | None) -> bool:
+    """True for CancelledError / KeyboardInterrupt / SystemExit unwind."""
+    if exc is None:
+        return False
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+    return not isinstance(exc, Exception)
+
+
 async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> None:
     if not pending:
         return
@@ -123,7 +141,8 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
             event_id=event_id,
             pending=pending,
         )
-        await _notify_nested_resume_failure(event_id, error, pending)
+        for resume_event_id in pending:
+            await _notify_nested_resume_failure(resume_event_id, error, [resume_event_id])
         raise error
     flush_error: BaseException | None = None
     for resume_event_id in pending:
@@ -134,10 +153,10 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
                 "deferred nested graph resume failed event=%s",
                 resume_event_id,
             )
+            await _notify_nested_resume_failure(resume_event_id, exc, [resume_event_id])
             if flush_error is None:
                 flush_error = exc
     if flush_error is not None:
-        await _notify_nested_resume_failure(event_id, flush_error, pending)
         raise flush_error
 
 
@@ -155,15 +174,34 @@ async def bind_investigation_graph(event_id: str) -> AsyncIterator[None]:
         pending = list(_deferred_graph_resumes.get() or ())
         _active_graph_event_id.reset(token)
         _deferred_graph_resumes.reset(deferred_token)
-        try:
-            await _flush_deferred_graph_resumes(event_id, pending)
-        except Exception as flush_error:
-            if yield_error is None:
-                raise flush_error
-            logger.error(
-                "nested graph resume flush failed after graph error event=%s",
+        if pending and _is_task_cancellation(yield_error):
+            logger.warning(
+                "skip nested graph resume flush after cancellation event=%s pending=%s",
                 event_id,
+                pending,
             )
+            dropped = NestedGraphResumeError(
+                "nested graph resume dropped due to cancellation",
+                event_id=event_id,
+                pending=pending,
+                error_type="nested_resume_dropped",
+            )
+            for resume_event_id in pending:
+                await _notify_nested_resume_failure(
+                    resume_event_id,
+                    dropped,
+                    [resume_event_id],
+                )
+        else:
+            try:
+                await _flush_deferred_graph_resumes(event_id, pending)
+            except Exception as flush_error:
+                if yield_error is None:
+                    raise flush_error
+                logger.exception(
+                    "nested graph resume flush failed after graph error event=%s",
+                    event_id,
+                )
 
 
 __all__ = [

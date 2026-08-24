@@ -31,6 +31,7 @@ import socket
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import jsonschema
@@ -505,6 +506,17 @@ class TestEventHandlers:
 
         handler = sio.handlers[SOCKETIO_NAMESPACE].get("subscribe")
         assert handler is not None
+
+        emitted: list[tuple[str, dict[str, Any]]] = []
+
+        async def _capture(
+            event: str,
+            data: dict[str, Any],
+            **_kwargs: object,
+        ) -> None:
+            emitted.append((event, data))
+
+        sio.emit = _capture  # type: ignore[method-assign, assignment]
         await handler(sid, {"event_id": event_id})
 
         ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
@@ -512,6 +524,10 @@ class TestEventHandlers:
         session = sessions.get(sid)
         assert session is not None
         assert not session.principal.has_read_access()
+        assert any(
+            event == "error" and "not authorized" in str(payload.get("message", ""))
+            for event, payload in emitted
+        )
 
 
     @pytest.mark.asyncio

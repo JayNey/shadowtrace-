@@ -450,10 +450,15 @@ def _get_adapter_registry() -> Any:
                 or credential_ref.upper() != credential_ref
             ):
                 logger.error(
-                    "invalid disposition credential_ref=%r; live adapter stays disabled",
+                    "invalid disposition credential_ref=%r; ignoring credential_ref",
                     credential_ref,
                 )
                 credential_ref = ""
+            logger.info(
+                "registering live disposition adapter kind=%s enabled=false "
+                "allow_side_effects=false (this stage is mock-only)",
+                kind,
+            )
             registry.register(
                 kind,
                 HttpDispositionAdapter(
@@ -523,7 +528,7 @@ async def _resume_investigation(event_id: str) -> None:
 async def _on_nested_resume_flush_failure(
     event_id: str,
     exc: BaseException,
-    pending: list[str],
+    _pending: list[str],
 ) -> None:
     """Record graph_resume_failed when nested flush fails without prior observability."""
     from app.orchestration.graph_resume_observability import (
@@ -533,22 +538,22 @@ async def _on_nested_resume_flush_failure(
     )
 
     if isinstance(exc, GraphResumeFailedError):
+        # Runner already recorded observability for this event.
         return
     error_type = (
-        "nested_resume_no_runner"
+        exc.error_type
         if isinstance(exc, NestedGraphResumeError)
         else type(exc).__name__
     )
-    for eid in pending or [event_id]:
-        await record_graph_resume_failure(
-            _get_session_factory(),
-            _get_degraded_flags(),
-            GraphResumeFailureContext(
-                event_id=eid,
-                error_type=error_type,
-                message=str(exc)[:500],
-            ),
-        )
+    await record_graph_resume_failure(
+        _get_session_factory(),
+        _get_degraded_flags(),
+        GraphResumeFailureContext(
+            event_id=event_id,
+            error_type=error_type,
+            message=str(exc)[:500],
+        ),
+    )
 
 
 set_nested_resume_runner(_resume_investigation)
@@ -1389,3 +1394,4 @@ def reset_deps() -> None:
     _execution_job_query = None
     _agent_artifact_service = None
     _content_projection_service = None
+    ensure_nested_resume_runner()

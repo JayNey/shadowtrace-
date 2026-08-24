@@ -93,6 +93,8 @@ class InMemoryFakeRedis:
             key = keys[0]
             owner_id = args[0]
             ttl = int(args[1]) if len(args) > 1 else 0
+            if ttl <= 0:
+                return 0
             self._purge_expired(key)
             entry = self._entries.get(key)
             if entry is None:

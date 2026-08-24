@@ -193,3 +193,29 @@ async def test_operator_retry_blocks_deterministic_rejection_code() -> None:
     )
     assert decision.action is _OperatorRetryAction.BLOCKED
     assert "deterministic adapter rejection" in decision.reason
+
+
+def test_resolve_adapter_missing_source_product_raises() -> None:
+    from app.core.errors import AdapterNotFoundError
+
+    svc = _service(SimpleNamespace(name="mock_xdr"))
+    outbox = SimpleNamespace(
+        outbox_id="obx-missing-product",
+        writeback_id="wbk-missing-product",
+        command_payload={"source_locator": {"source_tenant_id": "t1"}},
+    )
+    with pytest.raises(AdapterNotFoundError, match="product missing"):
+        svc._resolve_adapter(outbox)
+
+
+def test_resolve_adapter_blank_source_product_raises() -> None:
+    from app.core.errors import AdapterNotFoundError
+
+    svc = _service(SimpleNamespace(name="mock_xdr"))
+    outbox = SimpleNamespace(
+        outbox_id="obx-blank-product",
+        writeback_id="wbk-blank-product",
+        command_payload={"source_locator": {"source_product": "  "}},
+    )
+    with pytest.raises(AdapterNotFoundError, match="product missing"):
+        svc._resolve_adapter(outbox)

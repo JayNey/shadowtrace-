@@ -12,7 +12,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Text, cast, func, or_, select
+from sqlalchemy import Text, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
@@ -40,6 +40,11 @@ _OS_INDEXED_SCOPES = frozenset({"tool-calls", "audit-logs"})
 
 # Cap for merging OpenSearch + ILIKE evidence hits in scope=all hybrid mode (P2).
 _HYBRID_FETCH_CAP = 10_000
+
+# Per-table scan cap for the ILIKE degraded path. ``total`` must equal the
+# number of rows actually fetched (and therefore paginable), not the unbounded
+# match count.
+ILIKE_SCAN_CAP = 500
 
 # Map scope → OpenSearch index suffix and ORM table info for the fallback.
 _SCOPE_CONFIG: dict[str, dict[str, Any]] = {
@@ -249,12 +254,14 @@ class SearchService:
 
         Each table is queried independently with ``ILIKE`` on text columns
         and ``::text`` casts for JSONB columns.  Results are combined, sorted
-        by timestamp descending, and paginated in memory (P2 degraded-path limit).
+        by timestamp descending, and paginated in memory (P2 degraded-path
+        limit of ``ILIKE_SCAN_CAP`` rows per table). ``total`` is the size of
+        that fetched window so later pages cannot claim hits that were never
+        loaded.
         """
         pattern = f"%{query}%"
         scopes = self._resolve_fallback_scopes(scope)
         all_rows: list[tuple[str, str, str | None, datetime | None, dict[str, Any], str]] = []
-        true_total = 0
 
         async with self._session_factory() as session:
             for scope_key in scopes:
@@ -296,7 +303,6 @@ class SearchService:
                     col = getattr(model, col_name, None)
                     if col is not None:
                         select_cols.append(col)
-                select_cols.append(func.count().over().label("_total"))
 
                 stmt = (
                     select(*select_cols)
@@ -306,15 +312,12 @@ class SearchService:
                         if ts_col_attr is not None
                         else doc_id_expr.asc()
                     )
-                    .limit(500)
+                    .limit(ILIKE_SCAN_CAP)
                 )
 
                 result = await session.execute(stmt)
                 rows = result.all()
-                table_total = 0
-                for row_i, row in enumerate(rows):
-                    if row_i == 0:
-                        table_total = int(row[-1] or 0)
+                for row in rows:
                     idx = 0
                     doc_id = str(row[idx])
                     idx += 1
@@ -330,7 +333,7 @@ class SearchService:
                         idx += 1
                     field_values: dict[str, Any] = {}
                     for col_name in summary_fields:
-                        if idx < len(row) - 1:
+                        if idx < len(row):
                             field_values[col_name] = row[idx]
                             idx += 1
                     summary = self._build_fallback_summary(table_name, doc_id, field_values)
@@ -344,7 +347,6 @@ class SearchService:
                             summary,
                         )
                     )
-                true_total += table_total
 
         # Sort combined results by timestamp descending, then paginate.
         all_rows.sort(
@@ -354,7 +356,7 @@ class SearchService:
             ),
             reverse=True,
         )
-        total = true_total
+        total = len(all_rows)
         offset = (page - 1) * page_size
         page_rows = all_rows[offset : offset + page_size]
 

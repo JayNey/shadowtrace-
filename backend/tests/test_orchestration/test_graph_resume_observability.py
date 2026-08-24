@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -398,6 +399,92 @@ async def test_bind_notifies_failure_handler_when_nested_resume_has_no_runner() 
     assert notified == [
         ("evt-no-runner-obs", "NestedGraphResumeError", ["evt-no-runner-obs"])
     ]
+
+
+@pytest.mark.asyncio
+async def test_bind_skips_nested_resume_flush_on_cancellation() -> None:
+    from app.orchestration.graph_invocation import (
+        NestedGraphResumeError,
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+
+    flushed: list[str] = []
+
+    async def _runner(event_id: str) -> None:
+        flushed.append(event_id)
+
+    notified: list[tuple[str, str, str]] = []
+
+    async def _handler(event_id: str, exc: BaseException, pending: list[str]) -> None:
+        error_type = getattr(exc, "error_type", type(exc).__name__)
+        notified.append((event_id, str(error_type), list(pending)[0] if pending else ""))
+
+    previous_runner = get_nested_resume_runner()
+    previous_handler = get_nested_resume_failure_handler()
+    set_nested_resume_runner(_runner)
+    set_nested_resume_failure_handler(_handler)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            async with bind_investigation_graph("evt-cancel"):
+                assert defer_nested_graph_resume("evt-cancel") is True
+                raise asyncio.CancelledError()
+    finally:
+        set_nested_resume_runner(previous_runner)
+        set_nested_resume_failure_handler(previous_handler)
+
+    assert flushed == []
+    assert notified == [("evt-cancel", "nested_resume_dropped", "evt-cancel")]
+    assert issubclass(NestedGraphResumeError, RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_bind_preserves_graph_error_when_flush_fails() -> None:
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_runner,
+        set_nested_resume_runner,
+    )
+
+    async def _boom(_event_id: str) -> None:
+        raise RuntimeError("flush failed")
+
+    previous = get_nested_resume_runner()
+    set_nested_resume_runner(_boom)
+    try:
+        with pytest.raises(ValueError, match="graph boom"):
+            async with bind_investigation_graph("evt-graph-boom"):
+                assert defer_nested_graph_resume("evt-graph-boom") is True
+                raise ValueError("graph boom")
+    finally:
+        set_nested_resume_runner(previous)
+
+
+def test_reset_deps_restores_nested_resume_hooks() -> None:
+    from app.api.v1.deps import reset_deps
+    from app.orchestration.graph_invocation import (
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+
+    previous_runner = get_nested_resume_runner()
+    previous_handler = get_nested_resume_failure_handler()
+    set_nested_resume_runner(None)
+    set_nested_resume_failure_handler(None)
+    try:
+        reset_deps()
+        assert get_nested_resume_runner() is not None
+        assert get_nested_resume_failure_handler() is not None
+    finally:
+        set_nested_resume_runner(previous_runner)
+        set_nested_resume_failure_handler(previous_handler)
 
 
 @pytest.mark.asyncio

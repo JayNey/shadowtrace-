@@ -111,3 +111,14 @@ async def test_lease_rejects_non_positive_ttl() -> None:
         await lease.acquire("evt-ttl", owner, ttl_s=0)
     with pytest.raises(ValidationError):
         await lease.renew("evt-ttl", owner, ttl_s=-1)
+
+
+@pytest.mark.asyncio
+async def test_fake_redis_renew_script_rejects_non_positive_ttl() -> None:
+    fake = InMemoryFakeRedis()
+    await fake.set("k", "owner-a", nx=True, ex=10)
+    renew = fake.register_script(
+        "\n-- shadowtrace-lease-renew\nreturn 1\n"
+    )
+    assert await renew(keys=["k"], args=["owner-a", "0"]) == 0
+    assert await fake.get("k") == b"owner-a"

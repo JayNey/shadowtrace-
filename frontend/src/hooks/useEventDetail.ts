@@ -297,6 +297,7 @@ export function useEventDetail(eventId: string | undefined) {
     return () => {
       unsubscribe();
       socketClient.forgetEvent(eventId);
+      // Only rejoins global when no other subscriber still holds an event room.
       socketClient.ensureGlobalRoom();
     };
   }, [eventId, refresh]);

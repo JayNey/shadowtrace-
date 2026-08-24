@@ -28,6 +28,7 @@ RENEW_INTERVAL_S = 60
 # Lua script: atomically delete the key only when the value matches owner_id.
 # Returns: 1 = deleted, 0 = owner mismatch, -1 = key absent.
 _RELEASE_SCRIPT = """
+-- shadowtrace-lease-release
 local val = redis.call("GET", KEYS[1])
 if val == false then
     return -1
@@ -41,6 +42,7 @@ return 0
 # Lua script: atomically extend TTL only when the value matches owner_id.
 # Returns: 1 = renewed, 0 = owner mismatch, -1 = key absent.
 _RENEW_SCRIPT = """
+-- shadowtrace-lease-renew
 local val = redis.call("GET", KEYS[1])
 if val == false then
     return -1
@@ -55,10 +57,9 @@ return 0
 
 def classify_lease_lua_script(source: str) -> str:
     """Return ``renew`` or ``release`` for a registered EventLease Lua script."""
-    normalized = source.strip()
-    if normalized == _RENEW_SCRIPT.strip():
+    if "shadowtrace-lease-renew" in source:
         return "renew"
-    if normalized == _RELEASE_SCRIPT.strip():
+    if "shadowtrace-lease-release" in source:
         return "release"
     raise ValueError("unknown lease lua script")
 

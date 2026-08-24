@@ -3210,6 +3210,37 @@ async def test_execute_node_treats_executing_writeback_as_not_ok() -> None:
 
 
 @pytest.mark.asyncio
+async def test_verify_node_routes_accepted_writeback_to_recovery_not_manual() -> None:
+    """ACCEPTED/EXECUTING execute must not skip writeback recovery into MANUAL."""
+    event_id = "evt-accepted-verify-recovery"
+    verify_agent = StubAgent(
+        VerificationResult(
+            overall_status=VerificationOverallStatus.PARTIAL,
+            verification_phase=VerificationPhase.DISPOSITION,
+            need_writeback_recovery=True,
+            recoverable_writeback_ids=["wbk-accepted-1"],
+            failed_writebacks=["wbk-accepted-1"],
+        )
+    )
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    graph = build_investigation_graph(_agents_with_verify(verify_agent), _services(machine))
+    result = await graph.nodes[NODE_VERIFY].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.VERIFYING.value,
+            execution_ok=False,
+        )
+    )
+    assert result["verify_need_writeback_recovery"] is True
+    assert result["verify_need_manual_resolution"] is False
+    assert result["execution_substate"] == ExecutionSubstate.WAITING_WRITEBACK.value
+    assert route_after_verify(result) == ROUTE_WRITEBACK
+
+
+@pytest.mark.asyncio
 async def test_verify_node_soft_limit_reraises() -> None:
     """ISSUE-314: verify_agent SoftTimeLimit must not degrade and continue."""
     from celery.exceptions import SoftTimeLimitExceeded

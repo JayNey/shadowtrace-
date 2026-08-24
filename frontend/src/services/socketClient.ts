@@ -96,11 +96,16 @@ class SocketClient {
 
   /**
    * Re-join the global room after a detail ``subscribe`` left it (ISSUE-085).
-   * Clears pending event rooms so reconnect does not re-subscribe to them.
+   *
+   * No-op while any event room is still pending so an unmount/event-switch
+   * cannot drop another surface's subscribe or bounce a live detail view
+   * back to the global room.
    */
   ensureGlobalRoom(): void {
+    if (this.pendingEventIds.size > 0) {
+      return;
+    }
     this.preferGlobalRoom = true;
-    this.pendingEventIds.clear();
     this.connect();
     if (this.connected && this.socket) {
       this.socket.emit("join_global", {});
