@@ -103,6 +103,20 @@ describe("eventTodos", () => {
     expect(todos.some((item) => item.kind === "close_blocked")).toBe(false);
   });
 
+  it("treats report_generated flag as having a report even without snapshot body", () => {
+    const detail = baseDetail({
+      next_recommended_action: "close",
+      event: {
+        ...baseDetail().event,
+        event_context_snapshot: {
+          report_generated: true,
+        },
+      },
+    });
+    expect(hasInvestigationReport(detail)).toBe(true);
+    expect(canCloseEvent(detail)).toBe(true);
+  });
+
   it("blocks close when report missing despite close guidance", () => {
     const detail = baseDetail({ next_recommended_action: "close" });
     const todos = buildEventTodos({

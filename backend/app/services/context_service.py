@@ -5,11 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 
 from pydantic import BaseModel
 from sqlalchemy import select, text
@@ -20,18 +19,19 @@ from app.db import models as orm
 from app.models.context import EventContext
 from app.models.disposition import WritebackSummary
 from app.models.enums import (
-    DispositionIntentKind,
     DispositionPolicy,
     EventStatus,
     EventType,
     FinalVerdict,
     Severity,
-    SourceDisposition,
     WritebackReadiness,
-    WritebackStatus,
 )
 from app.models.security_event import EventSummary, SecurityEvent
 from app.services.classification_source import derive_classification_source
+from app.services.writeback_event_projection import (
+    load_writeback_rows,
+    project_writeback_envelope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,42 +40,6 @@ CTX_LOG_PREFIX = "shadowtrace:ctx_log:"
 CLOSED_TTL_SECONDS = 24 * 60 * 60
 DEGRADED_CACHE_TTL_SECONDS = 30.0
 REDIS_WRITE_BACKOFFS = (0.1, 0.5, 2.0)
-
-# Event-level aggregate priority for DispositionOutbox/Receipt statuses (ISSUE-093
-# §3): the most attention-needing state wins whenever several outboxes disagree.
-# CONFIRMED (fully done) is deliberately least-severe; PARTIAL (some confirmed,
-# some not) ranks just above it since the cycle is not fully settled yet.
-STATUS_AGGREGATE_PRIORITY: tuple[WritebackStatus, ...] = (
-    WritebackStatus.CONFLICT,
-    WritebackStatus.UNKNOWN,
-    WritebackStatus.PENDING,
-    WritebackStatus.SENDING,
-    WritebackStatus.ACCEPTED,
-    WritebackStatus.FAILED,
-    WritebackStatus.PARTIAL,
-    WritebackStatus.CONFIRMED,
-)
-
-# Event-level aggregate priority for per-Action WritebackReadiness: the worst
-# (most blocking) reason present among applicable-required actions wins.
-READINESS_AGGREGATE_PRIORITY: tuple[WritebackReadiness, ...] = (
-    WritebackReadiness.PERMISSION_DENIED,
-    WritebackReadiness.CONNECTOR_UNAVAILABLE,
-    WritebackReadiness.CAPABILITY_UNSUPPORTED,
-    WritebackReadiness.CAPABILITY_UNKNOWN,
-    WritebackReadiness.NOT_CONFIGURED,
-    WritebackReadiness.SOURCE_UNRESOLVED,
-    WritebackReadiness.READY,
-    WritebackReadiness.NOT_REQUIRED,
-)
-
-
-def _pick_by_priority(present: set[Any], priority: tuple[Any, ...]) -> Any | None:
-    """Return the highest-priority (first-listed) member of ``priority`` present."""
-    for candidate in priority:
-        if candidate in present:
-            return candidate
-    return None
 
 
 # EventContext Hash field names (excludes companion ``{key}__version`` keys).
@@ -1054,132 +1018,80 @@ class EventContextStore:
         prior summary (no ``model_construct`` bypass, no "existing" fallback)
         so every rebuild path (Redis miss, journal rebuild, CLOSED snapshot
         refresh) converges on the same, unique correct readiness/status.
+
+        Membership and ranking come from ``project_writeback_envelope`` — the
+        same projector GET ``/events/{id}`` uses. Entity side-effect outboxes
+        (writeback_applicable=false) never enter the envelope.
         """
         policy = DispositionPolicy(se.disposition_policy)
+        actions, outboxes, receipts_by_wb = await load_writeback_rows(session, se.event_id)
+        envelope = project_writeback_envelope(policy, actions, outboxes, receipts_by_wb)
 
-        actions = (
-            await session.scalars(select(orm.Action).where(orm.Action.event_id == se.event_id))
-        ).all()
-        required_actions = [a for a in actions if a.writeback_required]
-        applicable_actions = [a for a in required_actions if a.writeback_applicable]
+        # #region agent log
+        try:
+            import json as _dbg_json
+            import time as _dbg_time
 
-        outboxes = (
-            await session.scalars(
-                select(orm.DispositionOutbox).where(orm.DispositionOutbox.event_id == se.event_id)
-            )
-        ).all()
-
-        if not required_actions and not outboxes:
-            if policy is DispositionPolicy.NOT_REQUIRED:
-                aggregate_readiness = WritebackReadiness.NOT_REQUIRED
-            else:
-                # REQUIRED policy but nothing has been planned yet: never
-                # invent READY from an empty action set — surface as unknown
-                # until a real Action/outbox exists to evaluate.
-                aggregate_readiness = WritebackReadiness.CAPABILITY_UNKNOWN
-            return WritebackSummary(
-                event_id=se.event_id,
-                closure_cycle=0,
-                disposition_policy=policy,
-                aggregate_readiness=aggregate_readiness,
-                external_unsynced=bool(se.external_unsynced),
-                updated_at=datetime.now(UTC),
-            )
-
-        readiness_counts: Counter[WritebackReadiness] = Counter()
-        blocked_action_ids: list[str] = []
-        for action in applicable_actions:
-            try:
-                readiness = WritebackReadiness(action.writeback_readiness)
-            except ValueError:
-                readiness = WritebackReadiness.CAPABILITY_UNKNOWN
-            readiness_counts[readiness] += 1
-            if readiness is not WritebackReadiness.READY:
-                blocked_action_ids.append(action.action_id)
-
-        if applicable_actions:
-            picked = _pick_by_priority(set(readiness_counts), READINESS_AGGREGATE_PRIORITY)
-            assert picked is not None
-            aggregate_readiness = cast(WritebackReadiness, picked)
-        elif required_actions:
-            # Required policy, but no action is (yet) applicable to a writable
-            # source object — never invent READY from an empty applicable set.
-            aggregate_readiness = WritebackReadiness.CAPABILITY_UNKNOWN
-        else:
-            aggregate_readiness = WritebackReadiness.NOT_REQUIRED
-
-        writeback_ids = {o.writeback_id for o in outboxes}
-        receipts_by_wb: dict[str, orm.DispositionReceipt] = {}
-        if writeback_ids:
-            receipt_rows = (
-                await session.scalars(
-                    select(orm.DispositionReceipt).where(
-                        orm.DispositionReceipt.writeback_id.in_(writeback_ids)
+            with open(
+                "/Users/apple/Desktop/shadowtrace副本/.cursor/debug-0da307.log",
+                "a",
+                encoding="utf-8",
+            ) as _dbg_f:
+                _dbg_f.write(
+                    _dbg_json.dumps(
+                        {
+                            "sessionId": "0da307",
+                            "runId": "post-fix",
+                            "hypothesisId": "B",
+                            "location": "context_service.py:_merge_writeback_summary",
+                            "message": "writeback summary membership before envelope filter",
+                            "data": {
+                                "event_id": se.event_id,
+                                "required_count": envelope.required_action_count,
+                                "applicable_count": envelope.applicable_action_count,
+                                "applicable_ids": list(envelope.envelope_action_ids),
+                                "outbox_count": len(outboxes),
+                                "outboxes": [
+                                    {
+                                        "action_id": o.action_id,
+                                        "intent": o.intent_kind,
+                                        "status": o.latest_writeback_status,
+                                        "superseded": o.superseded_by_disposition_id,
+                                    }
+                                    for o in outboxes
+                                ],
+                                "envelope_status": (
+                                    envelope.aggregate_status.value
+                                    if envelope.aggregate_status is not None
+                                    else None
+                                ),
+                                "envelope_readiness": envelope.aggregate_readiness.value,
+                                "envelope_pending": envelope.pending_count,
+                            },
+                            "timestamp": int(_dbg_time.time() * 1000),
+                        }
                     )
+                    + "\n"
                 )
-            ).all()
-            for receipt in receipt_rows:
-                prev = receipts_by_wb.get(receipt.writeback_id)
-                if prev is None or receipt.sequence > prev.sequence:
-                    receipts_by_wb[receipt.writeback_id] = receipt
-
-        status_counts: Counter[WritebackStatus] = Counter()
-        terminal_event_action_id: str | None = None
-        terminal_event_writeback_id: str | None = None
-        terminal_event_disposition: SourceDisposition | None = None
-        terminal_event_confirmed = False
-        closure_cycle = 0
-
-        for outbox in outboxes:
-            closure_cycle = max(closure_cycle, int(outbox.closure_cycle or 0))
-            status_raw = outbox.latest_writeback_status
-            latest_receipt = receipts_by_wb.get(outbox.writeback_id)
-            if latest_receipt is not None:
-                status_raw = latest_receipt.status
-            if status_raw:
-                try:
-                    status = WritebackStatus(status_raw)
-                except ValueError:
-                    status = WritebackStatus.UNKNOWN
-                status_counts[status] += 1
-
-            if outbox.intent_kind == DispositionIntentKind.EVENT_STATUS_UPDATE.value:
-                terminal_event_action_id = outbox.action_id
-                terminal_event_writeback_id = outbox.writeback_id
-                if (
-                    latest_receipt is not None
-                    and latest_receipt.status == WritebackStatus.CONFIRMED.value
-                ):
-                    terminal_event_confirmed = True
-                payload = outbox.command_payload or {}
-                disp = payload.get("disposition") or payload.get("source_disposition")
-                if isinstance(disp, str):
-                    try:
-                        terminal_event_disposition = SourceDisposition(disp)
-                    except ValueError:
-                        terminal_event_disposition = None
-
-        aggregate_status = (
-            _pick_by_priority(set(status_counts), STATUS_AGGREGATE_PRIORITY)
-            if status_counts
-            else None
-        )
+        except Exception:
+            pass
+        # #endregion
 
         return WritebackSummary(
             event_id=se.event_id,
-            closure_cycle=closure_cycle,
+            closure_cycle=envelope.closure_cycle,
             disposition_policy=policy,
-            required_action_count=len(required_actions),
-            applicable_action_count=len(applicable_actions),
-            blocked_action_ids=blocked_action_ids,
-            readiness_counts=dict(readiness_counts),
-            aggregate_readiness=aggregate_readiness,
-            writeback_counts=dict(status_counts),
-            aggregate_status=aggregate_status,
-            terminal_event_action_id=terminal_event_action_id,
-            terminal_event_writeback_id=terminal_event_writeback_id,
-            terminal_event_disposition=terminal_event_disposition,
-            terminal_event_confirmed=terminal_event_confirmed,
+            required_action_count=envelope.required_action_count,
+            applicable_action_count=envelope.applicable_action_count,
+            blocked_action_ids=list(envelope.blocked_action_ids),
+            readiness_counts=dict(envelope.readiness_counts),
+            aggregate_readiness=envelope.aggregate_readiness,
+            writeback_counts=dict(envelope.writeback_counts),
+            aggregate_status=envelope.aggregate_status,
+            terminal_event_action_id=envelope.terminal_event_action_id,
+            terminal_event_writeback_id=envelope.terminal_event_writeback_id,
+            terminal_event_disposition=envelope.terminal_event_disposition,
+            terminal_event_confirmed=envelope.terminal_event_confirmed,
             external_unsynced=bool(se.external_unsynced),
             updated_at=datetime.now(UTC),
         )

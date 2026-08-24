@@ -40,6 +40,12 @@ function formatTimestamp(timestamp: string): string {
   return parsed.toLocaleString("zh-CN", { hour12: false });
 }
 
+function observationEntries(evidence: Evidence): Array<[string, string]> {
+  const fields = evidence.observation_fields;
+  if (!fields) return [];
+  return Object.entries(fields).filter(([, value]) => value.trim().length > 0);
+}
+
 export default function TimelineEntryItem({
   entry,
   evidence,
@@ -110,26 +116,7 @@ export default function TimelineEntryItem({
           >
             <Typography.Text strong>证据 {entry.evidence_id}</Typography.Text>
             {evidence ? (
-              <>
-                <Typography.Paragraph style={{ margin: "6px 0" }}>
-                  {evidence.description}
-                </Typography.Paragraph>
-                {evidence.related_entities && evidence.related_entities.length > 0 ? (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    关联实体：{evidence.related_entities.join(", ")}
-                  </Typography.Text>
-                ) : null}
-                {evidence.raw_data && Object.keys(evidence.raw_data).length > 0 ? (
-                  <Typography.Text
-                    type="secondary"
-                    style={{ fontSize: 12, display: "block", marginTop: 4 }}
-                  >
-                    {Object.entries(evidence.raw_data)
-                      .map(([key, value]) => `${key}: ${String(value)}`)
-                      .join(" · ")}
-                  </Typography.Text>
-                ) : null}
-              </>
+              <ExpandedEvidenceBody entry={entry} evidence={evidence} />
             ) : (
               <Typography.Text type="secondary">
                 未找到关联证据
@@ -139,5 +126,43 @@ export default function TimelineEntryItem({
         )}
       </Space>
     </div>
+  );
+}
+
+function ExpandedEvidenceBody({
+  entry,
+  evidence,
+}: {
+  entry: TimelineEntry;
+  evidence: Evidence;
+}) {
+  const fields = observationEntries(evidence);
+  const description = (evidence.description || "").trim();
+  const showDescription =
+    description.length > 0 &&
+    (fields.length === 0 || description !== (entry.description || "").trim());
+
+  return (
+    <>
+      {showDescription ? (
+        <Typography.Paragraph style={{ margin: "6px 0" }}>
+          {description}
+        </Typography.Paragraph>
+      ) : null}
+      {fields.length > 0 ? (
+        <Typography.Text
+          type="secondary"
+          data-testid={`timeline-observation-${entry.evidence_id}`}
+          style={{ fontSize: 12, display: "block", marginTop: 4 }}
+        >
+          {fields.map(([key, value]) => `${key}: ${value}`).join(" · ")}
+        </Typography.Text>
+      ) : null}
+      {evidence.related_entities && evidence.related_entities.length > 0 ? (
+        <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 4 }}>
+          关联实体：{evidence.related_entities.join(", ")}
+        </Typography.Text>
+      ) : null}
+    </>
   );
 }

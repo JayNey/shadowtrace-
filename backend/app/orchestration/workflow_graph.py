@@ -329,11 +329,45 @@ def route_after_planner(state: InvestigationState) -> str:
     return ROUTE_RESPONSE if state.get("disposition_only_intent") else ROUTE_EVIDENCE
 
 
+def _disposition_policy_from_state(state: InvestigationState) -> DispositionPolicy:
+    raw = state.get("disposition_policy") or DispositionPolicy.NOT_REQUIRED.value
+    try:
+        return DispositionPolicy(raw)
+    except ValueError:
+        return DispositionPolicy.NOT_REQUIRED
+
+
+def _final_verdict_from_state(state: InvestigationState) -> FinalVerdict | None:
+    raw = state.get("final_verdict")
+    if raw is None or raw == "":
+        return None
+    try:
+        return FinalVerdict(raw)
+    except ValueError:
+        return None
+
+
+def entity_response_deferred_after_risk(state: InvestigationState) -> bool:
+    """True when scoring should finish at report, not PLANNING_RESPONSE.
+
+    ``false_positive`` is forbidden on entity-side-effect statuses
+    (``VERDICT_STATUS_RULES``). ``include_response_execution=True`` must not
+    force that illegal edge when ``disposition_policy=not_required``.
+    Trusted ``disposition_only_intent`` still continues into RESPONSE.
+    """
+    if state.get("disposition_only_intent"):
+        return False
+    if state.get("defer_response_execution"):
+        return True
+    return (
+        _disposition_policy_from_state(state) is DispositionPolicy.NOT_REQUIRED
+        and _final_verdict_from_state(state) is FinalVerdict.FALSE_POSITIVE
+    )
+
+
 def route_after_risk(state: InvestigationState) -> str:
     """Route to response execution or analysis-completion report."""
-    if state.get("disposition_only_intent"):
-        return ROUTE_RESPONSE
-    if state.get("defer_response_execution"):
+    if entity_response_deferred_after_risk(state):
         return ROUTE_REPORT
     return ROUTE_RESPONSE
 
@@ -1313,6 +1347,23 @@ def build_investigation_graph(
                 fp_adjudication=state.get("fp_adjudication"),
             ),
         )
+        memory_agent = agents.get("memory_agent")
+        if memory_agent is not None and store is not None:
+            try:
+                from app.services.memory_after_close import spawn_memory_after_close
+
+                spawn_memory_after_close(
+                    event_id,
+                    memory_agent=memory_agent,
+                    context_store=store,
+                    degraded_flags=degraded_flags,
+                )
+            except Exception:
+                logger.warning(
+                    "close_node memory spawn failed event=%s",
+                    event_id,
+                    exc_info=True,
+                )
         return _patch_state(
             _trace(NODE_CLOSE),
             status,
@@ -1521,8 +1572,15 @@ def build_investigation_graph(
             )
         else:
             result = await _execute_risk()
-        defer_response = bool(state.get("defer_response_execution"))
-        if defer_response:
+        preview: dict[str, Any] = {
+            "risk_assessment": result.model_dump(mode="json"),
+            "severity": result.severity.value,
+        }
+        # RiskAgent publishes final_verdict before this node returns. Hydrate
+        # first so FP + not_required can skip the illegal PLANNING_RESPONSE edge.
+        await _hydrate_context(services, state["event_id"], preview)
+        routing_state = cast(InvestigationState, {**state, **preview})
+        if entity_response_deferred_after_risk(routing_state):
             risk_status = EventStatus.SCORING
             status_patch: InvestigationState = cast(InvestigationState, {})
         else:
@@ -1535,9 +1593,45 @@ def build_investigation_graph(
             risk_status = EventStatus.PLANNING_RESPONSE
         update: dict[str, Any] = {
             "event_status": risk_status.value,
-            "risk_assessment": result.model_dump(mode="json"),
-            "severity": result.severity.value,
+            **preview,
         }
+        if routing_state.get("final_verdict") is not None:
+            update["final_verdict"] = routing_state["final_verdict"]
+        # #region agent log
+        try:
+            import json as _dbg_json
+            import time as _dbg_time
+
+            with open(
+                "/Users/apple/Desktop/shadowtrace副本/.cursor/debug-0da307.log",
+                "a",
+                encoding="utf-8",
+            ) as _dbg_f:
+                _dbg_f.write(
+                    _dbg_json.dumps(
+                        {
+                            "sessionId": "0da307",
+                            "runId": "post-fix",
+                            "hypothesisId": "FP",
+                            "location": "workflow_graph.py:risk_node",
+                            "message": "risk routing after scoring",
+                            "data": {
+                                "event_id": state.get("event_id"),
+                                "defer_response": bool(state.get("defer_response_execution")),
+                                "disposition_only": bool(state.get("disposition_only_intent")),
+                                "policy": routing_state.get("disposition_policy"),
+                                "verdict": routing_state.get("final_verdict"),
+                                "deferred": entity_response_deferred_after_risk(routing_state),
+                                "next_status": risk_status.value,
+                            },
+                            "timestamp": int(_dbg_time.time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
         await _hydrate_context(services, state["event_id"], update)
         update["event_status"] = risk_status.value
         return _patch_state(

@@ -593,6 +593,7 @@ async def _build_production_investigation_graph(
         "verify_agent": verify_agent,
         "rag_agent": stack["rag"],
         "graph_agent": stack["graph_agent"],
+        "memory_agent": stack["memory"],
     }
     services = {
         "state_machine": stack["state_machine"],

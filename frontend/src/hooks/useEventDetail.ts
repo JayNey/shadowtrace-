@@ -10,10 +10,13 @@ import type {
   WritebackResponse,
 } from "../types/event";
 import type { AgentTrace } from "../types/trace";
+import type { InvestigationReport } from "../types/report";
+import { coerceInvestigationReport } from "../types/report";
 import {
   getEvent,
   getEventEvidence,
   getExecutionJob,
+  getReport,
   getSourceRecord,
   getTraces,
   getWriteback,
@@ -109,6 +112,7 @@ export function useEventDetail(eventId: string | undefined) {
   const [sourceRecord, setSourceRecord] = useState<SourceRecordResponse | null>(null);
   const [connectors, setConnectors] = useState<ConnectorPublic[]>([]);
   const [evidenceDetail, setEvidenceDetail] = useState<EventEvidenceResponse | null>(null);
+  const [report, setReport] = useState<InvestigationReport | null>(null);
   const [loading, setLoading] = useState(true);
   const mountedRef = useRef(true);
   const eventRef = useRef<EventDetailResponse | null>(null);
@@ -191,6 +195,22 @@ export function useEventDetail(eventId: string | undefined) {
         }
       } else if (isAll || resource === "event") {
         setEvidenceDetail(null);
+      }
+
+      if (isAll || resource === "event") {
+        try {
+          const reportResult = await getReport(eventId);
+          if (mountedRef.current) {
+            setReport(
+              coerceInvestigationReport(reportResult.data.report) ??
+                coerceInvestigationReport(reportResult.data),
+            );
+          }
+        } catch {
+          if (mountedRef.current) {
+            setReport(null);
+          }
+        }
       }
 
       if (isAll && nextEvent?.event.current_primary_source_record_id) {
@@ -301,6 +321,7 @@ export function useEventDetail(eventId: string | undefined) {
     sourceRecord,
     connectors,
     evidenceDetail,
+    report,
     loading,
     refresh,
   };

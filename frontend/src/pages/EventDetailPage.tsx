@@ -57,6 +57,10 @@ import {
 } from "../stores/approvalStore";
 import { isApprovalUiDisabled } from "../config/auth";
 import { showResumeFeedback } from "../utils/approvalFeedback";
+import {
+  CLOSED_MEMORY_REVIEW_POLL_MS,
+  countPendingMemoryReviewsForEvent,
+} from "../utils/eventMemoryReviews";
 
 const BASE_TAB_KEYS = [
   "source",
@@ -573,6 +577,7 @@ export default function EventDetailPage() {
     sourceRecord,
     connectors,
     evidenceDetail,
+    report,
     loading,
     refresh,
   } = useEventDetail(eventId);
@@ -697,6 +702,11 @@ export default function EventDetailPage() {
         });
       } else if (err instanceof ApiError && err.error_code === "invalid_state_transition") {
         message.error("分析尚未完成，请待事件进入「报告生成」状态后再生成报告。");
+      } else if (
+        err instanceof ApiError &&
+        (err.error_code === "timeout" || err.error_code === "llm_timeout")
+      ) {
+        message.error("报告生成超时：模型未写完，不会用模板充数。请稍后重试。");
       } else if (err instanceof ApiError) {
         message.error(err.message || err.error_code || "报告生成失败");
       } else {
@@ -718,30 +728,44 @@ export default function EventDetailPage() {
   );
 
   // Pending memory reviews: API has no event_id filter yet; client-side match only.
+  // CLOSED consolidation is fire-and-forget, so poll briefly until candidates appear.
   useEffect(() => {
     if (!eventId) return;
     let cancelled = false;
-    void listMemoryReviews()
-      .then((response) => {
-        if (cancelled) return;
-        const count = response.data.items.filter((item) => {
-          if (item.status !== "pending") return false;
-          const payload = item.payload;
-          const sourceEventId =
-            (typeof payload.event_id === "string" && payload.event_id) ||
-            (typeof payload.source_event_id === "string" && payload.source_event_id) ||
-            "";
-          return sourceEventId === eventId;
-        }).length;
-        setPendingMemoryReviewCount(count);
-      })
-      .catch(() => {
-        if (!cancelled) setPendingMemoryReviewCount(0);
+    const timers: number[] = [];
+    const delaysMs =
+      event?.event.status === "closed" ? [...CLOSED_MEMORY_REVIEW_POLL_MS] : [0];
+
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const id = window.setTimeout(resolve, ms);
+        timers.push(id);
       });
+
+    void (async () => {
+      let elapsed = 0;
+      for (const at of delaysMs) {
+        const wait = at - elapsed;
+        if (wait > 0) await sleep(wait);
+        elapsed = at;
+        if (cancelled) return;
+        try {
+          const response = await listMemoryReviews();
+          if (cancelled) return;
+          const count = countPendingMemoryReviewsForEvent(response.data.items, eventId);
+          setPendingMemoryReviewCount(count);
+          if (count > 0) return;
+        } catch {
+          if (!cancelled) setPendingMemoryReviewCount(0);
+        }
+      }
+    })();
+
     return () => {
       cancelled = true;
+      timers.forEach((id) => window.clearTimeout(id));
     };
-  }, [eventId, event?.event.updated_at]);
+  }, [eventId, event?.event.updated_at, event?.event.status]);
 
   useEffect(() => {
     const raw = location.hash.replace(/^#/, "");
@@ -975,7 +999,7 @@ export default function EventDetailPage() {
       label: "报告",
       children: (
         <ReportViewer
-          report={coerceInvestigationReport(context?.report)}
+          report={report ?? coerceInvestigationReport(context?.report)}
           loading={loading}
           eventStatus={event.event.status}
           onGenerate={() => void handleGenerateReport()}

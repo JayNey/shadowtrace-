@@ -19,7 +19,13 @@ from app.api.v1 import schemas as s
 from app.core.auth import ReadPrincipal
 from app.core.errors import DependencyUnavailableError
 from app.db import models as orm
-from app.models.enums import ActionStatus, EventStatus, WritebackStatus
+from app.models.enums import (
+    ActionCategory,
+    ActionExecutionPhase,
+    ActionStatus,
+    EventStatus,
+    WritebackStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +39,21 @@ _JUDGEABLE_ACTION_STATUSES = (
 )
 
 # Effect verification numerator status.
-# Denominator = executed actions that still need / needed verification
-# (SUCCESS | PARTIAL_SUCCESS), including rows whose effect stamp is still null
-# so incomplete Verify does not inflate the rate to 100%.
+# Denominator = executed *entity-effect* actions that still need / needed
+# verification (SUCCESS | PARTIAL_SUCCESS), including rows whose effect stamp
+# is still null so incomplete Verify does not inflate the rate to 100%.
+# Matches VerifyAgent phase-1: SYSTEM / VERIFICATION are self-verifying and
+# POST_VERIFY disposition is a writeback KPI, not an entity-effect stamp.
 _EFFECT_VERIFIED = "verified"
 _EFFECT_NEED_VERIFICATION_STATUSES = (
     ActionStatus.SUCCESS.value,
     ActionStatus.PARTIAL_SUCCESS.value,
 )
+_EFFECT_ENTITY_CATEGORIES = (
+    ActionCategory.RESPONSE.value,
+    ActionCategory.ROLLBACK.value,
+)
+_EFFECT_ENTITY_PHASE = ActionExecutionPhase.IMMEDIATE.value
 
 
 def _try_get_session_factory() -> async_sessionmaker[AsyncSession] | None:
@@ -168,10 +181,19 @@ async def _aggregate_stats(session: AsyncSession) -> s.StatsResponse:
                 .filter(orm.Action.status.in_(_JUDGEABLE_ACTION_STATUSES))
                 .label("action_success_den"),
                 func.count()
-                .filter(orm.Action.effect_verification_status == _EFFECT_VERIFIED)
+                .filter(
+                    orm.Action.effect_verification_status == _EFFECT_VERIFIED,
+                    orm.Action.action_category.in_(_EFFECT_ENTITY_CATEGORIES),
+                    orm.Action.execution_phase == _EFFECT_ENTITY_PHASE,
+                    orm.Action.status.in_(_EFFECT_NEED_VERIFICATION_STATUSES),
+                )
                 .label("effect_num"),
                 func.count()
-                .filter(orm.Action.status.in_(_EFFECT_NEED_VERIFICATION_STATUSES))
+                .filter(
+                    orm.Action.status.in_(_EFFECT_NEED_VERIFICATION_STATUSES),
+                    orm.Action.action_category.in_(_EFFECT_ENTITY_CATEGORIES),
+                    orm.Action.execution_phase == _EFFECT_ENTITY_PHASE,
+                )
                 .label("effect_den"),
                 # Closed-loop writeback KPI: only applicable required actions
                 # (§4.5) — REJECTED / never-approved SUPERSEDED stay out.

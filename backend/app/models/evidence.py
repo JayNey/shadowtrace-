@@ -45,6 +45,7 @@ class EvidenceSafeProjection(BaseModel):
     source_ref: SourceReference | None = None
     mitre_technique: str | None = None
     is_conflicting: bool = False
+    observation_fields: dict[str, str] = Field(default_factory=dict)
 
 
 class EvidenceConflict(BaseModel):

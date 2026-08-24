@@ -80,6 +80,44 @@ def test_event_ids_from_seed_summary_raises_when_missing(matrix_mod) -> None:
         )
 
 
+def test_parse_full_loop_stdout_extracts_result_from_mixed_progress_logs(
+    full_loop_mod,
+) -> None:
+    mixed = (
+        "[dynamic-eval] gold path events=['evt-a']\n"
+        "[dynamic-eval] triggered full_loop event_id=evt-a generate_report=True\n"
+        '{\n  "final_statuses": {"evt-a": "closed"},\n  "elapsed_s": 12.5\n}\n'
+    )
+    parsed = full_loop_mod.parse_full_loop_stdout(mixed)
+    assert parsed["final_statuses"] == {"evt-a": "closed"}
+    assert parsed["elapsed_s"] == 12.5
+
+
+def test_run_full_loop_via_exec_accepts_mixed_progress_and_json(matrix_mod) -> None:
+    mixed = (
+        "[dynamic-eval] triggered full_loop event_id=evt-a generate_report=True\n"
+        '{"final_statuses": {"evt-a": "closed"}, "elapsed_s": 9}\n'
+    )
+
+    def _fake_run(cmd: list[str], **kwargs):
+        return type("Proc", (), {"returncode": 0, "stdout": mixed, "stderr": ""})()
+
+    with patch.object(matrix_mod, "_run", side_effect=_fake_run):
+        result = matrix_mod._run_full_loop_via_exec(
+            "proj",
+            [matrix_mod._BASE_COMPOSE, matrix_mod._EVAL_COMPOSE],
+            event_ids=["evt-a"],
+            scenario="account_anomaly_fp",
+            token="bootstrap-token",
+            require_closed=False,
+            analysis_only=True,
+            semantic_profile="analysis_only_fp",
+            max_wait_s=10.0,
+            poll_interval_s=1.0,
+        )
+    assert result["final_statuses"] == {"evt-a": "closed"}
+
+
 def test_scenario_seed_offset_is_stable(matrix_mod) -> None:
     first = matrix_mod.scenario_seed_offset(42, "insider_data_exfiltration")
     second = matrix_mod.scenario_seed_offset(42, "insider_data_exfiltration")
@@ -169,6 +207,25 @@ def test_compose_up_places_profile_before_subcommand(matrix_mod) -> None:
     )
     assert cmd.index("--profile") < cmd.index("up")
     assert cmd[cmd.index("--profile") + 1] == "worker"
+
+
+def test_compose_down_includes_worker_profile_before_subcommand(matrix_mod) -> None:
+    captured: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **kwargs):
+        captured.append(cmd)
+        return type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    with patch.object(matrix_mod, "_run", side_effect=_fake_run):
+        matrix_mod._compose_down(
+            "proj",
+            [matrix_mod._BASE_COMPOSE, matrix_mod._EVAL_COMPOSE],
+            volumes=True,
+        )
+    cmd = captured[0]
+    assert cmd.index("--profile") < cmd.index("down")
+    assert cmd[cmd.index("--profile") + 1] == "worker"
+    assert "-v" in cmd
 
 
 def test_parse_scenarios_rejects_duplicates(matrix_mod) -> None:
@@ -548,27 +605,31 @@ def test_run_scenario_profile_by_scenario_reseeds_distinct_pressure_event(
         patch.object(matrix_mod, "_run_scenario_gate", side_effect=_fake_gate),
         patch.object(matrix_mod, "_run", return_value=_mock_subprocess_result()),
     ):
-        manifest = matrix_mod.run_scenario(
-            scenario="account_anomaly_fp",
-            run_id="run-fp",
-            artifact_root=tmp_path,
-            token="bootstrap-token",
-            seed=42,
-            mock_xdr_url="http://mock-xdr:8100",
-            require_closed=False,
-            profile_by_scenario=True,
-            fresh_volumes=True,
-            stack_timeout_s=10.0,
-            max_wait_s=10.0,
-            poll_interval_s=1.0,
-            max_events=1,
-            build=False,
-        )
+        with pytest.raises(matrix_mod.MatrixError, match="pressure boom"):
+            matrix_mod.run_scenario(
+                scenario="account_anomaly_fp",
+                run_id="run-fp",
+                artifact_root=tmp_path,
+                token="bootstrap-token",
+                seed=42,
+                mock_xdr_url="http://mock-xdr:8100",
+                require_closed=False,
+                profile_by_scenario=True,
+                fresh_volumes=True,
+                stack_timeout_s=10.0,
+                max_wait_s=10.0,
+                poll_interval_s=1.0,
+                max_events=1,
+                build=False,
+            )
 
     assert seed_calls == [0, 1]
     assert gate_calls[0] == ("semantic", ["evt-semantic"])
     assert gate_calls[1] == ("pressure", ["evt-pressure"])
-    assert manifest["status"] == "passed_with_pressure_error"
+    manifest = json.loads(
+        (tmp_path / "account_anomaly_fp" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "failed"
     assert manifest["pressure_error"]["type"] == "MatrixError"
     assert "[pressure gate]" in manifest["pressure_error"]["message"]
     assert manifest["semantic_event_ids"] == ["evt-semantic"]
@@ -806,5 +867,56 @@ def test_assert_domain_semantic_gate_passes_on_closed(full_loop_mod) -> None:
                 }
             }
 
-    result = full_loop_mod.assert_domain_semantic_gate(_Client(), "evt-domain")
+    result = full_loop_mod.assert_domain_semantic_gate(
+        _Client(),
+        "evt-domain",
+        expected_verdict="none",
+    )
     assert result["status"] == "closed"
+    assert result["final_verdict"] == "none"
+
+
+def test_assert_domain_semantic_gate_rejects_wrong_verdict(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            return {
+                "event": {
+                    "event_id": "evt-domain",
+                    "status": "closed",
+                    "final_verdict": "confirmed_threat",
+                    "disposition_policy": "not_required",
+                    "degraded_flags": [],
+                }
+            }
+
+    with pytest.raises(full_loop_mod.EvalFailure) as exc:
+        full_loop_mod.assert_domain_semantic_gate(
+            _Client(),
+            "evt-domain",
+            expected_verdict="none",
+        )
+    assert "none" in str(exc.value)
+    assert exc.value.diagnostics.get("final_verdict") == "confirmed_threat"
+
+
+def test_assert_fp_full_loop_gate_rejects_entity_response_trace(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            return {
+                "event": {
+                    "event_id": "evt-fp-pressure",
+                    "status": "failed",
+                    "final_verdict": "false_positive",
+                    "disposition_policy": "not_required",
+                    "degraded_flags": [],
+                }
+            }
+
+    with pytest.raises(full_loop_mod.EvalFailure) as exc:
+        full_loop_mod.assert_fp_full_loop_gate(
+            _Client(),
+            "evt-fp-pressure",
+            status_trace=["new", "scoring", "planning_response", "failed"],
+            decisions=[{"action_id": "act-1"}],
+        )
+    assert "planning_response" in str(exc.value)

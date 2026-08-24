@@ -212,14 +212,9 @@ export default function EventTable({
         key: "writeback_overall_status",
         width: 170,
         render: (_, record) => {
-          // First-screen degradation (ISSUE-038 / ISSUE-068):
-          // listEvents always returns writeback_overall_status=null and does
-          // not project confirmation_evidence / external_unsynced. Until a
-          // writeback_updated socket event (or a future list-API extension)
-          // supplies status, the badge shows "未写回" / heuristic CLOSED
-          // unsynced. When status is later CONFIRMED without evidence, we
-          // intentionally pass null evidence so WritebackBadge renders
-          // "已同步（弱证据）" instead of plain green success.
+          // List projects the same writeback envelope as GET /events/{id}
+          // (batched, not N+1). Null overall still means "no command yet".
+          // Heuristic CLOSED unsynced covers the gap until a row is confirmed.
           const externalUnsynced = isListExternalUnsynced(record);
           return (
             <WritebackBadge

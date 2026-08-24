@@ -77,9 +77,27 @@ describe("eventApi", () => {
     expect(mockGet).toHaveBeenCalledWith("/source-records/sr-1");
   });
 
-  it("getExecutionJob calls GET /execution-jobs/:id", async () => {
+  it("getExecutionJob calls GET /execution-jobs/:id without global error toast", async () => {
     await eventApi.getExecutionJob("job-1");
-    expect(mockGet).toHaveBeenCalledWith("/execution-jobs/job-1");
+    expect(mockGet).toHaveBeenCalledWith("/execution-jobs/job-1", {
+      skipGlobalErrorToast: true,
+    });
+  });
+
+  it("getReport skips global error toast", async () => {
+    await eventApi.getReport("evt-1");
+    expect(mockGet).toHaveBeenCalledWith("/events/evt-1/report", {
+      skipGlobalErrorToast: true,
+    });
+  });
+
+  it("generateReport uses a long timeout for LLM generation", async () => {
+    await eventApi.generateReport("evt-1", { force: true });
+    expect(mockPost).toHaveBeenCalledWith("/events/evt-1/report", undefined, {
+      params: { force: true },
+      skipGlobalErrorToast: true,
+      timeout: eventApi.REPORT_REQUEST_TIMEOUT_MS,
+    });
   });
 
   it("getTask calls GET /tasks/:id without global error toast", async () => {

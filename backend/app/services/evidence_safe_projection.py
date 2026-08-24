@@ -20,6 +20,29 @@ from app.models.evidence import Evidence, EvidenceSafeProjection
 
 logger = logging.getLogger(__name__)
 
+_OBSERVATION_FIELD_ORDER = (
+    "record_id",
+    "action",
+    "event_type",
+    "result",
+    "hostname",
+    "account",
+    "process",
+    "cmdline",
+    "file_name",
+    "src_ip",
+    "dst_ip",
+    "dst_port",
+    "domain",
+    "query",
+    "answer",
+    "protocol",
+    "indicator",
+    "agent_status",
+)
+_MAX_OBSERVATION_FIELDS = 8
+_MAX_OBSERVATION_VALUE_CHARS = 80
+
 EVIDENCE_SAFE_PROJECTION_VERSION = "1.0"
 
 MAX_SANITIZER_DEPTH = 16
@@ -262,6 +285,38 @@ def sanitize_evidence_raw_data_legacy(record: Mapping[str, Any]) -> dict[str, An
         return {"_sanitization_failed": True}
 
 
+def _observation_value(value: Any) -> str | None:
+    if value is None or isinstance(value, bool | dict | list | tuple | set | frozenset):
+        return None
+    text = _redact_pii_text(str(value)).strip()
+    if not text:
+        return None
+    if len(text) > _MAX_OBSERVATION_VALUE_CHARS:
+        return text[: _MAX_OBSERVATION_VALUE_CHARS - 1] + "…"
+    return text
+
+
+def project_observation_fields(raw_data: Mapping[str, Any] | None) -> dict[str, str]:
+    """Compact sanitized source-record fields for UI; never includes raw_data."""
+    if not isinstance(raw_data, Mapping) or not raw_data:
+        return {}
+    try:
+        sanitized = sanitize_evidence_raw_data("observe", raw_data, enforce_allowlist=True)
+    except EvidenceSanitizerError:
+        sanitized = sanitize_evidence_raw_data_legacy(raw_data)
+    fields: dict[str, str] = {}
+    for key in _OBSERVATION_FIELD_ORDER:
+        if key not in sanitized:
+            continue
+        rendered = _observation_value(sanitized[key])
+        if rendered is None:
+            continue
+        fields[key] = rendered
+        if len(fields) >= _MAX_OBSERVATION_FIELDS:
+            break
+    return fields
+
+
 def project_evidence_for_api(item: Evidence) -> EvidenceSafeProjection:
     """Project one Evidence domain row to API-safe shape (no raw_data)."""
     return EvidenceSafeProjection(
@@ -279,6 +334,9 @@ def project_evidence_for_api(item: Evidence) -> EvidenceSafeProjection:
         source_ref=item.source_ref,
         mitre_technique=item.mitre_technique,
         is_conflicting=item.is_conflicting,
+        observation_fields=project_observation_fields(
+            item.raw_data if isinstance(item.raw_data, dict) else {}
+        ),
     )
 
 
@@ -312,6 +370,7 @@ __all__ = [
     "EvidenceSanitizerError",
     "project_evidence_for_api",
     "project_evidence_list_for_api",
+    "project_observation_fields",
     "sanitize_evidence_for_persist",
     "sanitize_evidence_raw_data",
     "sanitize_evidence_raw_data_legacy",

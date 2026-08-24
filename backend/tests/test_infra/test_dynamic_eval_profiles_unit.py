@@ -37,11 +37,11 @@ def diagnostics_mod():
     )
 
 
-def test_fp_profile_uses_analysis_only_semantic_and_non_blocking_pressure(profiles_mod) -> None:
+def test_fp_profile_uses_analysis_only_semantic_and_blocking_pressure(profiles_mod) -> None:
     profile = profiles_mod.profile_for_scenario("account_anomaly_fp")
     assert profile.semantic == "analysis_only_fp"
     assert profile.pressure == "full_loop_compat"
-    assert profile.pressure_blocks_pass is False
+    assert profile.pressure_blocks_pass is True
 
 
 def test_domain_profile_requires_pressure_pass(profiles_mod) -> None:

@@ -13,7 +13,7 @@ def _audit_tail(
 ) -> tuple[list[dict[str, Any]], str | None]:
     try:
         payload = client.get_json(
-            f"/api/v1/events/{event_id}/audit-logs?page=1&page_size={limit}"
+            f"/api/v1/events/{event_id}/audit-logs?page=1&page_size={max(limit, 50)}"
         )
     except Exception as exc:  # noqa: BLE001 — surface error, keep other diagnostics
         return [], f"{type(exc).__name__}:{exc}"

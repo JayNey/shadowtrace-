@@ -758,6 +758,36 @@ def test_remaining_route_truth_tables() -> None:
         == ROUTE_RESPONSE
     )
     assert (
+        route_after_risk(
+            _base_state(
+                final_verdict=FinalVerdict.FALSE_POSITIVE.value,
+                disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
+                defer_response_execution=False,
+            )
+        )
+        == ROUTE_REPORT
+    )
+    assert (
+        route_after_risk(
+            _base_state(
+                final_verdict=FinalVerdict.FALSE_POSITIVE.value,
+                disposition_policy=DispositionPolicy.REQUIRED.value,
+                disposition_only_intent=True,
+                defer_response_execution=False,
+            )
+        )
+        == ROUTE_RESPONSE
+    )
+    assert (
+        route_after_risk(
+            _base_state(
+                final_verdict=FinalVerdict.NONE.value,
+                defer_response_execution=False,
+            )
+        )
+        == ROUTE_RESPONSE
+    )
+    assert (
         route_after_report(_base_state(disposition_policy=DispositionPolicy.REQUIRED.value))
         == ROUTE_HALT
     )
@@ -879,6 +909,65 @@ async def test_graph_replan_one_cycle_then_success() -> None:
     assert final["escalated"] is False
     assert NODE_CLOSE in trace
     assert len(verify_agent.calls) == 2
+    assert machine.status is EventStatus.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_close_node_runs_memory_after_graph_owned_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Human-approve resume CLOSES in close_node; memory must still enqueue."""
+    called: list[str] = []
+
+    def _fake_spawn(event_id: str, **_kwargs: Any) -> None:
+        called.append(event_id)
+
+    monkeypatch.setattr(
+        "app.services.memory_after_close.spawn_memory_after_close",
+        _fake_spawn,
+    )
+    agents = _agents()
+    agents["memory_agent"] = object()
+    machine = FakeStateMachine()
+    final = await build_investigation_graph(agents, _services(machine)).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-memory-after-close"}},
+    )
+    assert NODE_CLOSE in final["node_trace"]
+    assert machine.status is EventStatus.CLOSED
+    assert called == ["evt-graph-001"]
+
+
+@pytest.mark.asyncio
+async def test_close_node_closes_without_memory_agent() -> None:
+    machine = FakeStateMachine()
+    final = await build_investigation_graph(_agents(), _services(machine)).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-memory-missing-agent"}},
+    )
+    assert NODE_CLOSE in final["node_trace"]
+    assert machine.status is EventStatus.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_close_node_closes_when_memory_spawn_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("spawn failed")
+
+    monkeypatch.setattr(
+        "app.services.memory_after_close.spawn_memory_after_close",
+        _boom,
+    )
+    agents = _agents()
+    agents["memory_agent"] = object()
+    machine = FakeStateMachine()
+    final = await build_investigation_graph(agents, _services(machine)).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-memory-spawn-raises"}},
+    )
+    assert NODE_CLOSE in final["node_trace"]
     assert machine.status is EventStatus.CLOSED
 
 
@@ -1065,6 +1154,30 @@ async def test_deferred_response_not_required_reaches_closed() -> None:
         NODE_CLOSE,
     ]
     assert machine.status is EventStatus.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_false_positive_not_required_skips_entity_response() -> None:
+    """Confirmed FP + not_required must not enter PLANNING_RESPONSE under full_loop."""
+    machine = FakeStateMachine()
+    services = _services(machine)
+    final = await build_investigation_graph(_agents(), services).ainvoke(
+        _base_state(
+            final_verdict=FinalVerdict.FALSE_POSITIVE.value,
+            disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
+            defer_response_execution=False,
+            fp_adjudication={"recommendation": "close_as_fp"},
+        ),
+        {"configurable": {"thread_id": "evt-fp-no-entity-response"}},
+    )
+    assert NODE_RESPONSE not in final["node_trace"]
+    assert NODE_REPORT in final["node_trace"]
+    assert NODE_CLOSE in final["node_trace"]
+    assert machine.status is EventStatus.CLOSED
+    assert all(
+        reason != "investigation:plan_response"
+        for _event_id, _target, reason in machine.transitions
+    )
 
 
 @pytest.mark.asyncio

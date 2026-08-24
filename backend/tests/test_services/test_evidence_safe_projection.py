@@ -21,6 +21,7 @@ from app.services.evidence_safe_projection import (
     EVIDENCE_SAFE_PROJECTION_VERSION,
     EvidenceSanitizerError,
     project_evidence_for_api,
+    project_observation_fields,
     sanitize_evidence_for_persist,
     sanitize_evidence_raw_data,
 )
@@ -172,12 +173,51 @@ def test_project_evidence_for_api_omits_raw_data() -> None:
         evidence_type="login",
         description="test",
         confidence=0.9,
-        raw_data={"token": "secret", "account": "ops"},
+        raw_data={"token": "secret", "account": "ops", "cmdline": "curl https://example"},
     )
     projected = project_evidence_for_api(item)
     dumped = projected.model_dump(mode="json")
     assert "raw_data" not in dumped
     assert projected.schema_version == EVIDENCE_SAFE_PROJECTION_VERSION
+    assert projected.observation_fields["account"] == "ops"
+    assert projected.observation_fields["cmdline"] == "curl https://example"
+    assert "token" not in projected.observation_fields
+    assert "secret" not in dumped
+
+
+def test_project_observation_fields_caps_and_redacts() -> None:
+    fields = project_observation_fields(
+        {
+            "record_id": "ep-1",
+            "action": "network_connect",
+            "hostname": "PC-FIN-023",
+            "account": "zhangsan",
+            "process": "7z.exe",
+            "cmdline": "7z.exe a " + ("finance_report.zip " * 20),
+            "file_name": "finance_report.zip",
+            "dst_ip": "203.0.113.88",
+            "Authorization": "Bearer nested-secret",
+            "token": "must-not-appear",
+        }
+    )
+    assert list(fields) == [
+        "record_id",
+        "action",
+        "hostname",
+        "account",
+        "process",
+        "cmdline",
+        "file_name",
+        "dst_ip",
+    ]
+    assert len(fields) == 8
+    assert len(fields["cmdline"]) <= 80
+    assert fields["cmdline"].endswith("…")
+    assert "Authorization" not in fields
+    assert "token" not in fields
+    assert "nested-secret" not in str(fields)
+    dumped = " ".join(fields.values())
+    assert "must-not-appear" not in dumped
 
 
 def test_persist_re_sanitizes_defense_in_depth() -> None:
@@ -264,6 +304,8 @@ def test_api_evidence_never_returns_raw_data_even_from_legacy_context() -> None:
     item = payload["evidence_list"][0]
     assert "raw_data" not in item
     assert item["schema_version"] == EVIDENCE_SAFE_PROJECTION_VERSION
+    assert item["observation_fields"]["account"] == "ops"
+    assert "Authorization" not in item["observation_fields"]
     body = response.text
     assert "legacy-secret" not in body
     assert "deadbeef" not in body

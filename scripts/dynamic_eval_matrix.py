@@ -51,6 +51,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 from dynamic_eval_full_loop import (  # noqa: E402
     GOLD_SCENARIOS,
+    parse_full_loop_stdout,
     parse_seed_stdout,
 )
 from dynamic_eval_profiles import (  # noqa: E402
@@ -215,7 +216,16 @@ def _compose_down(
     *,
     volumes: bool,
 ) -> None:
-    cmd = _compose_cmd(project, compose_files, "down", "--remove-orphans")
+    # ``up`` uses ``--profile worker``. Compose down without the same profile
+    # leaves the worker container running (live eval leftover workers).
+    cmd = _compose_cmd(
+        project,
+        compose_files,
+        "--profile",
+        "worker",
+        "down",
+        "--remove-orphans",
+    )
     if volumes:
         cmd.append("-v")
     proc = _run(cmd, capture=True, check=False)
@@ -433,14 +443,13 @@ def _run_full_loop_via_exec(
             f"(exit={proc.returncode}):\n{_sanitize_error_text(stdout)}\n"
             f"{_sanitize_error_text(proc.stderr)}"
         )
-    try:
-        result = json.loads(stdout)
-    except json.JSONDecodeError as exc:
+    result = parse_full_loop_stdout(stdout)
+    if result is None:
         raise MatrixError(
             "full_loop did not emit JSON on stdout: "
             f"{_sanitize_error_text(stdout)!r}\n"
             f"stderr={_sanitize_error_text(proc.stderr)!r}"
-        ) from exc
+        )
     if not isinstance(result, dict):
         raise MatrixError(f"unexpected full_loop result type: {type(result)!r}")
     return result
@@ -829,6 +838,11 @@ def _parse_scenarios(raw: str) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(line_buffering=True)
+        except Exception:
+            pass
     args = parse_args(argv)
     if args.max_wait_s >= 30 * 60:
         raise SystemExit(

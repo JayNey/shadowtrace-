@@ -484,7 +484,13 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             if not include_response_execution:
                 await self._persist_analysis_only_complete(event_id)
                 await self._schedule_memory_after_analysis(event_id, ec)
-            if ec.event is not None and ec.event.status is EventStatus.CLOSED:
+            # Graph-owned close_node already spawns consolidation; do not race
+            # a second MemoryAgent execute before memory_output is persisted.
+            if (
+                self._investigation_graph is None
+                and ec.event is not None
+                and ec.event.status is EventStatus.CLOSED
+            ):
                 await self._schedule_memory_after_close(event_id, ec)
 
             if lifecycle_started:

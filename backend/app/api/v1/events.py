@@ -536,111 +536,127 @@ async def _build_writeback_info(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> tuple[WritebackReadiness, WritebackStatus | None, int]:
     """Derive overall event-level writeback readiness / status / pending count."""
+    from app.services.writeback_event_projection import (
+        load_writeback_rows,
+        project_writeback_envelope,
+    )
+
     if policy == DispositionPolicy.NOT_REQUIRED:
         return WritebackReadiness.NOT_REQUIRED, None, 0
 
     async with session_factory() as session:
-        # The UI aggregation reflects the *current* plan only: outboxes owned by
-        # superseded plan revisions or superseded Actions must not pollute the
-        # overall status/pending (ISSUE-185).
-        current_revision = await session.scalar(
-            select(func.max(orm.Action.plan_revision)).where(orm.Action.event_id == event_id)
+        actions, outboxes, receipts_by_wb = await load_writeback_rows(session, event_id)
+        envelope = project_writeback_envelope(
+            policy,
+            actions,
+            outboxes,
+            receipts_by_wb,
         )
+        readiness = envelope.aggregate_readiness
+        wb_status = envelope.aggregate_status
+        pending = envelope.pending_count
+        current_revision = envelope.current_revision
 
-        # Count non-superseded response/rollback actions of the current plan.
-        counts = await session.execute(
-            select(
-                func.count(orm.Action.action_id),
-                func.min(orm.Action.writeback_readiness),
-            ).where(
-                orm.Action.event_id == event_id,
-                orm.Action.plan_revision == current_revision,
-                orm.Action.action_category.in_(("response", "rollback")),
-                orm.Action.superseded_by_revision.is_(None),
-                orm.Action.status.not_in(("rejected", "superseded")),
-            )
-        )
-        total_actions, min_readiness_raw = counts.one()
-        total = int(total_actions or 0)
+        # #region agent log
+        try:
+            import json as _dbg_json
+            import time as _dbg_time
 
-        readiness = WritebackReadiness.READY
-        if total == 0:
-            readiness = WritebackReadiness.NOT_CONFIGURED
-        elif min_readiness_raw:
-            try:
-                readiness = WritebackReadiness(min_readiness_raw)
-            except ValueError:
-                readiness = WritebackReadiness.CAPABILITY_UNKNOWN
-
-        # Only outboxes bound to current-plan, non-superseded Actions count.
-        current_plan_action_filter = (
-            orm.Action.plan_revision == current_revision,
-            orm.Action.superseded_by_revision.is_(None),
-        )
-
-        # Count pending/active outbox records.
-        pending_count = await session.scalar(
-            select(func.count(orm.DispositionOutbox.outbox_id))
-            .join(orm.Action, orm.Action.action_id == orm.DispositionOutbox.action_id)
-            .where(
-                orm.DispositionOutbox.event_id == event_id,
-                *current_plan_action_filter,
-                orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
-                orm.DispositionOutbox.latest_writeback_status.in_(
-                    (
-                        WritebackStatus.PENDING.value,
-                        WritebackStatus.SENDING.value,
-                        WritebackStatus.ACCEPTED.value,
-                        WritebackStatus.UNKNOWN.value,
+            _act_rows = (
+                await session.execute(
+                    select(
+                        orm.Action.tool_name,
+                        orm.Action.writeback_required,
+                        orm.Action.writeback_applicable,
+                        orm.Action.writeback_readiness,
+                        orm.Action.status,
+                    ).where(
+                        orm.Action.event_id == event_id,
+                        orm.Action.plan_revision == current_revision,
+                        orm.Action.action_category.in_(("response", "rollback")),
+                        orm.Action.superseded_by_revision.is_(None),
+                        orm.Action.status.not_in(("rejected", "superseded")),
                     )
-                ),
-            )
-        )
-        pending = int(pending_count or 0)
-
-        # Derive overall writeback status from all active outbox rows (not only
-        # pending-countable rows — FAILED/CONFLICT are terminal and excluded
-        # from pending_count but must still block close).
-        wb_status: WritebackStatus | None = None
-        status_rows = (
-            await session.scalars(
-                select(orm.DispositionOutbox.latest_writeback_status)
-                .join(orm.Action, orm.Action.action_id == orm.DispositionOutbox.action_id)
-                .where(
-                    orm.DispositionOutbox.event_id == event_id,
-                    *current_plan_action_filter,
-                    orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
                 )
-            )
-        ).all()
-        parsed_statuses: list[WritebackStatus] = []
-        for raw in status_rows:
-            if not raw:
-                continue
-            try:
-                parsed_statuses.append(WritebackStatus(str(raw)))
-            except ValueError:
-                continue
-
-        if parsed_statuses:
-            if any(s is WritebackStatus.FAILED for s in parsed_statuses):
-                wb_status = WritebackStatus.FAILED
-            elif any(s is WritebackStatus.CONFLICT for s in parsed_statuses):
-                wb_status = WritebackStatus.CONFLICT
-            elif any(s is WritebackStatus.UNKNOWN for s in parsed_statuses):
-                wb_status = WritebackStatus.UNKNOWN
-            elif any(
-                s
-                in (
-                    WritebackStatus.PENDING,
-                    WritebackStatus.SENDING,
-                    WritebackStatus.ACCEPTED,
+            ).all()
+            with open(
+                "/Users/apple/Desktop/shadowtrace副本/.cursor/debug-0da307.log",
+                "a",
+                encoding="utf-8",
+            ) as _dbg_f:
+                _dbg_f.write(
+                    _dbg_json.dumps(
+                        {
+                            "sessionId": "0da307",
+                            "runId": "post-fix",
+                            "hypothesisId": "A",
+                            "location": "events.py:_build_writeback_info",
+                            "message": "event writeback aggregation inputs",
+                            "data": {
+                                "event_id": event_id,
+                                "policy": policy.value,
+                                "total": envelope.applicable_action_count,
+                                "min_readiness_raw": readiness.value,
+                                "computed_readiness": readiness.value,
+                                "actions": [
+                                    {
+                                        "tool": r.tool_name,
+                                        "required": bool(r.writeback_required),
+                                        "applicable": bool(r.writeback_applicable),
+                                        "readiness": r.writeback_readiness,
+                                        "status": r.status,
+                                    }
+                                    for r in _act_rows
+                                ],
+                            },
+                            "timestamp": int(_dbg_time.time() * 1000),
+                        }
+                    )
+                    + "\n"
                 )
-                for s in parsed_statuses
-            ):
-                wb_status = WritebackStatus.PENDING
-            elif all(s is WritebackStatus.CONFIRMED for s in parsed_statuses):
-                wb_status = WritebackStatus.CONFIRMED
+        except Exception:
+            pass
+        # #endregion
+
+        parsed_statuses = [
+            status
+            for status, count in envelope.writeback_counts.items()
+            for _ in range(count)
+        ]
+
+        # #region agent log
+        try:
+            import json as _dbg_json2
+            import time as _dbg_time2
+
+            with open(
+                "/Users/apple/Desktop/shadowtrace副本/.cursor/debug-0da307.log",
+                "a",
+                encoding="utf-8",
+            ) as _dbg_f2:
+                _dbg_f2.write(
+                    _dbg_json2.dumps(
+                        {
+                            "sessionId": "0da307",
+                            "runId": "post-fix",
+                            "hypothesisId": "E",
+                            "location": "events.py:_build_writeback_info:return",
+                            "message": "event writeback aggregation result",
+                            "data": {
+                                "event_id": event_id,
+                                "readiness": readiness.value,
+                                "wb_status": wb_status.value if wb_status is not None else None,
+                                "pending": pending,
+                                "outbox_statuses": [s.value for s in parsed_statuses],
+                            },
+                            "timestamp": int(_dbg_time2.time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
 
         return readiness, wb_status, pending
 
@@ -677,6 +693,76 @@ async def create_event(
 # --------------------------------------------------------------------------- #
 
 
+async def _list_writeback_envelopes(
+    events: list[Any],
+) -> dict[str, Any]:
+    """Project writeback envelopes for one list page (one query set, not N+1)."""
+    from app.services.writeback_event_projection import (
+        load_writeback_rows_for_events,
+        project_writeback_envelope,
+    )
+
+    required_events = [
+        event for event in events if _writeback_required(event.disposition_policy)
+    ]
+    if not required_events:
+        return {}
+    policy_by_id = {event.event_id: event.disposition_policy for event in required_events}
+    try:
+        async with _get_session_factory()() as session:
+            rows_by_event = await load_writeback_rows_for_events(
+                session, list(policy_by_id)
+            )
+            envelopes = {
+                event_id: project_writeback_envelope(
+                    policy_by_id[event_id],
+                    actions,
+                    outboxes,
+                    receipts,
+                )
+                for event_id, (actions, outboxes, receipts) in rows_by_event.items()
+                if event_id in policy_by_id
+            }
+        # #region agent log
+        try:
+            import json as _dbg_json
+            import time as _dbg_time
+
+            with open(
+                "/Users/apple/Desktop/shadowtrace副本/.cursor/debug-0da307.log",
+                "a",
+                encoding="utf-8",
+            ) as _dbg_f:
+                _dbg_f.write(
+                    _dbg_json.dumps(
+                        {
+                            "sessionId": "0da307",
+                            "runId": "post-fix",
+                            "hypothesisId": "LIST",
+                            "location": "events.py:_list_writeback_envelopes",
+                            "message": "batched list writeback projection",
+                            "data": {
+                                "page_size": len(events),
+                                "required_count": len(policy_by_id),
+                                "readiness": {
+                                    event_id: envelope.aggregate_readiness.value
+                                    for event_id, envelope in envelopes.items()
+                                },
+                            },
+                            "timestamp": int(_dbg_time.time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
+        return envelopes
+    except Exception:
+        logger.warning("list writeback envelope projection failed", exc_info=True)
+        return {}
+
+
 @router.get("/events", response_model=s.EventListResponse)
 async def list_events(
     principal: ReadPrincipal,
@@ -708,17 +794,24 @@ async def list_events(
     )
     from app.services.risk_verdict_projection import risk_observability_from_snapshot
 
+    envelopes = await _list_writeback_envelopes(result.items)
     items: list[s.EventListItem] = []
     for event in result.items:
         wb_required = _writeback_required(event.disposition_policy)
-        # ISSUE-038: list view does not resolve per-event writeback info for
-        # performance reasons. When writeback is required, signal capability
-        # is unknown rather than misleading NOT_CONFIGURED.
-        wb_readiness = (
-            WritebackReadiness.CAPABILITY_UNKNOWN
-            if wb_required
-            else WritebackReadiness.NOT_REQUIRED
-        )
+        envelope = envelopes.get(event.event_id)
+        if not wb_required:
+            wb_readiness = WritebackReadiness.NOT_REQUIRED
+            wb_status: WritebackStatus | None = None
+            pending_count = 0
+        elif envelope is None:
+            # Batch load failed: fail closed rather than pretending unconfigured.
+            wb_readiness = WritebackReadiness.CAPABILITY_UNKNOWN
+            wb_status = None
+            pending_count = 0
+        else:
+            wb_readiness = envelope.aggregate_readiness
+            wb_status = envelope.aggregate_status
+            pending_count = envelope.pending_count
         snapshot = (
             event.event_context_snapshot if isinstance(event.event_context_snapshot, dict) else None
         )
@@ -736,8 +829,8 @@ async def list_events(
                 final_verdict=event.final_verdict,
                 writeback_required=wb_required,
                 writeback_readiness=wb_readiness,
-                writeback_overall_status=None,
-                pending_writeback_count=0,
+                writeback_overall_status=wb_status,
+                pending_writeback_count=pending_count,
                 created_at=event.created_at,
                 updated_at=event.updated_at,
                 occurred_at=event.occurred_at,
@@ -1417,6 +1510,34 @@ async def repair_event_projection(
     )
 
 
+async def _spawn_memory_after_http_close(event: Any) -> None:
+    """Best-effort knowledge enqueue after a normal HTTP CLOSED. Never fails close."""
+    if event is None:
+        return
+    if getattr(event, "status", None) is not EventStatus.CLOSED:
+        return
+    if bool(getattr(event, "external_unsynced", False)):
+        return
+    try:
+        from app.api.v1.deps import _get_investigation_stack
+        from app.services.memory_after_close import spawn_memory_after_close
+
+        stack = await _get_investigation_stack()
+        spawn_memory_after_close(
+            event.event_id,
+            memory_agent=stack.get("memory"),
+            context_store=stack.get("context_store"),
+            degraded_flags=stack.get("degraded_flags"),
+            writer="EventCloseAPI",
+        )
+    except Exception:
+        logger.warning(
+            "http close memory spawn failed event=%s",
+            getattr(event, "event_id", None),
+            exc_info=True,
+        )
+
+
 # --------------------------------------------------------------------------- #
 # POST /events/{event_id}/close — close event
 # --------------------------------------------------------------------------- #
@@ -1604,6 +1725,7 @@ async def close_event(
             f"event {event_id} disappeared after close",
             details={"event_id": event_id},
         )
+    await _spawn_memory_after_http_close(event)
     side_effect_fields = await _side_effect_fields_for_close_response(event)
     return _build_event_close_response(
         event_id=event_id,

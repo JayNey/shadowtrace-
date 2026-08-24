@@ -28,7 +28,7 @@ const evidence: Evidence[] = [
     description: "原始证据：管理员账户从异常地址登录",
     confidence: 0.94,
     timestamp: "2026-07-27T08:00:00Z",
-    raw_data: { source_ip: "203.0.113.8", username: "admin" },
+    observation_fields: { src_ip: "203.0.113.8", account: "admin" },
     mitre_technique: "T1078",
     is_conflicting: false,
   },
@@ -121,15 +121,58 @@ describe("StorylineTimeline", () => {
     await user.click(
       within(entry).getByRole("button", { name: "展开关联证据" }),
     );
+    const panel = screen.getByTestId("timeline-evidence-ev-070");
     expect(
-      screen.getByText("原始证据：管理员账户从异常地址登录"),
+      within(panel).getByText("原始证据：管理员账户从异常地址登录"),
     ).toBeInTheDocument();
-    expect(screen.getByText(/203\.0\.113\.8/)).toBeInTheDocument();
+    expect(within(panel).getByText(/src_ip: 203\.0\.113\.8/)).toBeInTheDocument();
+    expect(within(panel).getByText(/account: admin/)).toBeInTheDocument();
 
     await user.click(
       within(entry).getByRole("button", { name: /查看 T1078 技术名称/ }),
     );
     expect(await screen.findByText("Valid Accounts")).toBeInTheDocument();
+  });
+
+  it("does not repeat the timeline sentence when observation fields exist", async () => {
+    const user = userEvent.setup();
+    const duplicate = "主机 PC-FIN-023 于 2024-06-15 09:13:30 UTC 发生 network_connect：7z.exe";
+    const storyline = makeStoryline();
+    storyline.phases[0].entries = [
+      {
+        timestamp: "2024-06-15T09:13:30Z",
+        description: duplicate,
+        evidence_id: "ev-070",
+        technique_id: "T1078",
+        severity_hint: "high",
+      },
+    ];
+    render(
+      <StorylineTimeline
+        storyline={storyline}
+        evidence={[
+          {
+            ...evidence[0],
+            description: duplicate,
+            related_entities: ["PC-FIN-023", "7z.exe"],
+            observation_fields: {
+              action: "network_connect",
+              process: "7z.exe",
+              cmdline: "7z.exe a finance_report.zip",
+              dst_ip: "203.0.113.88",
+            },
+          },
+        ]}
+      />,
+    );
+
+    const entry = screen.getByTestId("timeline-entry-ev-070");
+    expect(within(entry).getByText(duplicate)).toBeInTheDocument();
+    await user.click(within(entry).getByRole("button", { name: "展开关联证据" }));
+    const panel = screen.getByTestId("timeline-evidence-ev-070");
+    expect(within(panel).queryByText(duplicate)).not.toBeInTheDocument();
+    expect(within(panel).getByText(/cmdline: 7z\.exe a finance_report\.zip/)).toBeInTheDocument();
+    expect(within(panel).getByText(/关联实体：PC-FIN-023, 7z\.exe/)).toBeInTheDocument();
   });
 
   it("falls back to evidence ordered by time when storyline is not ready", () => {

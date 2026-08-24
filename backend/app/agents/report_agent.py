@@ -39,7 +39,7 @@ from app.agents.triage_risk_consistency import (
 )
 from app.core.errors import LLMError
 from app.core.llm.scenario_context import resolve_llm_scenario_id
-from app.models.agent_io import ReportAgentInput, TriageResult
+from app.models.agent_io import ReportAgentInput, ReportPhaseStatus, TriageResult
 from app.models.detection_context_snapshot import DetectionContextSnapshot
 from app.models.enums import (
     ActionCategory,
@@ -59,6 +59,9 @@ logger = logging.getLogger(__name__)
 GENERATED_BY_LLM = "llm"
 GENERATED_BY_TEMPLATE = "template"
 LLM_TIMEOUT_SECONDS = 30.0
+# 15-chapter reports with max_tokens=8192 routinely exceed the global LLM
+# default (30s / overlay 120s). Floor only applies when DI omits timeout.
+MIN_REPORT_LLM_TIMEOUT_SECONDS = 180.0
 # ISSUE-358: partial LLM sections may merge. This trio only stamps
 # ``generated_by=llm``; it does not replace ISSUE-212 chapter-content checks.
 CORE_LLM_SECTION_KEYS: tuple[str, ...] = (
@@ -113,6 +116,13 @@ _ACTIONS_MERGE_PREFIXES = (f"{ACTIONS_STATUS_SUMMARY_LABEL}:",)
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
 
+def _is_llm_timeout_failure(exc: BaseException) -> bool:
+    """True when the LLM call was cut off — not a candidate for template success."""
+    if isinstance(exc, TimeoutError):
+        return True
+    return str(llm_failure_metadata(exc).get("error_code") or "") == "llm_timeout"
+
+
 class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
     """Generate, persist, and publish a 15-section investigation report."""
 
@@ -134,7 +144,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         detection_context_service: Any | None = None,
         section_builder: ReportSectionBuilder | None = None,
         scenario_id: str | None = None,
-        llm_timeout_seconds: float = LLM_TIMEOUT_SECONDS,
+        llm_timeout_seconds: float | None = None,
     ) -> None:
         # Durable publish without a guard is forbidden (ISSUE-270). When callers
         # wire event_service / publication_service but omit output_guard, install
@@ -158,6 +168,14 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         self.detection_context_service = detection_context_service
         self.section_builder = section_builder or ReportSectionBuilder()
         self.scenario_id = scenario_id
+        if llm_timeout_seconds is None:
+            try:
+                from app.core.config import get_settings
+
+                configured = float(get_settings().llm_timeout_seconds)
+            except Exception:
+                configured = LLM_TIMEOUT_SECONDS
+            llm_timeout_seconds = max(configured, MIN_REPORT_LLM_TIMEOUT_SECONDS)
         self.llm_timeout_seconds = float(llm_timeout_seconds)
         self.last_content_sha256: str | None = None
         self.last_report_markdown: str | None = None
@@ -268,14 +286,18 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 title = llm_title or title
                 summary = llm_summary or summary
                 draft_sections = self._merge_sections(draft_sections, llm_sections)
-                if self._llm_core_sections_substantive(llm_sections):
+                required_core = self._llm_core_section_keys(
+                    input.response_phase_status,
+                    input.verification_phase_status,
+                )
+                if self._llm_core_sections_substantive(llm_sections, required_core):
                     generated_by = GENERATED_BY_LLM
                 else:
                     generated_by = GENERATED_BY_TEMPLATE
                     llm_partial_fallback = True
                     missing_core = [
                         key
-                        for key in CORE_LLM_SECTION_KEYS
+                        for key in required_core
                         if not str(llm_sections.get(key) or "").strip()
                     ]
                     logger.warning(
@@ -288,6 +310,15 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 # ISSUE-314: soft-limit must not fall back to template "success".
                 raise
             except Exception as exc:
+                if _is_llm_timeout_failure(exc):
+                    # Same class as ISSUE-314: a cut-off generation is not a
+                    # deliverable report. Callers persist report_generated=false.
+                    logger.warning(
+                        "ReportAgent LLM timed out; not using template fallback "
+                        "event=%s",
+                        input.event_id,
+                    )
+                    raise
                 llm_fallback = llm_failure_metadata(exc)
                 error_code = str(llm_fallback["error_code"])
                 error_message = str(llm_fallback["error_message"])
@@ -482,13 +513,41 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         return title, summary, parsed
 
     @staticmethod
-    def _llm_core_sections_substantive(llm_sections: dict[str, str]) -> bool:
-        """True when LLM supplied non-empty overview / actions / verification.
+    def _phase_executed(status: ReportPhaseStatus | str | None) -> bool:
+        raw = getattr(status, "value", status)
+        return str(raw or "") == ReportPhaseStatus.EXECUTED.value
+
+    @classmethod
+    def _llm_core_section_keys(
+        cls,
+        response_phase_status: ReportPhaseStatus | str | None,
+        verification_phase_status: ReportPhaseStatus | str | None,
+    ) -> tuple[str, ...]:
+        """LLM success keys follow ISSUE-205 phase status, not a fixed trio.
+
+        Unexecuted response/verify chapters are template-owned. Requiring the
+        model to rewrite them demotes honest analysis-only reports to
+        ``generated_by=template``. Executed phases still require those keys.
+        """
+        keys = ["overview"]
+        if cls._phase_executed(response_phase_status):
+            keys.append("executed_actions")
+        if cls._phase_executed(verification_phase_status):
+            keys.append("verification_results")
+        return tuple(keys)
+
+    @staticmethod
+    def _llm_core_sections_substantive(
+        llm_sections: dict[str, str],
+        required_keys: tuple[str, ...] | None = None,
+    ) -> bool:
+        """True when LLM supplied non-empty required core sections.
 
         Uses LLM-returned keys only — template backfill after merge must not
         count as ``generated_by=llm``.
         """
-        return all(str(llm_sections.get(key) or "").strip() for key in CORE_LLM_SECTION_KEYS)
+        keys = required_keys if required_keys is not None else CORE_LLM_SECTION_KEYS
+        return all(str(llm_sections.get(key) or "").strip() for key in keys)
 
     @staticmethod
     def _missing_required_lines(

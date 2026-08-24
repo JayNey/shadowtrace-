@@ -10,7 +10,7 @@ import json
 import time
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import BackgroundTasks
@@ -61,6 +61,14 @@ def _dev_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SIMULATION_ENABLED", "true")
     monkeypatch.setenv("TASK_MODE", "background")
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def http_memory_after_close(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Avoid building the investigation stack on every HTTP close test."""
+    mock = AsyncMock()
+    monkeypatch.setattr("app.api.v1.events._spawn_memory_after_http_close", mock)
+    return mock
 
 
 def _hdr(role: str = "analyst") -> dict[str, str]:
@@ -835,6 +843,289 @@ async def test_get_event_surfaces_failed_writeback_status(
     assert data["writeback_overall_status"] == WritebackStatus.FAILED.value
 
 
+async def _seed_entity_plus_terminal_writeback_event(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> str:
+    """Match live ResponseAgent: entity actions NOT_REQUIRED/non-applicable + deferred READY."""
+    import hashlib
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from app.models.action import TERMINAL_DISPOSITION_TOOL
+    from app.models.enums import DispositionIntentKind, SourceDisposition
+
+    sfx = uuid4().hex[:8]
+    event_id = f"evt-{sfx}"
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="data_exfiltration",
+                    title="insider mixed writeback",
+                    description="entity not_required + terminal ready",
+                    status=EventStatus.CLOSED.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
+                    risk_score=90,
+                    entities={},
+                    creation_source_ref={
+                        "source_kind": "incident",
+                        "source_product": "mock_xdr",
+                        "source_tenant_id": "t1",
+                        "connector_id": f"conn-{sfx}",
+                        "source_object_id": f"INC-{sfx}",
+                        "raw_payload_hash": hashlib.sha256(b"mix").hexdigest(),
+                        "ingested_at": now.isoformat(),
+                    },
+                    source_reference_snapshots=[],
+                    disposition_policy=DispositionPolicy.REQUIRED.value,
+                    source_type="mock_xdr",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.SourceConnector(
+                    connector_id=f"conn-{sfx}",
+                    source_product="mock_xdr",
+                    display_name="mix connector",
+                )
+            )
+            session.add(
+                orm.SourceObject(
+                    source_record_id=f"src-{sfx}",
+                    source_product="mock_xdr",
+                    source_tenant_id="t1",
+                    connector_id=f"conn-{sfx}",
+                    source_kind="incident",
+                    source_object_id=f"INC-{sfx}",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.Action(
+                    action_id=f"act-ent-{sfx}",
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-ent-{sfx}",
+                    action_category="response",
+                    action_name="isolate host",
+                    tool_name="isolate_host",
+                    action_level="l2",
+                    execution_owner="xdr_managed",
+                    status=ActionStatus.SUCCESS.value,
+                    writeback_required=True,
+                    writeback_applicable=False,
+                    writeback_readiness=WritebackReadiness.NOT_REQUIRED.value,
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=f"act-term-{sfx}",
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-term-{sfx}",
+                    action_category="response",
+                    action_name=TERMINAL_DISPOSITION_TOOL,
+                    tool_name=TERMINAL_DISPOSITION_TOOL,
+                    action_level="l1",
+                    execution_owner="xdr_managed",
+                    status=ActionStatus.SUCCESS.value,
+                    writeback_required=True,
+                    writeback_applicable=True,
+                    writeback_readiness=WritebackReadiness.READY.value,
+                    writeback_status=WritebackStatus.CONFIRMED.value,
+                    approved_terminal_dispositions=[SourceDisposition.CONTAINED.value],
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-ent-{sfx}",
+                    writeback_id=f"wbk-ent-{sfx}",
+                    disposition_id=f"disp-ent-{sfx}",
+                    action_id=f"act-ent-{sfx}",
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=f"src-{sfx}",
+                    source_locator_hash="e" * 64,
+                    source_sequence=1,
+                    intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                    logical_slot="entity",
+                    idempotency_key=f"idem-ent-{sfx}",
+                    command_payload={},
+                    command_payload_sha256="e" * 64,
+                    delivery_status="delivered",
+                    latest_writeback_status=WritebackStatus.ACCEPTED.value,
+                )
+            )
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-term-{sfx}",
+                    writeback_id=f"wbk-term-{sfx}",
+                    disposition_id=f"disp-term-{sfx}",
+                    action_id=f"act-term-{sfx}",
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=f"src-{sfx}",
+                    source_locator_hash="t" * 64,
+                    source_sequence=2,
+                    intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                    logical_slot="terminal",
+                    idempotency_key=f"idem-term-{sfx}",
+                    command_payload={},
+                    command_payload_sha256="t" * 64,
+                    delivery_status="delivered",
+                    latest_writeback_status=WritebackStatus.CONFIRMED.value,
+                )
+            )
+    return event_id
+
+
+@pytest.mark.asyncio
+async def test_get_event_writeback_ignores_non_applicable_entity_actions(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Event-level writeback must follow CLOSED-gate applicable actions, not MIN(all)."""
+    event_id = await _seed_entity_plus_terminal_writeback_event(session_factory)
+
+    resp = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["writeback_required"] is True
+    assert data["writeback_readiness"] == WritebackReadiness.READY.value
+    assert data["writeback_overall_status"] == WritebackStatus.CONFIRMED.value
+    assert data["pending_writeback_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_events_projects_same_writeback_envelope_as_detail(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """List uses the shared projector, not a capability_unknown placeholder."""
+    event_id = await _seed_entity_plus_terminal_writeback_event(session_factory)
+
+    detail = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
+    listed = client.get("/api/v1/events", headers=_hdr())
+    assert detail.status_code == 200
+    assert listed.status_code == 200
+    detail_data = detail.json()
+    row = next(item for item in listed.json()["items"] if item["event_id"] == event_id)
+    assert row["writeback_required"] is True
+    assert row["writeback_readiness"] == detail_data["writeback_readiness"]
+    assert row["writeback_overall_status"] == detail_data["writeback_overall_status"]
+    assert row["pending_writeback_count"] == detail_data["pending_writeback_count"]
+    assert row["writeback_readiness"] == WritebackReadiness.READY.value
+    assert row["writeback_overall_status"] == WritebackStatus.CONFIRMED.value
+
+
+async def _seed_ready_plus_source_unresolved_applicable_event(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> str:
+    """Two applicable required actions: READY and SOURCE_UNRESOLVED.
+
+    Lexicographic SQL MIN('ready','source_unresolved') == 'ready' because
+    'r' < 's'. Semantic envelope ranking must surface SOURCE_UNRESOLVED.
+    """
+    import hashlib
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from app.models.action import TERMINAL_DISPOSITION_TOOL
+    from app.models.enums import SourceDisposition
+
+    sfx = uuid4().hex[:8]
+    event_id = f"evt-{sfx}"
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="data_exfiltration",
+                    title="lexicographic min trap",
+                    description="ready + source_unresolved applicable pair",
+                    status=EventStatus.REPORTING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
+                    risk_score=80,
+                    entities={},
+                    creation_source_ref={
+                        "source_kind": "incident",
+                        "source_product": "mock_xdr",
+                        "source_tenant_id": "t1",
+                        "connector_id": f"conn-{sfx}",
+                        "source_object_id": f"INC-{sfx}",
+                        "raw_payload_hash": hashlib.sha256(b"lex").hexdigest(),
+                        "ingested_at": now.isoformat(),
+                    },
+                    source_reference_snapshots=[],
+                    disposition_policy=DispositionPolicy.REQUIRED.value,
+                    source_type="mock_xdr",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.Action(
+                    action_id=f"act-ready-{sfx}",
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-ready-{sfx}",
+                    action_category="response",
+                    action_name=TERMINAL_DISPOSITION_TOOL,
+                    tool_name=TERMINAL_DISPOSITION_TOOL,
+                    action_level="l1",
+                    execution_owner="xdr_managed",
+                    status=ActionStatus.SUCCESS.value,
+                    writeback_required=True,
+                    writeback_applicable=True,
+                    writeback_readiness=WritebackReadiness.READY.value,
+                    writeback_status=WritebackStatus.CONFIRMED.value,
+                    approved_terminal_dispositions=[SourceDisposition.CONTAINED.value],
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=f"act-unresolved-{sfx}",
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-unresolved-{sfx}",
+                    action_category="response",
+                    action_name=TERMINAL_DISPOSITION_TOOL,
+                    tool_name=TERMINAL_DISPOSITION_TOOL,
+                    action_level="l1",
+                    execution_owner="xdr_managed",
+                    status=ActionStatus.SUCCESS.value,
+                    writeback_required=True,
+                    writeback_applicable=True,
+                    writeback_readiness=WritebackReadiness.SOURCE_UNRESOLVED.value,
+                )
+            )
+    return event_id
+
+
+@pytest.mark.asyncio
+async def test_get_event_writeback_readiness_uses_semantic_priority_not_sql_min(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """SOURCE_UNRESOLVED must outrank READY; SQL MIN would pick READY."""
+    event_id = await _seed_ready_plus_source_unresolved_applicable_event(session_factory)
+
+    resp = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["writeback_required"] is True
+    assert data["writeback_readiness"] == WritebackReadiness.SOURCE_UNRESOLVED.value
+
+
 async def _seed_multi_revision_writeback_event(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -1589,6 +1880,48 @@ async def test_force_close_bypasses_side_effect_gate(
     data = resp.json()
     assert data["status"] == "closed"
     assert data["external_unsynced"] is True
+
+
+@pytest.mark.asyncio
+async def test_close_reporting_spawns_memory_after_close(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    http_memory_after_close: AsyncMock,
+) -> None:
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        outbox_status=WritebackStatus.CONFIRMED,
+    )
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "reporting close memory"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 200, resp.text
+    http_memory_after_close.assert_awaited_once()
+    closed = http_memory_after_close.await_args.args[0]
+    assert closed.status is EventStatus.CLOSED
+    assert closed.external_unsynced is False
+
+
+@pytest.mark.asyncio
+async def test_force_close_does_not_spawn_memory(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    http_memory_after_close: AsyncMock,
+) -> None:
+    event_id = await _seed_reporting_required_with_running_side_effect(session_factory)
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "admin force", "force_local_close": True},
+        headers=_hdr("admin"),
+    )
+    assert resp.status_code == 200
+    http_memory_after_close.assert_not_awaited()
 
 
 @pytest.mark.asyncio
