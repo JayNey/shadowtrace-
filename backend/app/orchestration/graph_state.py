@@ -60,8 +60,12 @@ class InvestigationState(TypedDict, total=False):
     writeback_lookup_count: int
     writeback_retry_count: int
     verify_has_partial_success: bool
-    # When False and no verify_failed_actions → MANUAL_RESOLUTION
+    # True when execute_plan finished with no FAILED actions (or had nothing
+    # to do). In-flight EXECUTING/UNKNOWN is tracked separately so Verify
+    # can WAIT instead of treating "not yet done" as execution_failed_unverified.
     execution_ok: bool
+    execution_inflight: bool
+    execution_inflight_action_ids: list[str] | None
     include_rag: bool
     evidence_output: dict[str, Any] | None
     graph_output: dict[str, Any] | None

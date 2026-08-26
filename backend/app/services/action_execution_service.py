@@ -58,13 +58,12 @@ from app.tools.executor import ToolExecutor, ensure_executor_job_store
 logger = logging.getLogger(__name__)
 
 _EXECUTION_OPERATOR = "ActionExecutionService"
-_ACTIVE_OUTBOX_DELIVERY = frozenset(
+_UNDELIVERED_OUTBOX_DELIVERY = frozenset(
     {
         OutboxDeliveryStatus.READY.value,
         OutboxDeliveryStatus.LEASED.value,
         OutboxDeliveryStatus.WAITING_RETRY.value,
         OutboxDeliveryStatus.PAUSED.value,
-        OutboxDeliveryStatus.DELIVERED.value,
     }
 )
 _RECLAIMABLE_ACTION_CATEGORIES = (
@@ -79,7 +78,20 @@ async def _has_active_outbox(session: AsyncSession, action_id: str) -> bool:
         .select_from(orm.DispositionOutbox)
         .where(
             orm.DispositionOutbox.action_id == action_id,
-            orm.DispositionOutbox.delivery_status.in_(tuple(_ACTIVE_OUTBOX_DELIVERY)),
+            orm.DispositionOutbox.delivery_status.in_(tuple(_UNDELIVERED_OUTBOX_DELIVERY)),
+        )
+    )
+    return bool(count)
+
+
+async def _has_delivered_accepted_outbox(session: AsyncSession, action_id: str) -> bool:
+    count = await session.scalar(
+        select(func.count())
+        .select_from(orm.DispositionOutbox)
+        .where(
+            orm.DispositionOutbox.action_id == action_id,
+            orm.DispositionOutbox.delivery_status == OutboxDeliveryStatus.DELIVERED.value,
+            orm.DispositionOutbox.latest_writeback_status == WritebackStatus.ACCEPTED.value,
         )
     )
     return bool(count)
@@ -948,11 +960,21 @@ class ActionExecutionService:
         event_id: str | None = None,
     ) -> int:
         """Reclaim lease-expired execution jobs and stale EXECUTING actions (ISSUE-173)."""
-        return await reconcile_stale_executions_for_event(
+        reclaimed = await reconcile_stale_executions_for_event(
             self._session_factory,
             event_id=event_id,
             limit=limit,
         )
+        looked_up = 0
+        if getattr(self, "_sync", None) is not None:
+            try:
+                looked_up = await self._sync.reconcile_pending_entity_effects(limit=limit)
+            except Exception:
+                logger.exception(
+                    "delivered ACCEPTED lookup during stale reclaim failed event_id=%s",
+                    event_id,
+                )
+        return reclaimed + looked_up
 
     async def _reclaim_stale_job_row(
         self,
@@ -1144,6 +1166,8 @@ async def _reclaim_stale_job_row(
     current = ExecutionJobStatus(job_row.status)
     if current not in {ExecutionJobStatus.QUEUED, ExecutionJobStatus.RUNNING}:
         return False
+    if await _has_delivered_accepted_outbox(session, job_row.action_id):
+        return False
     if await _has_active_outbox(session, job_row.action_id):
         return False
 
@@ -1224,6 +1248,16 @@ async def _reclaim_stale_executing_action(
                 action_row.executed_at = now
                 action_row.updated_at = now
                 return True
+            if job_status is ExecutionJobStatus.UNKNOWN:
+                validate_action_status_transition(
+                    ActionCategory(action_row.action_category),
+                    ActionStatus.EXECUTING,
+                    ActionStatus.UNKNOWN,
+                )
+                action_row.status = ActionStatus.UNKNOWN.value
+                action_row.executed_at = now
+                action_row.updated_at = now
+                return True
             if (
                 job_row.lease_expires_at is not None
                 and job_row.lease_expires_at >= now
@@ -1231,6 +1265,8 @@ async def _reclaim_stale_executing_action(
             ):
                 return False
 
+    if await _has_delivered_accepted_outbox(session, action_row.action_id):
+        return False
     if await _has_active_outbox(session, action_row.action_id):
         return False
 

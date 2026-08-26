@@ -200,6 +200,9 @@ _EXECUTED_STATUSES: frozenset[ActionStatus] = frozenset(
 # and need_manual=True.  Within the threshold, the Action is skipped with
 # detail "pending_execution" so the caller can wait for it to complete.
 _EXECUTING_TIMEOUT_SECONDS: int = 300
+# ACCEPTED writebacks stay EXECUTING until CONFIRMED; do not reuse the
+# zombie budget for healthy provider-accepted work.
+_ACCEPTED_WAIT_SECONDS: int = 1800
 
 _VERIFY_OPERATOR = "VerifyAgent"
 
@@ -352,6 +355,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             event_id=event_id,
             actions=actions,
             jobs_map=jobs_map,
+            outbox_map=outbox_map,
         )
         # EventDispositionService.after_effect_resolution_ready reads
         # verification_result from EventContext.  Persist phase-1 outcome
@@ -500,6 +504,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         event_id: str,
         actions: list[Action],
         jobs_map: dict[str, ActionExecutionJob],
+        outbox_map: dict[str, list[Any]] | None = None,
     ) -> tuple[
         list[VerificationActionResult],
         set[str],
@@ -511,6 +516,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         failed_action_ids: set[str] = set()
         need_replan = False
         need_manual = False
+        outboxes = outbox_map or {}
 
         for action in actions:
             # POST_VERIFY deferred → skipped, never in failed_actions.
@@ -528,7 +534,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             # EXECUTING may mean: (a) in progress → wait; (b) stuck/zombie → escalate.
             if action.status == ActionStatus.EXECUTING:
                 job = jobs_map.get(action.action_id)
-                timeout_s = _EXECUTING_TIMEOUT_SECONDS
+                timeout_s = (
+                    _ACCEPTED_WAIT_SECONDS
+                    if _action_has_accepted_writeback(action, outboxes)
+                    else _EXECUTING_TIMEOUT_SECONDS
+                )
                 now_utc = datetime.now(UTC)
                 if (
                     job is not None
@@ -2179,6 +2189,20 @@ def _plan_actions(response_plan: Any) -> list[Action]:
         raw = response_plan.get("actions", [])
         return [Action.model_validate(a) if isinstance(a, dict) else a for a in raw]
     return []
+
+
+def _action_has_accepted_writeback(
+    action: Action,
+    outbox_map: dict[str, list[Any]],
+) -> bool:
+    """True when the action or its delivered outbox is provider-ACCEPTED."""
+    if action.writeback_status is WritebackStatus.ACCEPTED:
+        return True
+    for record in outbox_map.get(action.action_id, []):
+        raw = getattr(record, "latest_writeback_status", None)
+        if raw is WritebackStatus.ACCEPTED or raw == WritebackStatus.ACCEPTED.value:
+            return True
+    return False
 
 
 def _make_execution_failed_non_verifiable_result(

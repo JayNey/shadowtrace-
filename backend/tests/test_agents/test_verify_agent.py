@@ -4454,6 +4454,45 @@ class TestIssue060ReviewNewTests:
         assert result.need_manual_resolution is True
         assert result.need_action_replan is False
 
+    async def test_accepted_writeback_does_not_use_zombie_timeout(self):
+        """ACCEPTED writebacks keep pending_execution past the 300s zombie budget."""
+        from datetime import timedelta
+        from types import SimpleNamespace
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,
+            execution_job_id="job-accepted-1",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.ACCEPTED,
+        )
+        stale_start = datetime.now(UTC) - timedelta(seconds=400)
+        job = _job(
+            job_id="job-accepted-1",
+            action_id=action.action_id,
+            started_at=stale_start,
+        )
+        outbox = SimpleNamespace(latest_writeback_status=WritebackStatus.ACCEPTED.value)
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {action.action_id: job}, {action.action_id: [outbox]})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.SKIPPED
+        assert r.detail == "pending_execution"
+        assert result.need_manual_resolution is False
+
     async def test_executing_action_within_timeout_skipped(self):
         """SF-3: EXECUTING action with started_at < 300s ago → SKIPPED
         (still within timeout window)."""

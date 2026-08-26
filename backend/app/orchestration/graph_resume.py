@@ -24,6 +24,7 @@ from app.core.errors import ValidationError
 from app.db import models as orm
 from app.models.agent_io import EvidenceOutput, RiskAssessment
 from app.models.enums import (
+    ActionStatus,
     DispositionIntentKind,
     DispositionPolicy,
     EventStatus,
@@ -92,6 +93,49 @@ def _only_stale_verify_degraded(degraded_flags: list[Any]) -> bool:
     return bool(degraded_flags) and all(
         _degraded_flag_name(flag) == "verify_degraded" for flag in degraded_flags
     )
+
+
+_IN_FLIGHT_ACTION_STATUSES = frozenset(
+    {
+        ActionStatus.EXECUTING.value,
+        ActionStatus.UNKNOWN.value,
+    }
+)
+
+
+async def _still_inflight_action_ids(
+    session_factory: async_sessionmaker[AsyncSession],
+    action_ids: list[str],
+) -> list[str]:
+    """Return action_ids that are still EXECUTING/UNKNOWN (durable WAIT resume)."""
+    if not action_ids:
+        return []
+    async with session_factory() as session:
+        result = await session.execute(
+            select(orm.Action.action_id, orm.Action.status).where(
+                orm.Action.action_id.in_(action_ids)
+            )
+        )
+        return [
+            str(action_id)
+            for action_id, status in result.all()
+            if str(status) in _IN_FLIGHT_ACTION_STATUSES
+        ]
+
+
+async def _event_inflight_action_ids(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> list[str]:
+    """EXECUTING/UNKNOWN action ids for an event (in-flight WAIT resume)."""
+    async with session_factory() as session:
+        result = await session.execute(
+            select(orm.Action.action_id, orm.Action.status).where(
+                orm.Action.event_id == event_id,
+                orm.Action.status.in_(tuple(_IN_FLIGHT_ACTION_STATUSES)),
+            )
+        )
+        return [str(action_id) for action_id, _status in result.all()]
 
 
 async def _active_outbox_writeback_rows(
@@ -199,6 +243,17 @@ async def _reconcile_verify_resume_patch(
         values.get("verify_recoverable_writeback_ids") or failed_writebacks
     )
     pending_actions = list(values.get("verify_pending_writeback_action_ids") or [])
+    if not pending_actions:
+        pending_actions = list(values.get("execution_inflight_action_ids") or [])
+    had_pending = bool(pending_actions) or bool(values.get("execution_inflight"))
+    if pending_actions:
+        still_pending = await _still_inflight_action_ids(session_factory, pending_actions)
+        if still_pending != pending_actions:
+            patch["verify_pending_writeback_action_ids"] = still_pending
+        pending_actions = still_pending
+    elif values.get("execution_inflight"):
+        pending_actions = await _event_inflight_action_ids(session_factory, event_id)
+        patch["verify_pending_writeback_action_ids"] = pending_actions
     if not (need_writeback or need_manual or values.get("halted")):
         return patch
 
@@ -209,13 +264,22 @@ async def _reconcile_verify_resume_patch(
     writebacks_resolved = (
         not recoverable_writebacks and not pending_actions and _all_writebacks_resolved(wb_statuses)
     )
+    inflight_wait_resolved = (
+        had_pending
+        and need_writeback
+        and not recoverable_writebacks
+        and not pending_actions
+        and not failed_writebacks
+    )
     disposition_policy = values.get("disposition_policy")
 
-    if need_writeback and writebacks_resolved:
+    if need_writeback and (writebacks_resolved or inflight_wait_resolved):
         patch["verify_need_writeback_recovery"] = False
         patch["verify_failed_writebacks"] = []
         patch["verify_recoverable_writeback_ids"] = []
         patch["verify_pending_writeback_action_ids"] = []
+        patch["execution_inflight"] = False
+        patch["execution_inflight_action_ids"] = []
         patch["execution_substate"] = ExecutionSubstate.NONE.value
 
     if (
@@ -398,19 +462,20 @@ async def prepare_graph_resume_state(
             )
         return True
 
-    if status_value != EventStatus.EXECUTING_RESPONSE.value:
-        if status_value == EventStatus.WAITING_APPROVAL.value:
-            from app.orchestration.graph_resume_observability import GraphResumeFailedError
+    if status_value == EventStatus.WAITING_APPROVAL.value:
+        from app.orchestration.graph_resume_observability import GraphResumeDeferredError
 
-            logger.warning(
-                "prepare_graph_resume: still WAITING_APPROVAL event=%s; refusing resume",
-                event_id,
-            )
-            raise GraphResumeFailedError(
-                "cannot resume while event is still WAITING_APPROVAL",
-                event_id=event_id,
-                error_type="waiting_approval",
-            )
+        logger.warning(
+            "prepare_graph_resume: still WAITING_APPROVAL event=%s; deferring resume",
+            event_id,
+        )
+        raise GraphResumeDeferredError(
+            "cannot resume while event is still WAITING_APPROVAL",
+            event_id=event_id,
+            error_type="waiting_approval",
+        )
+
+    if status_value != EventStatus.EXECUTING_RESPONSE.value:
         logger.warning(
             "prepare_graph_resume: unexpected DB status=%s event=%s; skipping checkpoint patch",
             status_value,
@@ -654,7 +719,9 @@ async def resume_investigation_from_checkpoint(
         return
 
     if status_value == EventStatus.WAITING_APPROVAL.value:
-        raise GraphResumeFailedError(
+        from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+
+        raise GraphResumeDeferredError(
             "cannot resume while event is still WAITING_APPROVAL",
             event_id=event_id,
             error_type="waiting_approval",
@@ -664,10 +731,17 @@ async def resume_investigation_from_checkpoint(
         if status_value in _GRAPH_NEVER_STARTED_STATUSES:
             await _delegate_execute_investigation(session_factory, event_id)
             return
+        from app.orchestration.graph_invocation import persist_nested_graph_wakeup
+
+        await persist_nested_graph_wakeup(
+            event_id,
+            "graph_unavailable_operator_replay",
+        )
         raise GraphResumeFailedError(
-            f"investigation graph unavailable for status {status_value}",
+            f"investigation graph unavailable for status {status_value}; "
+            "operator replay after graph is wired",
             event_id=event_id,
-            error_type="graph_unavailable",
+            error_type="graph_unavailable_operator_replay",
         )
 
     config: RunnableConfig = {"configurable": {"thread_id": event_id}}

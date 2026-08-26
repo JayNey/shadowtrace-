@@ -20,6 +20,8 @@ from app.core.redis_client import RedisClient
 from app.db.session_provider import get_session_provider, reset_session_provider
 from app.orchestration.graph_invocation import (
     NestedGraphResumeError,
+    clear_nested_resume_hooks,
+    set_nested_resume_durability_writer,
     set_nested_resume_failure_handler,
     set_nested_resume_runner,
 )
@@ -421,8 +423,6 @@ DetectionPromotionDep = Annotated[Any, Depends(get_detection_promotion_service)]
 def _get_adapter_registry() -> Any:
     global _adapter_registry
     if _adapter_registry is None:
-        import os
-
         from app.adapters.registry import DispositionAdapterRegistry
         from app.core.config import is_mock_disposition_mode
 
@@ -433,8 +433,8 @@ def _get_adapter_registry() -> Any:
 
             adapter = MockXDRDispositionAdapter(
                 base_url=settings.disposition_base_url or "http://mock-xdr",
-                read_token=os.environ.get("MOCK_XDR_READ_TOKEN", "mock-read-token"),
-                write_token=os.environ.get("MOCK_XDR_WRITE_TOKEN", "mock-write-token"),
+                read_token=settings.mock_xdr_read_token,
+                write_token=settings.mock_xdr_write_token,
             )
             registry.register("mock_xdr", adapter)
         else:
@@ -510,6 +510,7 @@ async def get_workflow_runtime() -> Any:
 
 async def _resume_investigation(event_id: str) -> None:
     """Resume graph orchestration after approval or writeback (ISSUE-059 / #613)."""
+    ensure_nested_resume_runner()
     settings = get_settings()
     mode = (settings.orchestration_mode or "graph").strip().lower()
     if mode != "graph":
@@ -556,14 +557,16 @@ async def _on_nested_resume_flush_failure(
     )
 
 
-set_nested_resume_runner(_resume_investigation)
-set_nested_resume_failure_handler(_on_nested_resume_flush_failure)
+async def _persist_nested_graph_wakeup(event_id: str, reason: str) -> None:
+    service = await get_manual_resolution_service()
+    await service.enqueue_nested_wakeup(event_id, reason=reason)
 
 
 def ensure_nested_resume_runner() -> None:
     """Idempotently install the production nested-resume flusher (API + workers)."""
     set_nested_resume_runner(_resume_investigation)
     set_nested_resume_failure_handler(_on_nested_resume_flush_failure)
+    set_nested_resume_durability_writer(_persist_nested_graph_wakeup)
 
 
 async def get_manual_resolution_service() -> Any:
@@ -1217,6 +1220,7 @@ def get_event_lease() -> Any:
 async def get_super_agent() -> Any:
     """Return SuperAgent for graph-mode orchestration (ISSUE-054)."""
     global _super_agent
+    ensure_nested_resume_runner()
     if _super_agent is None:
         from app.agents.planner_agent import PlannerAgent
         from app.agents.super_agent import SuperAgent
@@ -1394,4 +1398,4 @@ def reset_deps() -> None:
     _execution_job_query = None
     _agent_artifact_service = None
     _content_projection_service = None
-    ensure_nested_resume_runner()
+    clear_nested_resume_hooks()

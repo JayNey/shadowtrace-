@@ -356,3 +356,24 @@ async def test_renew_success_does_not_trigger() -> None:
             assert not renewal_failed.is_set()
         finally:
             await _cancel_renew_task(task)
+
+
+@pytest.mark.asyncio
+async def test_start_renewal_reuses_acquire_ttl() -> None:
+    fake_redis = _FakeRedis()
+    lease = _lease_with_fake(fake_redis)
+    await lease.acquire("evt-custom-ttl", _OWNER, ttl_s=120)
+    async with _fast_renew_loop():
+        task = await lease.start_renewal("evt-custom-ttl", _OWNER)
+        try:
+            await _wait_until(lambda: len(fake_redis.expire_calls) >= 1)
+            assert fake_redis.expire_calls[0][1] == 120
+        finally:
+            await _cancel_renew_task(task)
+
+
+def test_classify_lease_lua_script_uses_expire_vs_del() -> None:
+    from app.orchestration.lease import classify_lease_lua_script
+
+    assert classify_lease_lua_script('redis.call("EXPIRE", KEYS[1], ARGV[2])') == "renew"
+    assert classify_lease_lua_script('redis.call("DEL", KEYS[1])') == "release"

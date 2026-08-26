@@ -219,3 +219,80 @@ def test_resolve_adapter_blank_source_product_raises() -> None:
     )
     with pytest.raises(AdapterNotFoundError, match="product missing"):
         svc._resolve_adapter(outbox)
+
+
+def test_refuse_mock_missing_product_leaves_ready_not_dead_lettered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.errors import AdapterNotFoundError
+
+    monkeypatch.setattr(
+        "app.services.disposition_sync_service.is_mock_disposition_mode",
+        lambda _mode: True,
+    )
+    svc = _service(SimpleNamespace(name="mock_xdr"))
+    outbox = SimpleNamespace(
+        outbox_id="obx-ready-missing",
+        delivery_status=OutboxDeliveryStatus.READY.value,
+        last_error_code=None,
+    )
+    handled = svc._refuse_mock_missing_source_product(
+        outbox,
+        AdapterNotFoundError("disposition adapter product missing on outbox"),
+    )
+    assert handled is True
+    assert outbox.delivery_status == OutboxDeliveryStatus.READY.value
+
+
+def test_refuse_mock_missing_product_pauses_leased(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.errors import AdapterNotFoundError
+
+    monkeypatch.setattr(
+        "app.services.disposition_sync_service.is_mock_disposition_mode",
+        lambda _mode: True,
+    )
+    svc = _service(SimpleNamespace(name="mock_xdr"))
+    outbox = SimpleNamespace(
+        outbox_id="obx-leased-missing",
+        delivery_status=OutboxDeliveryStatus.LEASED.value,
+        last_error_code=None,
+        last_error_detail=None,
+        locked_by="worker-1",
+        locked_at=None,
+        lease_expires_at=None,
+        next_retry_at=None,
+        updated_at=None,
+        latest_writeback_status=None,
+    )
+    handled = svc._refuse_mock_missing_source_product(
+        outbox,
+        AdapterNotFoundError("disposition adapter product missing on outbox"),
+    )
+    assert handled is True
+    assert outbox.delivery_status == OutboxDeliveryStatus.PAUSED.value
+    assert outbox.last_error_code == "missing_source_product"
+
+
+def test_refuse_missing_product_live_mode_does_not_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.errors import AdapterNotFoundError
+
+    monkeypatch.setattr(
+        "app.services.disposition_sync_service.is_mock_disposition_mode",
+        lambda _mode: False,
+    )
+    svc = _service(SimpleNamespace(name="generic_http_disposition"))
+    outbox = SimpleNamespace(
+        outbox_id="obx-live-missing",
+        delivery_status=OutboxDeliveryStatus.READY.value,
+    )
+    handled = svc._refuse_mock_missing_source_product(
+        outbox,
+        AdapterNotFoundError("disposition adapter product missing on outbox"),
+    )
+    assert handled is False
+    assert outbox.delivery_status == OutboxDeliveryStatus.READY.value
+

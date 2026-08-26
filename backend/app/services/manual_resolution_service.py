@@ -22,9 +22,12 @@ from app.models.enums import EventStatus, ExecutionSubstate, GraphResumeIntentSt
 from app.models.graph_resume_intent import (
     ACTIVE_GRAPH_RESUME_STATUSES,
     INTENT_KIND_MANUAL_RESOLUTION_RESUME,
+    INTENT_KIND_NESTED_GRAPH_WAKEUP,
     INTENT_VERSION_ISSUE277_V1,
     MANUAL_HOLD_JOURNAL_FIELD,
+    NESTED_WAKEUP_HOLD_GENERATION,
     RESOLUTION_SOURCE_ACTION_UNKNOWN,
+    RESOLUTION_SOURCE_NESTED_WAKEUP,
     RESOLUTION_SOURCE_WRITEBACK_AUTO,
     RESOLUTION_SOURCE_WRITEBACK_MANUAL,
     SUBJECT_KIND_ACTION,
@@ -237,6 +240,103 @@ class ManualResolutionService:
                 hold_generation=hold_generation,
             )
 
+    async def enqueue_nested_wakeup(
+        self,
+        event_id: str,
+        *,
+        reason: str = "nested_wakeup",
+    ) -> GraphResumeIntentRecord | None:
+        """Durable wakeup that does not require a MANUAL_RESOLUTION hold.
+
+        Uses hold_generation=0 so it cannot collide with real manual holds
+        (those start at 1). One active nested wakeup per event is enough.
+        """
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    event = await session.get(
+                        orm.SecurityEvent,
+                        event_id,
+                        with_for_update=True,
+                    )
+                    if event is None:
+                        logger.error(
+                            "nested wakeup skipped: event missing event=%s",
+                            event_id,
+                        )
+                        return None
+                    payload_hash = resolution_payload_sha256(
+                        event_id=event_id,
+                        hold_generation=NESTED_WAKEUP_HOLD_GENERATION,
+                        resolution_source=RESOLUTION_SOURCE_NESTED_WAKEUP,
+                        subject_kind=SUBJECT_KIND_EVENT,
+                        subject_id=event_id,
+                        resolution=reason,
+                    )
+                    active = await session.scalar(
+                        select(orm.GraphResumeIntent)
+                        .where(
+                            orm.GraphResumeIntent.event_id == event_id,
+                            orm.GraphResumeIntent.hold_generation
+                            == NESTED_WAKEUP_HOLD_GENERATION,
+                            orm.GraphResumeIntent.status.in_(
+                                [status.value for status in ACTIVE_GRAPH_RESUME_STATUSES]
+                            ),
+                        )
+                        .with_for_update()
+                    )
+                    if active is not None:
+                        return self._record_from_row(active)
+                    row = orm.GraphResumeIntent(
+                        intent_id=new_graph_resume_intent_id(),
+                        event_id=event_id,
+                        intent_kind=INTENT_KIND_NESTED_GRAPH_WAKEUP,
+                        intent_version=INTENT_VERSION_ISSUE277_V1,
+                        status=GraphResumeIntentStatus.PENDING.value,
+                        revision=1,
+                        attempt=0,
+                        hold_generation=NESTED_WAKEUP_HOLD_GENERATION,
+                        checkpoint_id=event_id,
+                        operation_id=None,
+                        resolution_source=RESOLUTION_SOURCE_NESTED_WAKEUP,
+                        subject_kind=SUBJECT_KIND_EVENT,
+                        subject_id=event_id,
+                        resolution=reason,
+                        principal="NestedGraphResume",
+                        comment=reason,
+                        evidence_ref=None,
+                        payload_sha256=payload_hash,
+                    )
+                    session.add(row)
+                    await session.flush()
+                    record = self._record_from_row(row)
+            self.schedule_dispatch(
+                event_id=event_id,
+                intent_id=record.intent_id,
+                trigger="nested_wakeup",
+            )
+            return record
+        except IntegrityError:
+            logger.info(
+                "nested graph wakeup insert raced event=%s",
+                event_id,
+            )
+            try:
+                return await self._lookup_resume_intent_after_race(
+                    event_id,
+                    operation_id=None,
+                    hold_generation=NESTED_WAKEUP_HOLD_GENERATION,
+                )
+            except ValidationError:
+                logger.exception(
+                    "nested graph wakeup race lookup failed event=%s",
+                    event_id,
+                )
+                return None
+        except Exception:
+            logger.exception("failed to enqueue nested graph wakeup event=%s", event_id)
+            return None
+
     async def create_or_replay_resume_intent_in_session(
         self,
         session: AsyncSession,
@@ -284,7 +384,7 @@ class ManualResolutionService:
                 "manual hold metadata missing",
                 details={"event_id": event_id},
             )
-        generation = hold_generation or hold.generation
+        generation = hold.generation if hold_generation is None else hold_generation
         if generation != hold.generation:
             raise IdempotencyKeyReuseError(
                 "hold generation mismatch for resume intent",
@@ -427,7 +527,11 @@ class ManualResolutionService:
                 if by_op is not None:
                     return self._record_from_row(by_op)
             hold = await self._read_manual_hold(session, event_id)
-            generation = hold_generation or (hold.generation if hold else None)
+            generation = (
+                hold_generation
+                if hold_generation is not None
+                else (hold.generation if hold else None)
+            )
             if generation is None:
                 raise ValidationError(
                     "failed to locate graph resume intent after race",
@@ -803,40 +907,54 @@ class ManualResolutionService:
                     return False
                 if GraphResumeIntentStatus(row.status) is not GraphResumeIntentStatus.CLAIMED:
                     return False
-                hold = await self._read_manual_hold(session, row.event_id)
-                if hold is None or hold.generation != int(row.hold_generation):
+                kind = str(row.intent_kind)
+                if kind == INTENT_KIND_NESTED_GRAPH_WAKEUP:
                     validate_graph_resume_transition(
                         GraphResumeIntentStatus.CLAIMED,
-                        GraphResumeIntentStatus.SKIPPED,
+                        GraphResumeIntentStatus.STARTED,
                     )
-                    row.status = GraphResumeIntentStatus.SKIPPED.value
-                    row.skip_reason = "stale_hold_generation"
-                    row.claim_owner = None
-                    row.claim_expires_at = None
-                    return False
-                substate = await self._read_execution_substate(session, row.event_id)
-                if substate is not ExecutionSubstate.MANUAL_RESOLUTION:
+                    row.status = GraphResumeIntentStatus.STARTED.value
+                    row.updated_at = datetime.now(UTC)
+                    event_id = row.event_id
+                else:
+                    hold = await self._read_manual_hold(session, row.event_id)
+                    if hold is None or hold.generation != int(row.hold_generation):
+                        validate_graph_resume_transition(
+                            GraphResumeIntentStatus.CLAIMED,
+                            GraphResumeIntentStatus.SKIPPED,
+                        )
+                        row.status = GraphResumeIntentStatus.SKIPPED.value
+                        row.skip_reason = "stale_hold_generation"
+                        row.claim_owner = None
+                        row.claim_expires_at = None
+                        return False
+                    substate = await self._read_execution_substate(session, row.event_id)
+                    if substate is not ExecutionSubstate.MANUAL_RESOLUTION:
+                        validate_graph_resume_transition(
+                            GraphResumeIntentStatus.CLAIMED,
+                            GraphResumeIntentStatus.SKIPPED,
+                        )
+                        row.status = GraphResumeIntentStatus.SKIPPED.value
+                        row.skip_reason = "hold_already_cleared"
+                        row.claim_owner = None
+                        row.claim_expires_at = None
+                        return False
                     validate_graph_resume_transition(
                         GraphResumeIntentStatus.CLAIMED,
-                        GraphResumeIntentStatus.SKIPPED,
+                        GraphResumeIntentStatus.STARTED,
                     )
-                    row.status = GraphResumeIntentStatus.SKIPPED.value
-                    row.skip_reason = "hold_already_cleared"
-                    row.claim_owner = None
-                    row.claim_expires_at = None
-                    return False
-                validate_graph_resume_transition(
-                    GraphResumeIntentStatus.CLAIMED,
-                    GraphResumeIntentStatus.STARTED,
-                )
-                row.status = GraphResumeIntentStatus.STARTED.value
-                row.updated_at = datetime.now(UTC)
-                event_id = row.event_id
-                generation = int(row.hold_generation)
+                    row.status = GraphResumeIntentStatus.STARTED.value
+                    row.updated_at = datetime.now(UTC)
+                    event_id = row.event_id
+                    generation = int(row.hold_generation)
 
         try:
             if self._resume_runner is None:
                 raise RuntimeError("resume_runner is not bound")
+            if kind == INTENT_KIND_NESTED_GRAPH_WAKEUP:
+                await self._resume_runner(event_id)
+                await self._mark_terminal(intent_id)
+                return True
             # Keep MANUAL_RESOLUTION until resume succeeds so a crash mid-run
             # remains reclaimable (clearing first would fence as hold_already_cleared).
             await self._resume_runner(event_id)
@@ -1032,6 +1150,7 @@ class ManualResolutionService:
 __all__ = [
     "ManualResolutionService",
     "RESOLUTION_SOURCE_ACTION_UNKNOWN",
+    "RESOLUTION_SOURCE_NESTED_WAKEUP",
     "RESOLUTION_SOURCE_WRITEBACK_AUTO",
     "RESOLUTION_SOURCE_WRITEBACK_MANUAL",
     "SUBJECT_KIND_ACTION",

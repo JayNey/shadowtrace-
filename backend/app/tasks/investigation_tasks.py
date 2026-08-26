@@ -389,7 +389,10 @@ async def execute_redelivery_resume(
         get_super_agent,
         get_workflow_runtime,
     )
-    from app.orchestration.graph_resume_observability import execute_graph_resume_with_retry
+    from app.orchestration.graph_resume_observability import (
+        GraphResumeDeferredError,
+        execute_graph_resume_with_retry,
+    )
 
     if analysis_only or event_status not in REDELIVERY_RESUME_STATUSES:
         if analysis_only:
@@ -405,13 +408,16 @@ async def execute_redelivery_resume(
             lease_acquired=lease_acquired,
         )
 
-    await execute_graph_resume_with_retry(
-        event_id,
-        session_factory=_get_session_factory(),
-        get_super_agent=get_super_agent,
-        get_workflow_runtime=get_workflow_runtime,
-        degraded_flags=_get_degraded_flags(),
-    )
+    try:
+        await execute_graph_resume_with_retry(
+            event_id,
+            session_factory=_get_session_factory(),
+            get_super_agent=get_super_agent,
+            get_workflow_runtime=get_workflow_runtime,
+            degraded_flags=_get_degraded_flags(),
+        )
+    except GraphResumeDeferredError:
+        return {"status": "deferred", "event_id": event_id}
     return {"status": "completed", "event_id": event_id}
 
 

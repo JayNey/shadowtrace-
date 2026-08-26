@@ -943,8 +943,18 @@ class ApprovalEngine:
             try:
                 await self._resume(event_id)
             except Exception as exc:
-                from app.orchestration.graph_resume_observability import GraphResumeFailedError
+                from app.orchestration.graph_resume_observability import (
+                    GraphResumeDeferredError,
+                    GraphResumeFailedError,
+                )
 
+                if isinstance(exc, GraphResumeDeferredError):
+                    logger.warning(
+                        "resume_investigation hook deferred event=%s error_type=%s",
+                        event_id,
+                        exc.error_type,
+                    )
+                    return "deferred"
                 if isinstance(exc, GraphResumeFailedError):
                     logger.warning(
                         "resume_investigation hook failed event=%s error_type=%s",

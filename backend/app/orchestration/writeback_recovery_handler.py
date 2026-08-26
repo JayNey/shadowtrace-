@@ -985,6 +985,12 @@ async def writeback_recovery_graph_node(
                 event_id,
             )
             return _pending_action_wait_patch(pending_actions=pending_actions)
+        if need_recovery and state.get("execution_inflight"):
+            logger.info(
+                "writeback_recovery_node: in-flight execute wait without outbox ids event=%s",
+                event_id,
+            )
+            return _pending_action_wait_patch(pending_actions=[])
         if need_recovery:
             return _recovery_invariant_failure_patch(event_id)
         logger.debug("writeback_recovery_node: no recovery targets for event=%s", event_id)

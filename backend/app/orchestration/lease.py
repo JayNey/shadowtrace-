@@ -56,10 +56,20 @@ return 0
 
 
 def classify_lease_lua_script(source: str) -> str:
-    """Return ``renew`` or ``release`` for a registered EventLease Lua script."""
-    if "shadowtrace-lease-renew" in source:
+    """Return ``renew`` or ``release`` for a registered EventLease Lua script.
+
+    Prefer identity against the module constants so comment edits cannot
+    silently swap branches in fake Redis. Fall back to EXPIRE vs DEL.
+    """
+    if source is _RENEW_SCRIPT or source == _RENEW_SCRIPT:
         return "renew"
-    if "shadowtrace-lease-release" in source:
+    if source is _RELEASE_SCRIPT or source == _RELEASE_SCRIPT:
+        return "release"
+    has_expire = 'redis.call("EXPIRE"' in source or "redis.call('EXPIRE'" in source
+    has_del = 'redis.call("DEL"' in source or "redis.call('DEL'" in source
+    if has_expire and not has_del:
+        return "renew"
+    if has_del and not has_expire:
         return "release"
     raise ValueError("unknown lease lua script")
 
@@ -97,6 +107,7 @@ class EventLease:
         self._redis_client = redis_client
         self._lua_scripts: dict[str, Any] = {}
         self._lua_client_id: int | None = None
+        self._acquired_ttl: dict[str, int] = {}
 
     def _raw_redis(self) -> Any | None:
         if self._redis_client is None:
@@ -146,6 +157,7 @@ class EventLease:
         key = _lease_key(event_id)
         acquired = await redis.set(key, owner_id, nx=True, ex=ttl_s)
         if acquired:
+            self._acquired_ttl[event_id] = ttl_s
             logger.info(
                 "EventLease: acquired lease for event=%s owner=%s ttl=%ds",
                 event_id,
@@ -236,6 +248,7 @@ class EventLease:
                 event_id,
                 owner_id,
             )
+            self._acquired_ttl.pop(event_id, None)
             return True
         if code == -1:
             logger.debug(
@@ -274,26 +287,25 @@ class EventLease:
         *,
         on_renewal_failed: asyncio.Event | None = None,
         max_renew_failures: int = 3,
+        ttl_s: int | None = None,
     ) -> asyncio.Task[None]:
         """Launch a background task that renews the lease every 60 s.
 
-        When *on_renewal_failed* is provided it is set when the renewal loop
-        exits because of:
-
-        * an owner mismatch (lease stolen), or
-        * *max_renew_failures* consecutive Redis/network exceptions
-          (ISSUE-226).  Fatal on the *(max_renew_failures + 1)*-th error.
-
-        The caller **must** cancel the returned task when the orchestration
-        finishes (or fails) to stop the renewal loop.
+        When *ttl_s* is omitted, reuse the TTL from :meth:`acquire` for this
+        event (custom acquire TTLs must not be silently reset to 600s).
         """
+        if ttl_s is None:
+            renew_ttl = self._acquired_ttl.get(event_id, DEFAULT_LEASE_TTL_S)
+        else:
+            renew_ttl = ttl_s
+        renew_ttl = _require_positive_ttl(renew_ttl)
 
         async def _renew_loop() -> None:
             consecutive_errors = 0
             while True:
                 await asyncio.sleep(RENEW_INTERVAL_S)
                 try:
-                    ok = await self.renew(event_id, owner_id)
+                    ok = await self.renew(event_id, owner_id, ttl_s=renew_ttl)
                     if not ok:
                         # False only means key absent or owner mismatch — real loss.
                         logger.error(

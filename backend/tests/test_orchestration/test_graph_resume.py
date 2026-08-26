@@ -765,7 +765,7 @@ async def test_resume_executing_without_graph_fails_closed() -> None:
             get_workflow_runtime=AsyncMock(return_value=MagicMock()),
         )
 
-    assert exc_info.value.error_type == "graph_unavailable"
+    assert exc_info.value.error_type == "graph_unavailable_operator_replay"
 
 
 @pytest.mark.asyncio
@@ -774,7 +774,9 @@ async def test_prepare_waiting_approval_raises_distinct_error() -> None:
     graph.aget_state = AsyncMock(return_value=MagicMock(values={"halted": True}))
     runtime = MagicMock()
 
-    with pytest.raises(GraphResumeFailedError) as exc_info:
+    from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+
+    with pytest.raises(GraphResumeDeferredError) as exc_info:
         await prepare_graph_resume_state(
             _SessionFactory(EventStatus.WAITING_APPROVAL.value),
             graph,

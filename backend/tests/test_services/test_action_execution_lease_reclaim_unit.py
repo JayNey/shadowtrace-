@@ -73,3 +73,11 @@ def test_direct_tool_persists_running_job_before_provider_call() -> None:
     assert "ExecutionJobStatus.RUNNING.value" in pre_provider
     assert "ExecutionJobStatus.QUEUED.value" not in pre_provider
     assert "lease_expires_at" in pre_provider
+
+
+def test_undelivered_outbox_fence_excludes_delivered() -> None:
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.action_execution_service import _UNDELIVERED_OUTBOX_DELIVERY
+
+    assert OutboxDeliveryStatus.DELIVERED.value not in _UNDELIVERED_OUTBOX_DELIVERY
+    assert OutboxDeliveryStatus.READY.value in _UNDELIVERED_OUTBOX_DELIVERY

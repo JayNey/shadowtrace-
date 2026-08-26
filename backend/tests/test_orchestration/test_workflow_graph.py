@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
+from unittest.mock import AsyncMock
 
 from app.agents.planner_agent import PlannerAgent
 from app.core.errors import InvalidStateTransitionError, ValidationError
@@ -94,9 +95,11 @@ from app.orchestration.workflow_graph import (
     ROUTE_TO_VERIFY,
     ROUTE_WAIT,
     ROUTE_WRITEBACK,
+    _classify_execution_summary,
+    _execution_summary_inflight,
+    _execution_summary_succeeded,
     _resolve_verify_writeback_status,
     _resolve_verify_writeback_statuses,
-    _execution_summary_succeeded,
     build_investigation_graph,
     invoke_investigation_graph,
     route_after_approval,
@@ -3142,15 +3145,22 @@ async def test_execute_node_skips_plan_refresh_when_execution_ok_false() -> None
     assert result["event_status"] == EventStatus.VERIFYING.value
 
 
-def test_execution_summary_succeeded_rejects_inflight_and_empty() -> None:
-    assert _execution_summary_succeeded(None) is False
-    assert _execution_summary_succeeded(SimpleNamespace()) is False
-    assert _execution_summary_succeeded(SimpleNamespace(action_counts={})) is False
+def test_execution_summary_classifies_inflight_empty_and_failed() -> None:
+    assert _classify_execution_summary(None) == "missing"
+    assert _classify_execution_summary(SimpleNamespace()) == "missing"
+    assert _classify_execution_summary(SimpleNamespace(action_counts={})) == "empty"
+    assert _execution_summary_succeeded(SimpleNamespace(action_counts={})) is True
     assert (
-        _execution_summary_succeeded(
+        _classify_execution_summary(
             SimpleNamespace(action_counts={ActionStatus.FAILED.value: 1})
         )
-        is False
+        == "failed"
+    )
+    assert (
+        _execution_summary_inflight(
+            SimpleNamespace(action_counts={ActionStatus.EXECUTING.value: 1})
+        )
+        is True
     )
     assert (
         _execution_summary_succeeded(
@@ -3159,10 +3169,10 @@ def test_execution_summary_succeeded_rejects_inflight_and_empty() -> None:
         is False
     )
     assert (
-        _execution_summary_succeeded(
+        _execution_summary_inflight(
             SimpleNamespace(action_counts={ActionStatus.UNKNOWN.value: 1})
         )
-        is False
+        is True
     )
     assert (
         _execution_summary_succeeded(
@@ -3189,7 +3199,15 @@ async def test_execute_node_treats_executing_writeback_as_not_ok() -> None:
 
     class _AcceptedExec:
         async def execute_plan(self, *_a: Any, **_k: Any) -> Any:
-            return SimpleNamespace(action_counts={ActionStatus.EXECUTING.value: 1})
+            return SimpleNamespace(
+                action_counts={ActionStatus.EXECUTING.value: 1},
+                actions=[
+                    SimpleNamespace(
+                        action_id="act-accepted-1",
+                        action_status=ActionStatus.EXECUTING,
+                    )
+                ],
+            )
 
     machine = FakeStateMachine(
         status=EventStatus.EXECUTING_RESPONSE,
@@ -3206,7 +3224,67 @@ async def test_execute_node_treats_executing_writeback_as_not_ok() -> None:
         )
     )
     assert result["execution_ok"] is False
+    assert result["execution_inflight"] is True
+    assert result["execution_inflight_action_ids"] == ["act-accepted-1"]
     assert result["event_status"] == EventStatus.VERIFYING.value
+
+
+@pytest.mark.asyncio
+async def test_execute_node_empty_counts_is_success() -> None:
+    """Disposition-only / no IMMEDIATE actions is a no-op, not execute failure."""
+    event_id = "evt-empty-execute"
+
+    class _EmptyExec:
+        async def execute_plan(self, *_a: Any, **_k: Any) -> Any:
+            return SimpleNamespace(action_counts={})
+
+    machine = FakeStateMachine(
+        status=EventStatus.EXECUTING_RESPONSE,
+        statuses={event_id: EventStatus.EXECUTING_RESPONSE},
+    )
+    services = _services(machine)
+    services["action_execution"] = _EmptyExec()
+    graph = build_investigation_graph(_agents(), services)
+    result = await graph.nodes[NODE_EXECUTE].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.EXECUTING_RESPONSE.value,
+            response_plan=_pending_execute_plan(event_id),
+        )
+    )
+    assert result["execution_ok"] is True
+    assert result["execution_inflight"] is False
+    assert result["execution_inflight_action_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_verify_node_true_execute_failure_goes_manual() -> None:
+    """FAILED execute with no VerifyAgent routing must fail-close to MANUAL."""
+    event_id = "evt-execute-failed-unverified"
+    verify_agent = StubAgent(
+        VerificationResult(
+            overall_status=VerificationOverallStatus.SUCCESS,
+            verification_phase=VerificationPhase.EFFECT,
+        )
+    )
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    graph = build_investigation_graph(_agents_with_verify(verify_agent), _services(machine))
+    result = await graph.nodes[NODE_VERIFY].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.VERIFYING.value,
+            execution_ok=False,
+            execution_inflight=False,
+        )
+    )
+    assert result["verify_need_manual_resolution"] is True
+    assert result["verify_need_writeback_recovery"] is False
+    flags = " ".join(str(flag) for flag in (result.get("degraded_flags") or []))
+    assert "execution_failed_unverified" in flags
+    assert route_after_verify(result) == ROUTE_MANUAL
 
 
 @pytest.mark.asyncio
@@ -3238,6 +3316,61 @@ async def test_verify_node_routes_accepted_writeback_to_recovery_not_manual() ->
     assert result["verify_need_manual_resolution"] is False
     assert result["execution_substate"] == ExecutionSubstate.WAITING_WRITEBACK.value
     assert route_after_verify(result) == ROUTE_WRITEBACK
+
+
+@pytest.mark.asyncio
+async def test_verify_node_real_agent_executing_not_required_does_not_go_manual() -> None:
+    """Real VerifyAgent + EXECUTING + NOT_REQUIRED must WAIT, not MANUAL."""
+    from app.agents.verify_agent import VerifyAgent
+    from tests.test_agents.test_verify_agent import (
+        FakeTraceService,
+        FakeWorkingMemory,
+        _action,
+    )
+
+    event_id = "evt-executing-not-required"
+    action = _action(
+        event_id=event_id,
+        tool_name="block_ip",
+        status=ActionStatus.EXECUTING,
+        execution_job_id="job-0001",
+        writeback_required=False,
+    )
+    verify_agent = VerifyAgent(
+        working_memory=FakeWorkingMemory(),
+        trace_service=FakeTraceService(),
+    )
+    verify_agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+        return_value=([action], {}, {})
+    )
+    verify_agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+        return_value=DispositionPolicy.NOT_REQUIRED,
+    )
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    graph = build_investigation_graph(
+        _agents_with_verify(verify_agent),
+        _services(machine),
+    )
+    result = await graph.nodes[NODE_VERIFY].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.VERIFYING.value,
+            execution_ok=False,
+            execution_inflight=True,
+            disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
+            response_plan=_pending_execute_plan(event_id, action.action_id),
+        )
+    )
+    assert result["verify_need_manual_resolution"] is False
+    assert result["verify_need_writeback_recovery"] is True
+    assert result["halted"] is True
+    assert result["execution_substate"] == ExecutionSubstate.WAITING_WRITEBACK.value
+    flags = " ".join(str(flag) for flag in (result.get("degraded_flags") or []))
+    assert "execution_failed_unverified" not in flags
+    assert route_after_verify(result) == ROUTE_HALT
 
 
 @pytest.mark.asyncio

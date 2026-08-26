@@ -1351,6 +1351,8 @@ class DispositionSyncService:
                 try:
                     adapter = self._resolve_adapter(outbox)
                 except AdapterNotFoundError as exc:
+                    if self._refuse_mock_missing_source_product(outbox, exc):
+                        return
                     self._block_outbox_for_writeback_fence(
                         outbox,
                         now=datetime.now(UTC),
@@ -2388,6 +2390,37 @@ class DispositionSyncService:
                 },
             )
         return self._adapters.get(product)
+
+    def _refuse_mock_missing_source_product(
+        self,
+        outbox: orm.DispositionOutbox,
+        exc: AdapterNotFoundError,
+    ) -> bool:
+        """Refuse silent mock_xdr fallback without dead-lettering stock READY rows.
+
+        Returns True when the caller should stop this delivery attempt.
+        READY stays READY (visible, retryable after locator repair). LEASED
+        is paused so the worker does not spin. Live mode returns False so
+        the fence can fail-close.
+        """
+        if not is_mock_disposition_mode(get_settings().disposition_mode):
+            return False
+        if "product missing" not in str(exc).lower():
+            return False
+        logger.error(
+            "mock disposition missing source_product; refusing silent mock_xdr "
+            "fallback without dead-lettering outbox=%s",
+            getattr(outbox, "outbox_id", None),
+        )
+        current = OutboxDeliveryStatus(outbox.delivery_status)
+        if current is OutboxDeliveryStatus.LEASED:
+            self._pause_outbox_after_unknown_submission(
+                outbox,
+                now=datetime.now(UTC),
+                error_code="missing_source_product",
+                error_detail=str(exc),
+            )
+        return True
 
     async def _sync_writeback_summary(self, event_id: str) -> None:
         summary_payload: dict[str, Any] | None = None

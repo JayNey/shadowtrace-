@@ -397,6 +397,7 @@ JOB_STATUS_TRANSITIONS: dict[ExecutionJobStatus, set[ExecutionJobStatus]] = {
         ExecutionJobStatus.CANCELLED,
         ExecutionJobStatus.FAILED,  # lease-expired reclaim only (validate gate)
         ExecutionJobStatus.TIMED_OUT,  # lease-expired reclaim only (validate gate)
+        ExecutionJobStatus.UNKNOWN,  # side-effect CAS miss after dispatch
     },
     ExecutionJobStatus.RUNNING: {
         ExecutionJobStatus.PARTIAL_SUCCESS,

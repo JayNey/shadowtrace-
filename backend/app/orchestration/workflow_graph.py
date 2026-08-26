@@ -517,26 +517,80 @@ _IN_FLIGHT_EXECUTE_STATUSES = frozenset(
         ActionStatus.UNKNOWN,
     }
 )
+_PENDING_EXECUTION_DETAILS = frozenset({"pending_execution"})
+
+
+def _classify_execution_summary(summary: Any) -> str:
+    """Split execute_plan outcomes: succeeded / empty / inflight / failed / missing.
+
+    ACCEPTED writebacks leave actions in EXECUTING; that is in-flight, not
+    failure. Empty counts mean no IMMEDIATE work (disposition-only / no-op),
+    not execute failure. PENDING/WAITING_APPROVAL on the same revision are
+    later-phase work and do not fail this node.
+    """
+    if summary is None:
+        return "missing"
+    counts = getattr(summary, "action_counts", None)
+    if counts is None:
+        return "missing"
+    if not counts:
+        return "empty"
+    if int(counts.get(ActionStatus.FAILED.value, 0) or 0) > 0:
+        return "failed"
+    for status in _IN_FLIGHT_EXECUTE_STATUSES:
+        if int(counts.get(status.value, 0) or 0) > 0:
+            return "inflight"
+    return "succeeded"
 
 
 def _execution_summary_succeeded(summary: Any) -> bool:
-    """Fail execute_plan when counts are empty, FAILED, or still in-flight.
+    return _classify_execution_summary(summary) in {"succeeded", "empty"}
 
-    ACCEPTED writebacks leave actions in EXECUTING; that must not look like
-    success. Remaining PENDING/WAITING_APPROVAL actions on the same revision
-    are later-phase work and do not fail this node.
-    """
-    if summary is None:
-        return False
-    counts = getattr(summary, "action_counts", None) or {}
-    if not counts:
-        return False
-    if int(counts.get(ActionStatus.FAILED.value, 0) or 0) > 0:
-        return False
-    for status in _IN_FLIGHT_EXECUTE_STATUSES:
-        if int(counts.get(status.value, 0) or 0) > 0:
-            return False
-    return True
+
+def _execution_summary_inflight(summary: Any) -> bool:
+    return _classify_execution_summary(summary) == "inflight"
+
+
+def _inflight_action_ids_from_summary(summary: Any) -> list[str]:
+    ids: list[str] = []
+    inflight_values = {status.value for status in _IN_FLIGHT_EXECUTE_STATUSES}
+    for view in getattr(summary, "actions", None) or []:
+        status = getattr(view, "action_status", None)
+        status_value = status.value if isinstance(status, ActionStatus) else str(status or "")
+        if status_value not in inflight_values:
+            continue
+        action_id = getattr(view, "action_id", None)
+        if action_id:
+            ids.append(str(action_id))
+    return list(dict.fromkeys(ids))
+
+
+def _inflight_action_ids_from_verify(
+    state: InvestigationState,
+    verification_result: VerificationResult | None,
+) -> list[str]:
+    ids: list[str] = []
+    if verification_result is not None:
+        ids = [
+            item.action_id
+            for item in verification_result.results
+            if item.detail in _PENDING_EXECUTION_DETAILS
+        ]
+    if ids:
+        return list(dict.fromkeys(ids))
+    plan = state.get("response_plan") or {}
+    actions = plan.get("actions") if isinstance(plan, dict) else None
+    if not isinstance(actions, list):
+        return []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        status = str(action.get("status") or "")
+        if status in {item.value for item in _IN_FLIGHT_EXECUTE_STATUSES}:
+            action_id = action.get("action_id")
+            if action_id:
+                ids.append(str(action_id))
+    return list(dict.fromkeys(ids))
 
 
 def _wrap_node(
@@ -1912,12 +1966,19 @@ def build_investigation_graph(
             )
         plan_revision = _plan_revision_from_state(state)
         execution_ok = True
+        execution_inflight = False
+        inflight_ids: list[str] = []
         try:
             summary = await action_execution.execute_plan(
                 state["event_id"],
                 plan_revision=plan_revision,
             )
-            execution_ok = _execution_summary_succeeded(summary)
+            kind = _classify_execution_summary(summary)
+            execution_ok = kind in {"succeeded", "empty"}
+            execution_inflight = kind == "inflight"
+            inflight_ids = (
+                _inflight_action_ids_from_summary(summary) if execution_inflight else []
+            )
         except SoftTimeLimitExceeded:
             # ISSUE-314: side-effect phase soft-limit must reach task owner.
             raise
@@ -1928,6 +1989,8 @@ def build_investigation_graph(
                 plan_revision,
             )
             execution_ok = False
+            execution_inflight = False
+            inflight_ids = []
 
         try:
             status = await _transition_status(
@@ -1940,8 +2003,14 @@ def build_investigation_graph(
             if not (exc.current is EventStatus.VERIFYING and exc.target is EventStatus.VERIFYING):
                 raise
             status = cast(InvestigationState, {"event_status": EventStatus.VERIFYING.value})
-        patch: dict[str, Any] = {"execution_ok": execution_ok}
-        if execution_ok:
+        patch: dict[str, Any] = {
+            "execution_ok": execution_ok,
+            "execution_inflight": execution_inflight,
+            "execution_inflight_action_ids": inflight_ids,
+        }
+        if inflight_ids:
+            patch["verify_pending_writeback_action_ids"] = inflight_ids
+        if execution_ok or execution_inflight:
             refreshed_plan = await _refresh_response_plan_from_orm(state, services)
             if refreshed_plan is not None:
                 patch["response_plan"] = refreshed_plan
@@ -2182,17 +2251,49 @@ def build_investigation_graph(
 
         # Extract routing flags from VerificationResult.
         update = _verification_result_state_update(verification_result)
+        pending_inflight_ids = _inflight_action_ids_from_verify(state, verification_result)
+        if not pending_inflight_ids:
+            pending_inflight_ids = [
+                str(action_id)
+                for action_id in (state.get("execution_inflight_action_ids") or [])
+                if action_id
+            ]
+        execution_inflight = bool(state.get("execution_inflight")) or bool(pending_inflight_ids)
+        agent_routed = (
+            verification_result.need_action_replan
+            or verification_result.need_writeback_recovery
+            or verification_result.need_manual_resolution
+        )
 
-        # Should-Fix: when execution_ok is False but VerifyAgent didn't report
-        # any specific failures, the execution layer itself failed without a
-        # corresponding verification signal.  This is an anomalous state —
-        # route to MANUAL_RESOLUTION instead of silently proceeding to
-        # REPORTING with a false sense of success.
+        # In-flight EXECUTING/ACCEPTED must WAIT/recovery — never collapse into
+        # execution_failed_unverified (which forces MANUAL_RESOLUTION).
+        if execution_inflight and not agent_routed:
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.WAITING_WRITEBACK,
+                event_status=EventStatus.VERIFYING,
+            )
+            return _patch_state(
+                _trace(NODE_VERIFY),
+                plan_patch,
+                {
+                    **update,
+                    "execution_inflight": True,
+                    "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+                    "halted": True,
+                    "verify_need_action_replan": False,
+                    "verify_need_writeback_recovery": True,
+                    "verify_need_manual_resolution": False,
+                    "verify_pending_writeback_action_ids": pending_inflight_ids,
+                },
+            )
+
+        # True execute failure (FAILED / missing summary) with no VerifyAgent
+        # routing signal — fail closed to MANUAL_RESOLUTION.
         if (
             not state.get("execution_ok", True)
-            and not verification_result.need_action_replan
-            and not verification_result.need_writeback_recovery
-            and not verification_result.need_manual_resolution
+            and not execution_inflight
+            and not agent_routed
         ):
             flags = await _persist_degraded_flag(
                 state,

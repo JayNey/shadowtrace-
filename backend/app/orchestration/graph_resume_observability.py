@@ -19,7 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import InvalidStateTransitionError, ValidationError
 from app.db import models as orm
-from app.orchestration.graph_invocation import defer_nested_graph_resume, is_in_investigation_graph
+from app.orchestration.graph_invocation import (
+    defer_nested_graph_resume,
+    is_in_investigation_graph,
+    persist_nested_graph_wakeup,
+)
 from app.orchestration.graph_resume import (
     GetSuperAgent,
     GetWorkflowRuntime,
@@ -53,6 +57,21 @@ class GraphResumeFailedError(Exception):
         self.event_id = event_id
         self.error_type = error_type
         self.execution_substate = execution_substate
+
+
+class GraphResumeDeferredError(Exception):
+    """Resume is not ready yet; retry later instead of fail-closing."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        event_id: str,
+        error_type: str = "waiting_approval",
+    ) -> None:
+        super().__init__(message)
+        self.event_id = event_id
+        self.error_type = error_type
 
 
 @dataclass(frozen=True)
@@ -219,6 +238,12 @@ async def execute_graph_resume_with_retry(
         except SoftTimeLimitExceeded:
             # ISSUE-314: task/intent layer owns soft-limit; never wrap as resume failure.
             raise
+        except GraphResumeDeferredError as exc:
+            last_exc = exc
+            if attempt + 1 < _RESUME_MAX_ATTEMPTS:
+                await asyncio.sleep(_RESUME_RETRY_BASE_SECONDS * (attempt + 1))
+                continue
+            break
         except GraphResumeFailedError as exc:
             last_exc = exc
             break
@@ -230,6 +255,15 @@ async def execute_graph_resume_with_retry(
             break
 
     assert last_exc is not None
+    if isinstance(last_exc, GraphResumeDeferredError):
+        await persist_nested_graph_wakeup(event_id, last_exc.error_type)
+        logger.warning(
+            "graph resume deferred event=%s error_type=%s",
+            event_id,
+            last_exc.error_type,
+        )
+        raise last_exc
+
     if isinstance(last_exc, GraphResumeFailedError):
         error_type = last_exc.error_type
         message = str(last_exc)
@@ -266,6 +300,7 @@ ResumeHook = Callable[[str], Awaitable[None]]
 
 __all__ = [
     "GRAPH_RESUME_FAILED_FLAG",
+    "GraphResumeDeferredError",
     "GraphResumeFailedError",
     "GraphResumeFailureContext",
     "ResumeHook",

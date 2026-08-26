@@ -15,6 +15,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 logger = logging.getLogger(__name__)
 
 _active_graph_event_id: ContextVar[str | None] = ContextVar(
@@ -28,8 +30,10 @@ _deferred_graph_resumes: ContextVar[set[str] | None] = ContextVar(
 
 NestedResumeRunner = Callable[[str], Awaitable[None]]
 NestedResumeFailureHandler = Callable[[str, BaseException, list[str]], Awaitable[None]]
+NestedResumeDurabilityWriter = Callable[[str, str], Awaitable[None]]
 _nested_resume_runner: NestedResumeRunner | None = None
 _nested_resume_failure_handler: NestedResumeFailureHandler | None = None
+_nested_resume_durability_writer: NestedResumeDurabilityWriter | None = None
 
 
 class NestedGraphResumeError(RuntimeError):
@@ -69,6 +73,55 @@ def set_nested_resume_failure_handler(
 
 def get_nested_resume_failure_handler() -> NestedResumeFailureHandler | None:
     return _nested_resume_failure_handler
+
+
+def set_nested_resume_durability_writer(
+    writer: NestedResumeDurabilityWriter | None,
+) -> None:
+    """Install durable nested-wakeup persistence (graph_resume_intent)."""
+    global _nested_resume_durability_writer
+    _nested_resume_durability_writer = writer
+
+
+def get_nested_resume_durability_writer() -> NestedResumeDurabilityWriter | None:
+    return _nested_resume_durability_writer
+
+
+def clear_nested_resume_hooks() -> None:
+    """Drop process-level nested-resume hooks (tests / reset_deps)."""
+    set_nested_resume_runner(None)
+    set_nested_resume_failure_handler(None)
+    set_nested_resume_durability_writer(None)
+
+
+async def persist_nested_graph_wakeup(
+    event_id: str,
+    reason: str = "nested_wakeup",
+) -> bool:
+    """Enqueue a durable nested graph wakeup. Never raises."""
+    writer = _nested_resume_durability_writer
+    if writer is None:
+        logger.error(
+            "nested graph wakeup has no durability writer event=%s reason=%s",
+            event_id,
+            reason,
+        )
+        return False
+    try:
+        await writer(event_id, reason)
+        return True
+    except Exception:
+        logger.exception(
+            "nested graph wakeup persist failed event=%s reason=%s",
+            event_id,
+            reason,
+        )
+        return False
+
+
+async def _persist_pending_nested_wakeups(pending: list[str], reason: str) -> None:
+    for resume_event_id in pending:
+        await persist_nested_graph_wakeup(resume_event_id, reason)
 
 
 async def _notify_nested_resume_failure(
@@ -126,6 +179,19 @@ def _is_task_cancellation(exc: BaseException | None) -> bool:
     return not isinstance(exc, Exception)
 
 
+def _persist_without_flush_reason(exc: BaseException | None) -> str | None:
+    """Return a durable-wakeup reason when flush would be unsafe.
+
+    SoftTimeLimit / worker revoke leave little time for an in-process resume;
+    persist an intent so the dispatcher can replay after unbind.
+    """
+    if _is_task_cancellation(exc):
+        return "nested_resume_cancelled"
+    if isinstance(exc, SoftTimeLimitExceeded):
+        return "nested_resume_soft_time_limit"
+    return None
+
+
 async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> None:
     if not pending:
         return
@@ -136,6 +202,7 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
             event_id,
             pending,
         )
+        await _persist_pending_nested_wakeups(pending, "nested_resume_no_runner")
         error = NestedGraphResumeError(
             "nested graph resume deferred with no runner",
             event_id=event_id,
@@ -153,6 +220,7 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
                 "deferred nested graph resume failed event=%s",
                 resume_event_id,
             )
+            await persist_nested_graph_wakeup(resume_event_id, "nested_resume_flush_failed")
             await _notify_nested_resume_failure(resume_event_id, exc, [resume_event_id])
             if flush_error is None:
                 flush_error = exc
@@ -174,14 +242,17 @@ async def bind_investigation_graph(event_id: str) -> AsyncIterator[None]:
         pending = list(_deferred_graph_resumes.get() or ())
         _active_graph_event_id.reset(token)
         _deferred_graph_resumes.reset(deferred_token)
-        if pending and _is_task_cancellation(yield_error):
+        persist_reason = _persist_without_flush_reason(yield_error)
+        if pending and persist_reason is not None:
             logger.warning(
-                "skip nested graph resume flush after cancellation event=%s pending=%s",
+                "persist nested graph resume without flush event=%s reason=%s pending=%s",
                 event_id,
+                persist_reason,
                 pending,
             )
+            await _persist_pending_nested_wakeups(pending, persist_reason)
             dropped = NestedGraphResumeError(
-                "nested graph resume dropped due to cancellation",
+                "nested graph resume deferred due to cancellation",
                 event_id=event_id,
                 pending=pending,
                 error_type="nested_resume_dropped",
@@ -208,10 +279,14 @@ __all__ = [
     "NestedGraphResumeError",
     "active_graph_event_id",
     "bind_investigation_graph",
+    "clear_nested_resume_hooks",
     "defer_nested_graph_resume",
+    "get_nested_resume_durability_writer",
     "get_nested_resume_failure_handler",
     "get_nested_resume_runner",
     "is_in_investigation_graph",
+    "persist_nested_graph_wakeup",
+    "set_nested_resume_durability_writer",
     "set_nested_resume_failure_handler",
     "set_nested_resume_runner",
 ]
