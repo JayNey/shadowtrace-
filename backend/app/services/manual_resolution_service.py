@@ -959,6 +959,17 @@ class ManualResolutionService:
             # remains reclaimable (clearing first would fence as hold_already_cleared).
             await self._resume_runner(event_id)
         except Exception as exc:
+            from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+
+            if isinstance(exc, GraphResumeDeferredError):
+                logger.warning(
+                    "graph resume intent deferred intent=%s event=%s error_type=%s",
+                    intent_id,
+                    event_id,
+                    exc.error_type,
+                )
+                await self._mark_deferred(intent_id, error=str(exc))
+                return False
             logger.exception("graph resume intent failed intent=%s event=%s", intent_id, event_id)
             await self._mark_failure(intent_id, error=str(exc))
             return False
@@ -1024,6 +1035,24 @@ class ManualResolutionService:
                     return
                 validate_graph_resume_transition(current, GraphResumeIntentStatus.TERMINAL)
                 row.status = GraphResumeIntentStatus.TERMINAL.value
+                row.claim_owner = None
+                row.claim_expires_at = None
+                row.updated_at = datetime.now(UTC)
+
+    async def _mark_deferred(self, intent_id: str, *, error: str) -> None:
+        """Return the intent to RETRY without burning the DEAD attempt budget."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(orm.GraphResumeIntent, intent_id, with_for_update=True)
+                if row is None:
+                    return
+                current = GraphResumeIntentStatus(row.status)
+                if current in TERMINAL_GRAPH_RESUME_STATUSES:
+                    return
+                validate_graph_resume_transition(current, GraphResumeIntentStatus.RETRY)
+                row.status = GraphResumeIntentStatus.RETRY.value
+                row.revision = int(row.revision or 1) + 1
+                row.last_error = error[:2000]
                 row.claim_owner = None
                 row.claim_expires_at = None
                 row.updated_at = datetime.now(UTC)

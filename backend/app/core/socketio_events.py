@@ -318,6 +318,27 @@ def register_handlers(
         )
 
     @sio.event(namespace=SOCKETIO_NAMESPACE)  # type: ignore[untyped-decorator]
+    async def leave_event(sid: str, data: dict[str, Any] | None = None) -> None:
+        """Leave one event room without joining global (detail unmount)."""
+        session = await _require_session(sio, sid, sessions)
+        if session is None:
+            return
+
+        event_id = data.get("event_id") if isinstance(data, dict) else None
+        if not event_id or not isinstance(event_id, str):
+            return
+
+        room = _event_room(event_id)
+        await sio.leave_room(sid, room, namespace=SOCKETIO_NAMESPACE)
+        sessions.untrack_room(sid, room)
+        logger.debug(
+            "socketio leave_event sid=%s subject=%s room=%s",
+            sid,
+            session.principal.subject,
+            room,
+        )
+
+    @sio.event(namespace=SOCKETIO_NAMESPACE)  # type: ignore[untyped-decorator]
     async def join_global(sid: str, data: dict[str, Any] | None = None) -> None:  # noqa: ARG001
         """Re-enter the global room when the principal has dashboard broadcast access."""
         session = await _require_session(sio, sid, sessions)

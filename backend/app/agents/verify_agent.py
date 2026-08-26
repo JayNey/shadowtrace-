@@ -540,20 +540,20 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     else _EXECUTING_TIMEOUT_SECONDS
                 )
                 now_utc = datetime.now(UTC)
+                anchor = _executing_timeout_anchor(action, job, outboxes)
                 if (
-                    job is not None
-                    and job.started_at is not None
-                    and (now_utc - job.started_at).total_seconds() > timeout_s
+                    anchor is not None
+                    and (now_utc - anchor).total_seconds() > timeout_s
                 ):
                     # Zombie Action — stuck in EXECUTING past the timeout.
                     # The execution job may have completed but the Action
                     # status was never CAS-synced (or the runner crashed).
                     logger.warning(
-                        "Action %s stuck in EXECUTING for >%ss (started_at=%s) "
+                        "Action %s stuck in EXECUTING for >%ss (anchor=%s) "
                         "event=%s — escalating to manual resolution",
                         action.action_id,
                         timeout_s,
-                        job.started_at.isoformat(),
+                        anchor.isoformat(),
                         event_id,
                     )
                     results.append(
@@ -2203,6 +2203,37 @@ def _action_has_accepted_writeback(
         if raw is WritebackStatus.ACCEPTED or raw == WritebackStatus.ACCEPTED.value:
             return True
     return False
+
+
+def _executing_timeout_anchor(
+    action: Action,
+    job: ActionExecutionJob | None,
+    outbox_map: dict[str, list[Any]],
+) -> datetime | None:
+    """Clock for EXECUTING zombie budget.
+
+    ACCEPTED work is measured from the latest ACCEPTED outbox timestamp (or
+    action.updated_at), not from original job start — otherwise a long queue
+    burns the 1800s wait before the provider has even accepted.
+    """
+    if _action_has_accepted_writeback(action, outbox_map):
+        stamps: list[datetime] = []
+        for record in outbox_map.get(action.action_id, []):
+            raw = getattr(record, "latest_writeback_status", None)
+            if raw is not WritebackStatus.ACCEPTED and raw != WritebackStatus.ACCEPTED.value:
+                continue
+            ts = getattr(record, "updated_at", None) or getattr(record, "delivered_at", None)
+            if isinstance(ts, datetime):
+                stamps.append(ts)
+        if stamps:
+            return max(stamps)
+        updated = getattr(action, "updated_at", None)
+        if isinstance(updated, datetime):
+            return updated
+        return None
+    if job is not None:
+        return job.started_at
+    return None
 
 
 def _make_execution_failed_non_verifiable_result(

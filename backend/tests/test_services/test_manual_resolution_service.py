@@ -1271,3 +1271,46 @@ async def test_reconcile_stale_passes_changed_event_ids_to_schedule_dispatch(
     assert isinstance(event_ids, list)
     assert event_id in event_ids
     get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_nested_wakeup_deferred_does_not_burn_dead_budget(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+
+    event_id = await _seed_event(session_factory, status=EventStatus.WAITING_APPROVAL)
+
+    async def _deferred(_eid: str) -> None:
+        raise GraphResumeDeferredError(
+            "cannot resume while event is still WAITING_APPROVAL",
+            event_id=_eid,
+            error_type="waiting_approval",
+        )
+
+    service = ManualResolutionService(
+        session_factory,
+        resume_runner=_deferred,
+        max_attempts=1,
+    )
+    service.schedule_dispatch = lambda **_kwargs: None  # type: ignore[method-assign]
+    intent = await service.enqueue_nested_wakeup(event_id, reason="waiting_approval")
+    assert intent is not None
+
+    claimed = await service._claim_batch(limit=100)
+    assert intent.intent_id in claimed
+    assert await service._run_claimed_intent(intent.intent_id) is False
+    async with session_factory() as session:
+        row = await session.get(orm.GraphResumeIntent, intent.intent_id)
+        assert row is not None
+        assert row.status == GraphResumeIntentStatus.RETRY.value
+        assert int(row.attempt or 0) == 0
+
+    claimed_again = await service._claim_batch(limit=100)
+    assert intent.intent_id in claimed_again
+    assert await service._run_claimed_intent(intent.intent_id) is False
+    async with session_factory() as session:
+        row = await session.get(orm.GraphResumeIntent, intent.intent_id)
+        assert row is not None
+        assert row.status == GraphResumeIntentStatus.RETRY.value
+        assert int(row.attempt or 0) == 0

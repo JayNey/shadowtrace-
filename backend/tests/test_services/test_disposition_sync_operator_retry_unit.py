@@ -221,7 +221,7 @@ def test_resolve_adapter_blank_source_product_raises() -> None:
         svc._resolve_adapter(outbox)
 
 
-def test_refuse_mock_missing_product_leaves_ready_not_dead_lettered(
+def test_refuse_mock_missing_product_pauses_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.core.errors import AdapterNotFoundError
@@ -235,13 +235,23 @@ def test_refuse_mock_missing_product_leaves_ready_not_dead_lettered(
         outbox_id="obx-ready-missing",
         delivery_status=OutboxDeliveryStatus.READY.value,
         last_error_code=None,
+        last_error_detail=None,
+        locked_by=None,
+        locked_at=None,
+        lease_expires_at=None,
+        next_retry_at=None,
+        updated_at=None,
+        latest_writeback_status=None,
     )
     handled = svc._refuse_mock_missing_source_product(
         outbox,
-        AdapterNotFoundError("disposition adapter product missing on outbox"),
+        AdapterNotFoundError(
+            "disposition adapter product missing on outbox",
+            details={"reason": "product_missing"},
+        ),
     )
     assert handled is True
-    assert outbox.delivery_status == OutboxDeliveryStatus.READY.value
+    assert outbox.delivery_status == OutboxDeliveryStatus.PAUSED.value
 
 
 def test_refuse_mock_missing_product_pauses_leased(
@@ -268,7 +278,10 @@ def test_refuse_mock_missing_product_pauses_leased(
     )
     handled = svc._refuse_mock_missing_source_product(
         outbox,
-        AdapterNotFoundError("disposition adapter product missing on outbox"),
+        AdapterNotFoundError(
+            "disposition adapter product missing on outbox",
+            details={"reason": "product_missing"},
+        ),
     )
     assert handled is True
     assert outbox.delivery_status == OutboxDeliveryStatus.PAUSED.value

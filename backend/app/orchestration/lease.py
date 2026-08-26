@@ -109,6 +109,9 @@ class EventLease:
         self._lua_client_id: int | None = None
         self._acquired_ttl: dict[str, int] = {}
 
+    def _forget_acquired_ttl(self, event_id: str) -> None:
+        self._acquired_ttl.pop(event_id, None)
+
     def _raw_redis(self) -> Any | None:
         if self._redis_client is None:
             return None
@@ -213,6 +216,7 @@ class EventLease:
                 ttl_s,
             )
             return True
+        self._forget_acquired_ttl(event_id)
         if code == -1:
             logger.warning(
                 "EventLease.renew: lease key absent for event=%s — "
@@ -237,6 +241,7 @@ class EventLease:
         """
         redis = self._raw_redis()
         if redis is None:
+            self._forget_acquired_ttl(event_id)
             return False
         key = _lease_key(event_id)
         script = self._script_for(redis, _RELEASE_SCRIPT)
@@ -248,13 +253,14 @@ class EventLease:
                 event_id,
                 owner_id,
             )
-            self._acquired_ttl.pop(event_id, None)
+            self._forget_acquired_ttl(event_id)
             return True
         if code == -1:
             logger.debug(
                 "EventLease.release: key already absent for event=%s (idempotent)",
                 event_id,
             )
+            self._forget_acquired_ttl(event_id)
             return True
         # code == 0: owner mismatch — lease held by another worker.
         logger.warning(
@@ -263,6 +269,7 @@ class EventLease:
             event_id,
             owner_id,
         )
+        self._forget_acquired_ttl(event_id)
         return False
 
     async def get_owner(self, event_id: str) -> str | None:
@@ -314,6 +321,7 @@ class EventLease:
                             event_id,
                             owner_id,
                         )
+                        self._forget_acquired_ttl(event_id)
                         if on_renewal_failed is not None:
                             on_renewal_failed.set()
                         break
@@ -330,6 +338,7 @@ class EventLease:
                             event_id,
                             max_renew_failures,
                         )
+                        self._forget_acquired_ttl(event_id)
                         if on_renewal_failed is not None:
                             on_renewal_failed.set()
                         break

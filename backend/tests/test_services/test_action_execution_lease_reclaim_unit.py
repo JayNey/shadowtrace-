@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -81,3 +83,38 @@ def test_undelivered_outbox_fence_excludes_delivered() -> None:
 
     assert OutboxDeliveryStatus.DELIVERED.value not in _UNDELIVERED_OUTBOX_DELIVERY
     assert OutboxDeliveryStatus.READY.value in _UNDELIVERED_OUTBOX_DELIVERY
+
+
+def test_accepted_outbox_fence_precedes_job_terminal_copy() -> None:
+    source = _ACTION_EXECUTION_SERVICE.read_text(encoding="utf-8")
+    start = source.index("async def _reclaim_stale_executing_action")
+    end = source.index("\ndef _map_job_to_action_status", start)
+    body = source[start:end]
+    assert body.index("_has_delivered_accepted_outbox") < body.index(
+        "ExecutionJobStatus.SUCCESS"
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_scoped_stale_reclaim_excludes_global_entity_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.action_execution_service import ActionExecutionService
+
+    async def _reclaim(*_args: object, **_kwargs: object) -> int:
+        return 2
+
+    monkeypatch.setattr(
+        "app.services.action_execution_service.reconcile_stale_executions_for_event",
+        _reclaim,
+    )
+    svc = ActionExecutionService.__new__(ActionExecutionService)
+    svc._session_factory = object()
+    lookup = AsyncMock(return_value=9)
+    svc._sync = SimpleNamespace(reconcile_pending_entity_effects=lookup)
+
+    assert await svc.reconcile_stale_executions(limit=5, event_id="evt-scoped") == 2
+    lookup.assert_not_awaited()
+
+    assert await svc.reconcile_stale_executions(limit=5) == 2
+    lookup.assert_awaited_once_with(limit=5)

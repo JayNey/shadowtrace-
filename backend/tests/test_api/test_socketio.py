@@ -557,6 +557,30 @@ class TestEventHandlers:
         assert sid not in ns_rooms.get(_event_room(event_id), {})
 
     @pytest.mark.asyncio
+    async def test_leave_event_drops_event_room_without_joining_global(
+        self, sio: socketio.AsyncServer
+    ) -> None:
+        sid = _fake_sid()
+        event_id = "evt-20260712-leave"
+
+        _connect_session(sio, sid)
+        connect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
+        assert connect_handler is not None
+        await connect_handler(sid, _auth_environ(), None)
+
+        sub_h = sio.handlers[SOCKETIO_NAMESPACE].get("subscribe")
+        assert sub_h is not None
+        await sub_h(sid, {"event_id": event_id})
+
+        leave_h = sio.handlers[SOCKETIO_NAMESPACE].get("leave_event")
+        assert leave_h is not None, "leave_event handler not registered"
+        await leave_h(sid, {"event_id": event_id})
+
+        ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
+        assert sid not in ns_rooms.get(_event_room(event_id), {})
+        assert sid not in ns_rooms.get(GLOBAL_ROOM, {})
+
+    @pytest.mark.asyncio
     async def test_subscribe_rejects_missing_event_id(self, sio: socketio.AsyncServer) -> None:
         """subscribe without event_id emits an error, does not join any room."""
         sid = _fake_sid()

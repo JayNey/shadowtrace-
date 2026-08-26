@@ -2387,6 +2387,7 @@ class DispositionSyncService:
                 details={
                     "outbox_id": getattr(outbox, "outbox_id", None),
                     "writeback_id": getattr(outbox, "writeback_id", None),
+                    "reason": "product_missing",
                 },
             )
         return self._adapters.get(product)
@@ -2396,16 +2397,15 @@ class DispositionSyncService:
         outbox: orm.DispositionOutbox,
         exc: AdapterNotFoundError,
     ) -> bool:
-        """Refuse silent mock_xdr fallback without dead-lettering stock READY rows.
+        """Refuse silent mock_xdr fallback without spinning READY deliveries.
 
         Returns True when the caller should stop this delivery attempt.
-        READY stays READY (visible, retryable after locator repair). LEASED
-        is paused so the worker does not spin. Live mode returns False so
-        the fence can fail-close.
+        READY and LEASED are paused so the worker does not retry forever.
+        Live mode returns False so the fence can fail-close.
         """
         if not is_mock_disposition_mode(get_settings().disposition_mode):
             return False
-        if "product missing" not in str(exc).lower():
+        if (getattr(exc, "details", None) or {}).get("reason") != "product_missing":
             return False
         logger.error(
             "mock disposition missing source_product; refusing silent mock_xdr "
@@ -2413,7 +2413,7 @@ class DispositionSyncService:
             getattr(outbox, "outbox_id", None),
         )
         current = OutboxDeliveryStatus(outbox.delivery_status)
-        if current is OutboxDeliveryStatus.LEASED:
+        if current in {OutboxDeliveryStatus.READY, OutboxDeliveryStatus.LEASED}:
             self._pause_outbox_after_unknown_submission(
                 outbox,
                 now=datetime.now(UTC),
@@ -2494,8 +2494,18 @@ class DispositionSyncService:
             try:
                 await self._resume(event_id)
             except Exception as exc:
-                from app.orchestration.graph_resume_observability import GraphResumeFailedError
+                from app.orchestration.graph_resume_observability import (
+                    GraphResumeDeferredError,
+                    GraphResumeFailedError,
+                )
 
+                if isinstance(exc, GraphResumeDeferredError):
+                    logger.info(
+                        "resume_investigation hook deferred event=%s error_type=%s",
+                        event_id,
+                        exc.error_type,
+                    )
+                    return
                 if isinstance(exc, GraphResumeFailedError):
                     logger.warning(
                         "resume_investigation hook failed event=%s error_type=%s",

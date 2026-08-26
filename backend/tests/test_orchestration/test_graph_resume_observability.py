@@ -205,6 +205,29 @@ async def test_approve_returns_resume_failed_without_rollback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_maybe_advance_plan_still_resumes_after_transition_error() -> None:
+    from app.models.enums import ActionStatus
+
+    resume = AsyncMock()
+    engine = ApprovalEngine(MagicMock(), resume_investigation=resume)
+    engine.is_plan_fully_decided = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    approved = MagicMock()
+    approved.status = ActionStatus.APPROVED
+    approved.tool_name = "block_ip"
+    approved.writeback_required = False
+    engine._load_plan_response_actions = AsyncMock(return_value=[approved])  # type: ignore[method-assign]
+    engine._event_status = AsyncMock(return_value=EventStatus.WAITING_APPROVAL)  # type: ignore[method-assign]
+    machine = MagicMock()
+    machine.transition = AsyncMock(side_effect=RuntimeError("cas conflict"))
+    engine._state_machine = machine
+
+    status = await engine._maybe_advance_plan("evt-transition-err", 1)
+
+    assert status == "ok"
+    resume.assert_awaited_once_with("evt-transition-err")
+
+
+@pytest.mark.asyncio
 async def test_maybe_advance_plan_returns_skipped_without_resume_hook() -> None:
     engine = ApprovalEngine(MagicMock(), resume_investigation=None)
     engine.is_plan_fully_decided = AsyncMock(return_value=True)  # type: ignore[method-assign]
@@ -405,7 +428,6 @@ async def test_bind_notifies_failure_handler_when_nested_resume_has_no_runner() 
 @pytest.mark.asyncio
 async def test_bind_skips_nested_resume_flush_on_cancellation() -> None:
     from app.orchestration.graph_invocation import (
-        NestedGraphResumeError,
         bind_investigation_graph,
         defer_nested_graph_resume,
         get_nested_resume_failure_handler,
@@ -453,8 +475,55 @@ async def test_bind_skips_nested_resume_flush_on_cancellation() -> None:
 
     assert flushed == []
     assert persisted == [("evt-cancel", "nested_resume_cancelled")]
-    assert notified == [("evt-cancel", "nested_resume_dropped", "evt-cancel")]
-    assert issubclass(NestedGraphResumeError, RuntimeError)
+    assert notified == []
+
+
+@pytest.mark.asyncio
+async def test_bind_flush_treats_deferred_resume_as_success() -> None:
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+    from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+
+    notified: list[str] = []
+    persisted: list[tuple[str, str]] = []
+
+    async def _deferred(event_id: str) -> None:
+        raise GraphResumeDeferredError(
+            "cannot resume while event is still WAITING_APPROVAL",
+            event_id=event_id,
+            error_type="waiting_approval",
+        )
+
+    async def _handler(event_id: str, exc: BaseException, _pending: list[str]) -> None:
+        notified.append(event_id)
+
+    async def _writer(event_id: str, reason: str) -> None:
+        persisted.append((event_id, reason))
+
+    previous_runner = get_nested_resume_runner()
+    previous_handler = get_nested_resume_failure_handler()
+    previous_writer = get_nested_resume_durability_writer()
+    set_nested_resume_runner(_deferred)
+    set_nested_resume_failure_handler(_handler)
+    set_nested_resume_durability_writer(_writer)
+    try:
+        async with bind_investigation_graph("evt-defer-flush"):
+            assert defer_nested_graph_resume("evt-defer-flush") is True
+    finally:
+        set_nested_resume_runner(previous_runner)
+        set_nested_resume_failure_handler(previous_handler)
+        set_nested_resume_durability_writer(previous_writer)
+
+    assert persisted == [("evt-defer-flush", "waiting_approval")]
+    assert notified == []
 
 
 @pytest.mark.asyncio
@@ -692,4 +761,47 @@ async def test_execute_graph_resume_waiting_approval_is_deferred_not_failed(
     assert exc_info.value.error_type == "waiting_approval"
     assert persisted == [("evt-waiting-deferred", "waiting_approval")]
     degraded.set_flag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_persist_nested_graph_wakeup_swallows_cancelled_error() -> None:
+    from app.orchestration.graph_invocation import (
+        get_nested_resume_durability_writer,
+        persist_nested_graph_wakeup,
+        set_nested_resume_durability_writer,
+    )
+
+    async def _cancel(_event_id: str, _reason: str) -> None:
+        raise asyncio.CancelledError()
+
+    previous = get_nested_resume_durability_writer()
+    set_nested_resume_durability_writer(_cancel)
+    try:
+        ok = await persist_nested_graph_wakeup("evt-cancel-persist", "nested_resume_cancelled")
+    finally:
+        set_nested_resume_durability_writer(previous)
+
+    assert ok is False
+
+
+def test_claimed_intent_deferred_path_does_not_use_mark_failure() -> None:
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "app"
+        / "services"
+        / "manual_resolution_service.py"
+    ).read_text(encoding="utf-8")
+    start = source.index("async def _run_claimed_intent")
+    end = source.index("async def _clear_manual_resolution_for_resume")
+    body = source[start:end]
+    assert "GraphResumeDeferredError" in body
+    assert body.index("await self._mark_deferred") < body.index("await self._mark_failure")
+    deferred = body[
+        body.index("if isinstance(exc, GraphResumeDeferredError)") : body.index(
+            "await self._mark_failure"
+        )
+    ]
+    assert "attempt" not in deferred
 

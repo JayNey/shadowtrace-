@@ -377,3 +377,20 @@ def test_classify_lease_lua_script_uses_expire_vs_del() -> None:
 
     assert classify_lease_lua_script('redis.call("EXPIRE", KEYS[1], ARGV[2])') == "renew"
     assert classify_lease_lua_script('redis.call("DEL", KEYS[1])') == "release"
+
+
+@pytest.mark.asyncio
+async def test_release_forgets_acquired_ttl() -> None:
+    lease = _lease_with_fake(_FakeRedis())
+    await lease.acquire("evt-ttl-leak", _OWNER, ttl_s=90)
+    assert lease._acquired_ttl["evt-ttl-leak"] == 90
+    await lease.release("evt-ttl-leak", _OWNER)
+    assert "evt-ttl-leak" not in lease._acquired_ttl
+
+
+@pytest.mark.asyncio
+async def test_release_without_redis_forgets_acquired_ttl() -> None:
+    lease = EventLease(None)
+    lease._acquired_ttl["evt-gone"] = 90
+    assert await lease.release("evt-gone", _OWNER) is False
+    assert "evt-gone" not in lease._acquired_ttl

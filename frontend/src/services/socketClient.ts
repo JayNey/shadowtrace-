@@ -92,6 +92,9 @@ class SocketClient {
   /** Drop a queued/watched event id (detail-page unmount / event switch). */
   forgetEvent(eventId: string): void {
     this.pendingEventIds.delete(eventId);
+    if (this.connected && this.socket) {
+      this.socket.emit("leave_event", { event_id: eventId });
+    }
   }
 
   /**

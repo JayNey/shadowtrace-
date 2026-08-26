@@ -61,7 +61,10 @@ from app.models.enums import (
 from app.models.security_event import EventSummary
 from app.models.workflow import TransitionContext
 from app.orchestration.event_status_transition_retry import transition_with_bounded_retry
-from app.orchestration.graph_invocation import bind_investigation_graph
+from app.orchestration.graph_invocation import (
+    bind_investigation_graph,
+    persist_nested_graph_wakeup,
+)
 from app.orchestration.graph_state import InvestigationState
 from app.orchestration.replan_handler import (
     ReplanHandler,
@@ -2272,6 +2275,10 @@ def build_investigation_graph(
                 state["event_id"],
                 ExecutionSubstate.WAITING_WRITEBACK,
                 event_status=EventStatus.VERIFYING,
+            )
+            await persist_nested_graph_wakeup(
+                state["event_id"],
+                "execution_inflight_wait",
             )
             return _patch_state(
                 _trace(NODE_VERIFY),

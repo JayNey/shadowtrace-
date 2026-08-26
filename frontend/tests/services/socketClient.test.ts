@@ -104,6 +104,19 @@ describe("socketClient", () => {
     expect(mockEmit).not.toHaveBeenCalled();
   });
 
+  it("forgetEvent leaves the event room without joining global", async () => {
+    const { socketClient } = await import("../../src/services/socketClient");
+    socketClient.connect();
+    connectHandler?.();
+    socketClient.subscribe("evt-a");
+    mockEmit.mockClear();
+
+    socketClient.forgetEvent("evt-a");
+
+    expect(mockEmit).toHaveBeenCalledWith("leave_event", { event_id: "evt-a" });
+    expect(mockEmit).not.toHaveBeenCalledWith("join_global", {});
+  });
+
   it("ensureGlobalRoom is a no-op while an event room is still pending", async () => {
     const { socketClient } = await import("../../src/services/socketClient");
     socketClient.connect();

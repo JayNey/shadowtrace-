@@ -3319,7 +3319,9 @@ async def test_verify_node_routes_accepted_writeback_to_recovery_not_manual() ->
 
 
 @pytest.mark.asyncio
-async def test_verify_node_real_agent_executing_not_required_does_not_go_manual() -> None:
+async def test_verify_node_real_agent_executing_not_required_does_not_go_manual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real VerifyAgent + EXECUTING + NOT_REQUIRED must WAIT, not MANUAL."""
     from app.agents.verify_agent import VerifyAgent
     from tests.test_agents.test_verify_agent import (
@@ -3328,6 +3330,11 @@ async def test_verify_node_real_agent_executing_not_required_does_not_go_manual(
         _action,
     )
 
+    persist_wakeup = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.orchestration.workflow_graph.persist_nested_graph_wakeup",
+        persist_wakeup,
+    )
     event_id = "evt-executing-not-required"
     action = _action(
         event_id=event_id,
@@ -3371,6 +3378,7 @@ async def test_verify_node_real_agent_executing_not_required_does_not_go_manual(
     flags = " ".join(str(flag) for flag in (result.get("degraded_flags") or []))
     assert "execution_failed_unverified" not in flags
     assert route_after_verify(result) == ROUTE_HALT
+    persist_wakeup.assert_awaited_once_with(event_id, "execution_inflight_wait")
 
 
 @pytest.mark.asyncio

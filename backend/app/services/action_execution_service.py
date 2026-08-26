@@ -965,16 +965,15 @@ class ActionExecutionService:
             event_id=event_id,
             limit=limit,
         )
-        looked_up = 0
-        if getattr(self, "_sync", None) is not None:
+        if event_id is None and getattr(self, "_sync", None) is not None:
             try:
-                looked_up = await self._sync.reconcile_pending_entity_effects(limit=limit)
+                await self._sync.reconcile_pending_entity_effects(limit=limit)
             except Exception:
                 logger.exception(
                     "delivered ACCEPTED lookup during stale reclaim failed event_id=%s",
                     event_id,
                 )
-        return reclaimed + looked_up
+        return reclaimed
 
     async def _reclaim_stale_job_row(
         self,
@@ -1226,6 +1225,11 @@ async def _reclaim_stale_executing_action(
     if action_row.execution_phase != ActionExecutionPhase.IMMEDIATE.value:
         return False
 
+    # ACCEPTED writebacks are in-flight until CONFIRMED; never copy a job
+    # terminal status onto the Action while the provider has only ACCEPTED.
+    if await _has_delivered_accepted_outbox(session, action_row.action_id):
+        return False
+
     job_row = None
     if action_row.execution_job_id:
         job_row = await session.get(orm.ActionExecutionJob, action_row.execution_job_id)
@@ -1265,8 +1269,6 @@ async def _reclaim_stale_executing_action(
             ):
                 return False
 
-    if await _has_delivered_accepted_outbox(session, action_row.action_id):
-        return False
     if await _has_active_outbox(session, action_row.action_id):
         return False
 

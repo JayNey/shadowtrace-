@@ -240,9 +240,6 @@ async def execute_graph_resume_with_retry(
             raise
         except GraphResumeDeferredError as exc:
             last_exc = exc
-            if attempt + 1 < _RESUME_MAX_ATTEMPTS:
-                await asyncio.sleep(_RESUME_RETRY_BASE_SECONDS * (attempt + 1))
-                continue
             break
         except GraphResumeFailedError as exc:
             last_exc = exc

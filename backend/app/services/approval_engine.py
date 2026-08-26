@@ -925,12 +925,12 @@ class ApprovalEngine:
                     )
                 except Exception:
                     logger.warning(
-                        "plan advance transition failed event=%s target=%s",
+                        "plan advance transition failed event=%s target=%s; "
+                        "continuing to resume",
                         event_id,
                         target.value,
                         exc_info=True,
                     )
-                    return "failed"
 
         if self._resume is not None:
             if is_in_investigation_graph(event_id=event_id):

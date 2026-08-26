@@ -110,6 +110,13 @@ async def persist_nested_graph_wakeup(
     try:
         await writer(event_id, reason)
         return True
+    except asyncio.CancelledError:
+        logger.warning(
+            "nested graph wakeup persist cancelled event=%s reason=%s",
+            event_id,
+            reason,
+        )
+        return False
     except Exception:
         logger.exception(
             "nested graph wakeup persist failed event=%s reason=%s",
@@ -216,6 +223,16 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
         try:
             await runner(resume_event_id)
         except Exception as exc:
+            from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+
+            if isinstance(exc, GraphResumeDeferredError):
+                logger.warning(
+                    "deferred nested graph resume not ready event=%s error_type=%s",
+                    resume_event_id,
+                    exc.error_type,
+                )
+                await persist_nested_graph_wakeup(resume_event_id, exc.error_type)
+                continue
             logger.exception(
                 "deferred nested graph resume failed event=%s",
                 resume_event_id,
@@ -251,18 +268,6 @@ async def bind_investigation_graph(event_id: str) -> AsyncIterator[None]:
                 pending,
             )
             await _persist_pending_nested_wakeups(pending, persist_reason)
-            dropped = NestedGraphResumeError(
-                "nested graph resume deferred due to cancellation",
-                event_id=event_id,
-                pending=pending,
-                error_type="nested_resume_dropped",
-            )
-            for resume_event_id in pending:
-                await _notify_nested_resume_failure(
-                    resume_event_id,
-                    dropped,
-                    [resume_event_id],
-                )
         else:
             try:
                 await _flush_deferred_graph_resumes(event_id, pending)

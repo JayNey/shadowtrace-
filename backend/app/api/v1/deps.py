@@ -438,12 +438,10 @@ def _get_adapter_registry() -> Any:
             )
             registry.register("mock_xdr", adapter)
         else:
-            from app.adapters.disposition.http_adapter import HttpDispositionAdapter
-            from app.tools.adapters.base import AdapterConfig
-
             kind = (settings.disposition_adapter_kind or "generic_http_disposition").strip()
             if not kind or kind.lower() == "mock":
                 kind = "generic_http_disposition"
+            endpoint = (settings.disposition_base_url or "").strip()
             credential_ref = (settings.disposition_credential_ref or "").strip()
             if credential_ref and (
                 not credential_ref.replace("_", "").isalnum()
@@ -454,22 +452,37 @@ def _get_adapter_registry() -> Any:
                     credential_ref,
                 )
                 credential_ref = ""
-            logger.info(
-                "registering live disposition adapter kind=%s enabled=false "
-                "allow_side_effects=false (this stage is mock-only)",
-                kind,
+            allow_side_effects = bool(
+                settings.allow_live_side_effects and settings.allow_xdr_writeback
             )
-            registry.register(
-                kind,
-                HttpDispositionAdapter(
-                    AdapterConfig(
-                        endpoint=settings.disposition_base_url or "http://127.0.0.1",
-                        credential_ref=credential_ref,
-                        enabled=False,
+            if not endpoint:
+                logger.error(
+                    "live disposition_mode without DISPOSITION_BASE_URL; "
+                    "not registering a disabled stub adapter kind=%s",
+                    kind,
+                )
+            else:
+                from app.adapters.disposition.http_adapter import HttpDispositionAdapter
+                from app.tools.adapters.base import AdapterConfig
+
+                logger.info(
+                    "registering live disposition adapter kind=%s endpoint=%s "
+                    "allow_side_effects=%s",
+                    kind,
+                    endpoint,
+                    allow_side_effects,
+                )
+                registry.register(
+                    kind,
+                    HttpDispositionAdapter(
+                        AdapterConfig(
+                            endpoint=endpoint,
+                            credential_ref=credential_ref,
+                            enabled=True,
+                        ),
+                        allow_side_effects=allow_side_effects,
                     ),
-                    allow_side_effects=False,
-                ),
-            )
+                )
         _adapter_registry = registry
     return _adapter_registry
 
@@ -533,13 +546,20 @@ async def _on_nested_resume_flush_failure(
 ) -> None:
     """Record graph_resume_failed when nested flush fails without prior observability."""
     from app.orchestration.graph_resume_observability import (
+        GraphResumeDeferredError,
         GraphResumeFailedError,
         GraphResumeFailureContext,
         record_graph_resume_failure,
     )
 
-    if isinstance(exc, GraphResumeFailedError):
-        # Runner already recorded observability for this event.
+    if isinstance(exc, (GraphResumeFailedError, GraphResumeDeferredError)):
+        # Runner already recorded observability, or resume is not ready yet.
+        return
+    if isinstance(exc, NestedGraphResumeError) and exc.error_type in {
+        "nested_resume_dropped",
+        "nested_resume_cancelled",
+        "nested_resume_soft_time_limit",
+    }:
         return
     error_type = (
         exc.error_type
