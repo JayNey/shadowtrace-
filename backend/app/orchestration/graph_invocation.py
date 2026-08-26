@@ -98,7 +98,12 @@ async def persist_nested_graph_wakeup(
     event_id: str,
     reason: str = "nested_wakeup",
 ) -> bool:
-    """Enqueue a durable nested graph wakeup. Never raises."""
+    """Enqueue a durable nested graph wakeup.
+
+    Ordinary writer failures are logged and return ``False``.
+    ``CancelledError`` always propagates so bind/cancel cannot drop a wakeup
+    by swallowing cancellation.
+    """
     writer = _nested_resume_durability_writer
     if writer is None:
         logger.error(
@@ -116,7 +121,7 @@ async def persist_nested_graph_wakeup(
             event_id,
             reason,
         )
-        return False
+        raise
     except Exception:
         logger.exception(
             "nested graph wakeup persist failed event=%s reason=%s",
@@ -267,7 +272,7 @@ async def bind_investigation_graph(event_id: str) -> AsyncIterator[None]:
                 persist_reason,
                 pending,
             )
-            await _persist_pending_nested_wakeups(pending, persist_reason)
+            await asyncio.shield(_persist_pending_nested_wakeups(pending, persist_reason))
         else:
             try:
                 await _flush_deferred_graph_resumes(event_id, pending)

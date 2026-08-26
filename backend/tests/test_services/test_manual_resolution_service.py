@@ -1292,6 +1292,7 @@ async def test_nested_wakeup_deferred_does_not_burn_dead_budget(
         session_factory,
         resume_runner=_deferred,
         max_attempts=1,
+        nested_retry_backoff_s=0,
     )
     service.schedule_dispatch = lambda **_kwargs: None  # type: ignore[method-assign]
     intent = await service.enqueue_nested_wakeup(event_id, reason="waiting_approval")
@@ -1314,3 +1315,155 @@ async def test_nested_wakeup_deferred_does_not_burn_dead_budget(
         assert row is not None
         assert row.status == GraphResumeIntentStatus.RETRY.value
         assert int(row.attempt or 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_nested_wakeup_inflight_halt_marks_retry_not_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.services.context_service import append_context_journal_in_session
+
+    event_id = await _seed_event(session_factory, status=EventStatus.VERIFYING)
+    async with session_factory() as session:
+        async with session.begin():
+            await append_context_journal_in_session(
+                session,
+                event_id,
+                "execution_substate",
+                ExecutionSubstate.WAITING_WRITEBACK.value,
+            )
+
+    async def _ok(_eid: str) -> None:
+        return None
+
+    service = ManualResolutionService(
+        session_factory,
+        resume_runner=_ok,
+        nested_retry_backoff_s=0,
+    )
+    service.schedule_dispatch = lambda **_kwargs: None  # type: ignore[method-assign]
+    intent = await service.enqueue_nested_wakeup(event_id, reason="execution_inflight_wait")
+    assert intent is not None
+    claimed = await service._claim_batch(limit=100)
+    assert intent.intent_id in claimed
+    assert await service._run_claimed_intent(intent.intent_id) is False
+    async with session_factory() as session:
+        row = await session.get(orm.GraphResumeIntent, intent.intent_id)
+        assert row is not None
+        assert row.status == GraphResumeIntentStatus.RETRY.value
+        assert int(row.attempt or 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_waiting_approval_deferred_respects_retry_backoff(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+
+    event_id = await _seed_event(session_factory, status=EventStatus.WAITING_APPROVAL)
+
+    async def _deferred(_eid: str) -> None:
+        raise GraphResumeDeferredError(
+            "cannot resume while event is still WAITING_APPROVAL",
+            event_id=_eid,
+            error_type="waiting_approval",
+        )
+
+    service = ManualResolutionService(
+        session_factory,
+        resume_runner=_deferred,
+        max_attempts=1,
+        nested_retry_backoff_s=15,
+    )
+    service.schedule_dispatch = lambda **_kwargs: None  # type: ignore[method-assign]
+    intent = await service.enqueue_nested_wakeup(event_id, reason="waiting_approval")
+    assert intent is not None
+    claimed = await service._claim_batch(limit=100)
+    assert intent.intent_id in claimed
+    assert await service._run_claimed_intent(intent.intent_id) is False
+    claimed_again = await service._claim_batch(limit=100)
+    assert intent.intent_id not in claimed_again
+    assert await service._claim_intent(intent.intent_id) is None
+
+
+@pytest.mark.asyncio
+async def test_nested_wakeup_dispatch_while_graph_bound_is_deferred(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.orchestration.graph_invocation import bind_investigation_graph
+
+    event_id = await _seed_event(session_factory)
+    dispatched: list[str] = []
+    service = ManualResolutionService(session_factory)
+
+    def _capture(**kwargs: object) -> None:
+        dispatched.append(str(kwargs.get("event_id") or ""))
+
+    service.schedule_dispatch = _capture  # type: ignore[method-assign]
+    async with bind_investigation_graph(event_id):
+        intent = await service.enqueue_nested_wakeup(
+            event_id,
+            reason="execution_inflight_wait",
+        )
+        assert intent is not None
+        assert dispatched == []
+    await service.enqueue_nested_wakeup(event_id, reason="execution_inflight_wait")
+    assert dispatched == [event_id]
+
+
+def test_nested_retry_ready_honors_backoff_without_db() -> None:
+    from app.models.graph_resume_intent import INTENT_KIND_NESTED_GRAPH_WAKEUP
+
+    service = ManualResolutionService(MagicMock(), nested_retry_backoff_s=15)
+    now = datetime.now(UTC)
+    row = MagicMock()
+    row.intent_kind = INTENT_KIND_NESTED_GRAPH_WAKEUP
+    row.status = GraphResumeIntentStatus.RETRY.value
+    row.updated_at = now
+    assert service._nested_retry_ready(row, now) is False
+    row.updated_at = now - timedelta(seconds=16)
+    assert service._nested_retry_ready(row, now) is True
+    row.intent_kind = "manual_resolution_resume"
+    row.updated_at = now
+    assert service._nested_retry_ready(row, now) is True
+
+
+@pytest.mark.asyncio
+async def test_dispatch_nested_wakeup_skips_while_graph_bound_without_db() -> None:
+    from app.models.graph_resume_intent import (
+        INTENT_KIND_NESTED_GRAPH_WAKEUP,
+        INTENT_VERSION_ISSUE277_V1,
+        NESTED_WAKEUP_HOLD_GENERATION,
+        RESOLUTION_SOURCE_NESTED_WAKEUP,
+        SUBJECT_KIND_EVENT,
+        GraphResumeIntentRecord,
+    )
+    from app.orchestration.graph_invocation import bind_investigation_graph
+
+    dispatched: list[str] = []
+    service = ManualResolutionService(MagicMock())
+    service.schedule_dispatch = lambda **kwargs: dispatched.append("yes")  # type: ignore[method-assign]
+    record = GraphResumeIntentRecord(
+        intent_id="gri-bound",
+        event_id="evt-bound-dispatch",
+        intent_kind=INTENT_KIND_NESTED_GRAPH_WAKEUP,
+        intent_version=INTENT_VERSION_ISSUE277_V1,
+        status=GraphResumeIntentStatus.PENDING,
+        revision=1,
+        attempt=0,
+        hold_generation=NESTED_WAKEUP_HOLD_GENERATION,
+        checkpoint_id="evt-bound-dispatch",
+        operation_id=None,
+        resolution_source=RESOLUTION_SOURCE_NESTED_WAKEUP,
+        subject_kind=SUBJECT_KIND_EVENT,
+        subject_id="evt-bound-dispatch",
+        resolution="execution_inflight_wait",
+        principal="NestedGraphResume",
+        skip_reason=None,
+        last_error=None,
+    )
+    async with bind_investigation_graph("evt-bound-dispatch"):
+        service._dispatch_nested_wakeup_if_unbound(record)
+        assert dispatched == []
+    service._dispatch_nested_wakeup_if_unbound(record)
+    assert dispatched == ["yes"]

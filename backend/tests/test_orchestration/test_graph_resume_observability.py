@@ -306,13 +306,15 @@ async def test_execute_graph_resume_skips_nested_active_graph() -> None:
     set_nested_resume_runner(AsyncMock())
     try:
         async with bind_investigation_graph("evt-nested"):
-            await execute_graph_resume_with_retry(
-                "evt-nested",
-                session_factory=_SessionFactory(),
-                get_super_agent=_get_super_agent,
-                get_workflow_runtime=AsyncMock(return_value=MagicMock()),
-                degraded_flags=MagicMock(),
-            )
+            with pytest.raises(GraphResumeDeferredError) as exc_info:
+                await execute_graph_resume_with_retry(
+                    "evt-nested",
+                    session_factory=_SessionFactory(),
+                    get_super_agent=_get_super_agent,
+                    get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+                    degraded_flags=MagicMock(),
+                )
+            assert exc_info.value.error_type == "graph_still_bound"
     finally:
         set_nested_resume_runner(previous)
 
@@ -336,13 +338,15 @@ async def test_execute_graph_resume_flushes_nested_defer_after_unbind() -> None:
     set_nested_resume_runner(_runner)
     try:
         async with bind_investigation_graph("evt-nested-flush"):
-            await execute_graph_resume_with_retry(
-                "evt-nested-flush",
-                session_factory=_SessionFactory(),
-                get_super_agent=AsyncMock(),
-                get_workflow_runtime=AsyncMock(),
-                degraded_flags=MagicMock(),
-            )
+            with pytest.raises(GraphResumeDeferredError) as exc_info:
+                await execute_graph_resume_with_retry(
+                    "evt-nested-flush",
+                    session_factory=_SessionFactory(),
+                    get_super_agent=AsyncMock(),
+                    get_workflow_runtime=AsyncMock(),
+                    degraded_flags=MagicMock(),
+                )
+            assert exc_info.value.error_type == "graph_still_bound"
             assert flushed == []
         assert flushed == ["evt-nested-flush"]
     finally:
@@ -764,7 +768,7 @@ async def test_execute_graph_resume_waiting_approval_is_deferred_not_failed(
 
 
 @pytest.mark.asyncio
-async def test_persist_nested_graph_wakeup_swallows_cancelled_error() -> None:
+async def test_persist_nested_graph_wakeup_propagates_cancelled_error() -> None:
     from app.orchestration.graph_invocation import (
         get_nested_resume_durability_writer,
         persist_nested_graph_wakeup,
@@ -777,11 +781,10 @@ async def test_persist_nested_graph_wakeup_swallows_cancelled_error() -> None:
     previous = get_nested_resume_durability_writer()
     set_nested_resume_durability_writer(_cancel)
     try:
-        ok = await persist_nested_graph_wakeup("evt-cancel-persist", "nested_resume_cancelled")
+        with pytest.raises(asyncio.CancelledError):
+            await persist_nested_graph_wakeup("evt-cancel-persist", "nested_resume_cancelled")
     finally:
         set_nested_resume_durability_writer(previous)
-
-    assert ok is False
 
 
 def test_claimed_intent_deferred_path_does_not_use_mark_failure() -> None:

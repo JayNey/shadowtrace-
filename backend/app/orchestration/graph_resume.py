@@ -11,6 +11,7 @@ resume must never fall back to a full-graph ``execute_investigation()`` restart
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -645,6 +646,75 @@ async def _resume_report_only_from_analysis(
     logger.info("report-only resume completed event=%s (status remains REPORTING)", event_id)
 
 
+async def _invoke_investigation_graph_with_lease(
+    agent: Any,
+    graph: Any,
+    state: Any,
+    config: RunnableConfig,
+    event_id: str,
+) -> None:
+    """Start checkpoint resume under the same EventLease fence as SuperAgent."""
+    from app.agents.super_agent import _run_orchestration_with_renewal_watch
+    from app.core.errors import DependencyUnavailableError, InvestigationLeaseLostError
+    from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+    from app.orchestration.lease import EventLease, generate_owner_id
+
+    lease = getattr(agent, "lease", None)
+    if not isinstance(lease, EventLease):
+        await invoke_investigation_graph(graph, state, config)
+        return
+
+    owner_id = generate_owner_id()
+    try:
+        acquired = await lease.acquire(event_id, owner_id)
+    except DependencyUnavailableError as exc:
+        raise GraphResumeDeferredError(
+            "event lease store unavailable; not starting graph resume",
+            event_id=event_id,
+            error_type="lease_unavailable",
+        ) from exc
+    if not acquired:
+        raise GraphResumeDeferredError(
+            "investigation already in progress for this event",
+            event_id=event_id,
+            error_type="investigation_in_progress",
+        )
+
+    renewal_failed = asyncio.Event()
+    renewal_task = await lease.start_renewal(
+        event_id,
+        owner_id,
+        on_renewal_failed=renewal_failed,
+    )
+    try:
+        await _run_orchestration_with_renewal_watch(
+            invoke_investigation_graph(graph, state, config),
+            renewal_failed,
+            event_id=event_id,
+        )
+    except InvestigationLeaseLostError as exc:
+        raise GraphResumeDeferredError(
+            "investigation lease lost during graph resume",
+            event_id=event_id,
+            error_type="investigation_lease_lost",
+        ) from exc
+    finally:
+        renewal_task.cancel()
+        try:
+            await renewal_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await lease.release(event_id, owner_id)
+        except Exception:
+            logger.warning(
+                "graph resume lease release failed event=%s owner=%s",
+                event_id,
+                owner_id,
+                exc_info=True,
+            )
+
+
 async def _delegate_execute_investigation(
     session_factory: async_sessionmaker[AsyncSession],
     event_id: str,
@@ -715,7 +785,13 @@ async def resume_investigation_from_checkpoint(
 
         projection = EvidenceProjection(session_factory)
         with bind_evidence_projection(projection):
-            await invoke_investigation_graph(graph, None, reporting_config)
+            await _invoke_investigation_graph_with_lease(
+                agent,
+                graph,
+                None,
+                reporting_config,
+                event_id,
+            )
         return
 
     if status_value == EventStatus.WAITING_APPROVAL.value:
@@ -764,7 +840,13 @@ async def resume_investigation_from_checkpoint(
 
     projection = EvidenceProjection(session_factory)
     with bind_evidence_projection(projection):
-        await invoke_investigation_graph(graph, None, config)
+        await _invoke_investigation_graph_with_lease(
+            agent,
+            graph,
+            None,
+            config,
+            event_id,
+        )
 
 
 __all__ = [

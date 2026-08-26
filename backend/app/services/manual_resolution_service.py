@@ -11,7 +11,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -52,6 +52,14 @@ _CLAIM_LEASE_S = 120
 _DISPATCH_WORKER_ID = "graph-resume-dispatcher-1"
 _STARTED_STALE_MIN_S = 660
 _MAX_ATTEMPTS = 5
+_NESTED_WAKEUP_RETRY_BACKOFF_S = 15
+_NESTED_WAKEUP_STILL_WAITING = frozenset(
+    {
+        ExecutionSubstate.WAITING_WRITEBACK,
+        ExecutionSubstate.WAITING_EXECUTION,
+        ExecutionSubstate.WAITING_APPROVAL,
+    }
+)
 
 
 def new_graph_resume_intent_id() -> str:
@@ -91,6 +99,7 @@ class ManualResolutionService:
         degraded_flags: DegradedFlagService | None = None,
         claim_lease_s: int = _CLAIM_LEASE_S,
         max_attempts: int = _MAX_ATTEMPTS,
+        nested_retry_backoff_s: int = _NESTED_WAKEUP_RETRY_BACKOFF_S,
     ) -> None:
         self._session_factory = session_factory
         self._runtime = workflow_runtime
@@ -98,6 +107,7 @@ class ManualResolutionService:
         self._degraded = degraded_flags
         self._claim_lease_s = claim_lease_s
         self._max_attempts = max_attempts
+        self._nested_retry_backoff_s = max(0, int(nested_retry_backoff_s))
         self._dispatch_scheduled = False
         self._pending_in_process: list[tuple[str | None, str | None, str, tuple[str, ...]]] = []
 
@@ -286,35 +296,32 @@ class ManualResolutionService:
                         .with_for_update()
                     )
                     if active is not None:
-                        return self._record_from_row(active)
-                    row = orm.GraphResumeIntent(
-                        intent_id=new_graph_resume_intent_id(),
-                        event_id=event_id,
-                        intent_kind=INTENT_KIND_NESTED_GRAPH_WAKEUP,
-                        intent_version=INTENT_VERSION_ISSUE277_V1,
-                        status=GraphResumeIntentStatus.PENDING.value,
-                        revision=1,
-                        attempt=0,
-                        hold_generation=NESTED_WAKEUP_HOLD_GENERATION,
-                        checkpoint_id=event_id,
-                        operation_id=None,
-                        resolution_source=RESOLUTION_SOURCE_NESTED_WAKEUP,
-                        subject_kind=SUBJECT_KIND_EVENT,
-                        subject_id=event_id,
-                        resolution=reason,
-                        principal="NestedGraphResume",
-                        comment=reason,
-                        evidence_ref=None,
-                        payload_sha256=payload_hash,
-                    )
-                    session.add(row)
-                    await session.flush()
-                    record = self._record_from_row(row)
-            self.schedule_dispatch(
-                event_id=event_id,
-                intent_id=record.intent_id,
-                trigger="nested_wakeup",
-            )
+                        record = self._record_from_row(active)
+                    else:
+                        row = orm.GraphResumeIntent(
+                            intent_id=new_graph_resume_intent_id(),
+                            event_id=event_id,
+                            intent_kind=INTENT_KIND_NESTED_GRAPH_WAKEUP,
+                            intent_version=INTENT_VERSION_ISSUE277_V1,
+                            status=GraphResumeIntentStatus.PENDING.value,
+                            revision=1,
+                            attempt=0,
+                            hold_generation=NESTED_WAKEUP_HOLD_GENERATION,
+                            checkpoint_id=event_id,
+                            operation_id=None,
+                            resolution_source=RESOLUTION_SOURCE_NESTED_WAKEUP,
+                            subject_kind=SUBJECT_KIND_EVENT,
+                            subject_id=event_id,
+                            resolution=reason,
+                            principal="NestedGraphResume",
+                            comment=reason,
+                            evidence_ref=None,
+                            payload_sha256=payload_hash,
+                        )
+                        session.add(row)
+                        await session.flush()
+                        record = self._record_from_row(row)
+            self._dispatch_nested_wakeup_if_unbound(record)
             return record
         except IntegrityError:
             logger.info(
@@ -322,11 +329,13 @@ class ManualResolutionService:
                 event_id,
             )
             try:
-                return await self._lookup_resume_intent_after_race(
+                record = await self._lookup_resume_intent_after_race(
                     event_id,
                     operation_id=None,
                     hold_generation=NESTED_WAKEUP_HOLD_GENERATION,
                 )
+                self._dispatch_nested_wakeup_if_unbound(record)
+                return record
             except ValidationError:
                 logger.exception(
                     "nested graph wakeup race lookup failed event=%s",
@@ -336,6 +345,52 @@ class ManualResolutionService:
         except Exception:
             logger.exception("failed to enqueue nested graph wakeup event=%s", event_id)
             return None
+
+    def _dispatch_nested_wakeup_if_unbound(self, record: GraphResumeIntentRecord) -> None:
+        """Dispatch only after the investigation graph has unbound this event.
+
+        ContextVar is process-local; EventLease on resume fences the other worker.
+        """
+        from app.orchestration.graph_invocation import is_in_investigation_graph
+
+        if is_in_investigation_graph(event_id=record.event_id):
+            logger.info(
+                "nested wakeup persisted without dispatch; graph still bound event=%s",
+                record.event_id,
+            )
+            return
+        if record.status not in {
+            GraphResumeIntentStatus.PENDING,
+            GraphResumeIntentStatus.RETRY,
+        }:
+            return
+        self.schedule_dispatch(
+            event_id=record.event_id,
+            intent_id=record.intent_id,
+            trigger="nested_wakeup",
+        )
+
+    def _nested_retry_ready(self, row: orm.GraphResumeIntent, now: datetime) -> bool:
+        if str(row.intent_kind) != INTENT_KIND_NESTED_GRAPH_WAKEUP:
+            return True
+        if GraphResumeIntentStatus(row.status) is not GraphResumeIntentStatus.RETRY:
+            return True
+        if self._nested_retry_backoff_s <= 0:
+            return True
+        updated = row.updated_at
+        if updated is None:
+            return True
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=UTC)
+        return updated <= now - timedelta(seconds=self._nested_retry_backoff_s)
+
+    async def _nested_wakeup_still_waiting(self, event_id: str) -> bool:
+        async with self._session_factory() as session:
+            event = await session.get(orm.SecurityEvent, event_id)
+            if event is not None and str(event.status) == EventStatus.WAITING_APPROVAL.value:
+                return True
+            substate = await self._read_execution_substate(session, event_id)
+            return substate in _NESTED_WAKEUP_STILL_WAITING
 
     async def create_or_replay_resume_intent_in_session(
         self,
@@ -847,11 +902,20 @@ class ManualResolutionService:
                     await session.scalars(
                         select(orm.GraphResumeIntent)
                         .where(
-                            orm.GraphResumeIntent.status.in_(
-                                [
-                                    GraphResumeIntentStatus.PENDING.value,
-                                    GraphResumeIntentStatus.RETRY.value,
-                                ]
+                            or_(
+                                orm.GraphResumeIntent.status
+                                == GraphResumeIntentStatus.PENDING.value,
+                                and_(
+                                    orm.GraphResumeIntent.status
+                                    == GraphResumeIntentStatus.RETRY.value,
+                                    or_(
+                                        orm.GraphResumeIntent.intent_kind
+                                        != INTENT_KIND_NESTED_GRAPH_WAKEUP,
+                                        orm.GraphResumeIntent.updated_at
+                                        <= now
+                                        - timedelta(seconds=self._nested_retry_backoff_s),
+                                    ),
+                                ),
                             )
                         )
                         .order_by(orm.GraphResumeIntent.updated_at.asc())
@@ -887,6 +951,8 @@ class ManualResolutionService:
                     GraphResumeIntentStatus.PENDING,
                     GraphResumeIntentStatus.RETRY,
                 }:
+                    return None
+                if not self._nested_retry_ready(row, now):
                     return None
                 validate_graph_resume_transition(current, GraphResumeIntentStatus.CLAIMED)
                 row.status = GraphResumeIntentStatus.CLAIMED.value
@@ -953,6 +1019,17 @@ class ManualResolutionService:
                 raise RuntimeError("resume_runner is not bound")
             if kind == INTENT_KIND_NESTED_GRAPH_WAKEUP:
                 await self._resume_runner(event_id)
+                if await self._nested_wakeup_still_waiting(event_id):
+                    logger.warning(
+                        "nested graph wakeup made no progress intent=%s event=%s",
+                        intent_id,
+                        event_id,
+                    )
+                    await self._mark_deferred(
+                        intent_id,
+                        error="nested_wakeup_still_waiting",
+                    )
+                    return False
                 await self._mark_terminal(intent_id)
                 return True
             # Keep MANUAL_RESOLUTION until resume succeeds so a crash mid-run

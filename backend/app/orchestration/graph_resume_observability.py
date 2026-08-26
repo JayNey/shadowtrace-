@@ -222,7 +222,12 @@ async def execute_graph_resume_with_retry(
             "defer nested graph resume while graph active event=%s",
             event_id,
         )
-        return
+        await persist_nested_graph_wakeup(event_id, "graph_still_bound")
+        raise GraphResumeDeferredError(
+            "cannot resume while investigation graph is bound",
+            event_id=event_id,
+            error_type="graph_still_bound",
+        )
 
     last_exc: BaseException | None = None
     for attempt in range(_RESUME_MAX_ATTEMPTS):

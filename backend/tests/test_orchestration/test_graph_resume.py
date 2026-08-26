@@ -785,3 +785,42 @@ async def test_prepare_waiting_approval_raises_distinct_error() -> None:
         )
 
     assert exc_info.value.error_type == "waiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_resume_defers_when_event_lease_held() -> None:
+    from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+    from app.orchestration.lease import EventLease, generate_owner_id
+    from tests.support.fake_redis import InMemoryFakeRedisClient
+
+    event_id = "evt-lease-held"
+    lease = EventLease(InMemoryFakeRedisClient())
+    assert await lease.acquire(event_id, generate_owner_id()) is True
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "halted": True,
+                "event_status": EventStatus.EXECUTING_RESPONSE.value,
+            }
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+    graph.ainvoke = AsyncMock()
+    agent = MagicMock()
+    agent._investigation_graph = graph
+    agent.lease = lease
+    runtime = MagicMock()
+    runtime.set_execution_substate = AsyncMock()
+
+    with pytest.raises(GraphResumeDeferredError) as exc_info:
+        await resume_investigation_from_checkpoint(
+            _SessionFactory(EventStatus.EXECUTING_RESPONSE.value),
+            event_id,
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=runtime),
+        )
+
+    assert exc_info.value.error_type == "investigation_in_progress"
+    graph.ainvoke.assert_not_called()

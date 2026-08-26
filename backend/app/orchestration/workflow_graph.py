@@ -63,6 +63,7 @@ from app.models.workflow import TransitionContext
 from app.orchestration.event_status_transition_retry import transition_with_bounded_retry
 from app.orchestration.graph_invocation import (
     bind_investigation_graph,
+    defer_nested_graph_resume,
     persist_nested_graph_wakeup,
 )
 from app.orchestration.graph_state import InvestigationState
@@ -2276,6 +2277,7 @@ def build_investigation_graph(
                 ExecutionSubstate.WAITING_WRITEBACK,
                 event_status=EventStatus.VERIFYING,
             )
+            defer_nested_graph_resume(state["event_id"])
             await persist_nested_graph_wakeup(
                 state["event_id"],
                 "execution_inflight_wait",

@@ -443,19 +443,28 @@ def _get_adapter_registry() -> Any:
                 kind = "generic_http_disposition"
             endpoint = (settings.disposition_base_url or "").strip()
             credential_ref = (settings.disposition_credential_ref or "").strip()
-            if credential_ref and (
-                not credential_ref.replace("_", "").isalnum()
-                or credential_ref.upper() != credential_ref
-            ):
-                logger.error(
-                    "invalid disposition credential_ref=%r; ignoring credential_ref",
-                    credential_ref,
-                )
-                credential_ref = ""
             allow_side_effects = bool(
                 settings.allow_live_side_effects and settings.allow_xdr_writeback
             )
-            if not endpoint:
+            invalid_ref = bool(
+                credential_ref
+                and (
+                    not credential_ref.replace("_", "").isalnum()
+                    or credential_ref.upper() != credential_ref
+                )
+            )
+            if invalid_ref:
+                logger.error(
+                    "invalid disposition credential_ref=%r; not registering live adapter",
+                    credential_ref,
+                )
+            elif not credential_ref:
+                logger.error(
+                    "live disposition_mode missing DISPOSITION_CREDENTIAL_REF; "
+                    "not registering adapter kind=%s",
+                    kind,
+                )
+            elif not endpoint:
                 logger.error(
                     "live disposition_mode without DISPOSITION_BASE_URL; "
                     "not registering a disabled stub adapter kind=%s",
@@ -465,24 +474,31 @@ def _get_adapter_registry() -> Any:
                 from app.adapters.disposition.http_adapter import HttpDispositionAdapter
                 from app.tools.adapters.base import AdapterConfig
 
-                logger.info(
-                    "registering live disposition adapter kind=%s endpoint=%s "
-                    "allow_side_effects=%s",
-                    kind,
-                    endpoint,
-                    allow_side_effects,
-                )
-                registry.register(
-                    kind,
-                    HttpDispositionAdapter(
-                        AdapterConfig(
-                            endpoint=endpoint,
-                            credential_ref=credential_ref,
-                            enabled=True,
-                        ),
-                        allow_side_effects=allow_side_effects,
+                adapter = HttpDispositionAdapter(
+                    AdapterConfig(
+                        endpoint=endpoint,
+                        credential_ref=credential_ref,
+                        auth_type="bearer",
+                        enabled=True,
                     ),
+                    allow_side_effects=allow_side_effects,
                 )
+                if not adapter.validate_config():
+                    logger.error(
+                        "live disposition adapter failed validate_config; "
+                        "not registering kind=%s endpoint=%s",
+                        kind,
+                        endpoint,
+                    )
+                else:
+                    logger.info(
+                        "registering live disposition adapter kind=%s endpoint=%s "
+                        "allow_side_effects=%s",
+                        kind,
+                        endpoint,
+                        allow_side_effects,
+                    )
+                    registry.register(kind, adapter)
         _adapter_registry = registry
     return _adapter_registry
 
