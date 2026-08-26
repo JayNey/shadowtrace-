@@ -9,6 +9,7 @@ import pytest
 
 from app.core.errors import ValidationError
 from app.models.enums import (
+    ActionStatus,
     DispositionIntentKind,
     DispositionPolicy,
     EventStatus,
@@ -150,6 +151,91 @@ async def test_prepare_verify_resume_schedules_fresh_verify_after_recovery() -> 
 
     assert found is True
     assert graph.aupdate_state.await_args.kwargs["as_node"] == NODE_EXECUTE
+
+
+@pytest.mark.asyncio
+async def test_waiting_writeback_resume_reruns_verify_and_escalates_after_accepted_timeout(
+) -> None:
+    """Still-EXECUTING WAITING_WRITEBACK resume must re-run VerifyAgent (execute tail)."""
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "halted": True,
+                "verify_need_writeback_recovery": True,
+                "verify_need_manual_resolution": False,
+                "verify_failed_writebacks": [],
+                "verify_recoverable_writeback_ids": [],
+                "verify_pending_writeback_action_ids": ["act-wait-1"],
+                "execution_inflight": True,
+                "execution_inflight_action_ids": ["act-wait-1"],
+                "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+                "disposition_policy": DispositionPolicy.NOT_REQUIRED.value,
+            }
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+    runtime = MagicMock()
+    runtime.set_execution_substate = AsyncMock()
+
+    found = await prepare_graph_resume_state(
+        _SessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_rows=[("act-wait-1", ActionStatus.EXECUTING.value)],
+        ),
+        graph,
+        "evt-accepted-wait-reverify",
+        runtime,
+    )
+
+    assert found is True
+    assert graph.aupdate_state.await_args.kwargs["as_node"] == NODE_EXECUTE
+    patch = graph.aupdate_state.await_args.args[1]
+    assert patch["halted"] is False
+    assert patch.get("verify_need_writeback_recovery") is not False
+
+
+@pytest.mark.asyncio
+async def test_unknown_action_after_cas_miss_does_not_stay_inflight_wait() -> None:
+    """UNKNOWN is not durable inflight WAIT; resume clears wait so Verify can go manual."""
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "halted": True,
+                "verify_need_writeback_recovery": True,
+                "verify_need_manual_resolution": False,
+                "verify_failed_writebacks": [],
+                "verify_recoverable_writeback_ids": [],
+                "verify_pending_writeback_action_ids": ["act-unknown-1"],
+                "execution_inflight": True,
+                "execution_inflight_action_ids": ["act-unknown-1"],
+                "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+                "disposition_policy": DispositionPolicy.NOT_REQUIRED.value,
+            }
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+    runtime = MagicMock()
+    runtime.set_execution_substate = AsyncMock()
+
+    found = await prepare_graph_resume_state(
+        _SessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_rows=[("act-unknown-1", ActionStatus.UNKNOWN.value)],
+        ),
+        graph,
+        "evt-unknown-cas-miss",
+        runtime,
+    )
+
+    assert found is True
+    assert graph.aupdate_state.await_args.kwargs["as_node"] == NODE_EXECUTE
+    patch = graph.aupdate_state.await_args.args[1]
+    assert patch["halted"] is False
+    assert patch["verify_need_writeback_recovery"] is False
+    assert patch["execution_inflight"] is False
+    assert patch["verify_pending_writeback_action_ids"] == []
 
 
 @pytest.mark.asyncio

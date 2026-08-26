@@ -422,6 +422,25 @@ class TestWritebackRecoveryGraphNode:
         assert result["execution_substate"] == ExecutionSubstate.MANUAL_RESOLUTION.value
         assert result.get("error") == "writeback_recovery_invariant_no_targets"
 
+    async def test_writeback_recovery_inflight_without_outbox_ids_escalates_or_looks_up(self):
+        """In-flight flag without outbox/action ids must not empty-wait."""
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+        )
+        state = _base_state(
+            verify_need_writeback_recovery=True,
+            verify_failed_writebacks=[],
+            verify_recoverable_writeback_ids=[],
+            verify_pending_writeback_action_ids=[],
+            execution_inflight=True,
+        )
+        result = await writeback_recovery_graph_node(state, handler=handler)
+        assert result["verify_need_writeback_recovery"] is False
+        assert result["verify_need_manual_resolution"] is True
+        assert result["execution_substate"] == ExecutionSubstate.MANUAL_RESOLUTION.value
+        assert result.get("error") == "writeback_recovery_invariant_no_targets"
+
     async def test_pending_actions_action_scoped_wait(self):
         """Pending actions without outbox IDs halt without clearing recovery."""
         handler = WritebackRecoveryHandler(

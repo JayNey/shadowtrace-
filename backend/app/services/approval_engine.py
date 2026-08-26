@@ -43,6 +43,7 @@ from app.models.workflow import (
 from app.orchestration.graph_invocation import (
     defer_nested_graph_resume,
     is_in_investigation_graph,
+    persist_nested_graph_wakeup,
 )
 from app.services.action_approval_policy import (
     action_level_rank,
@@ -935,6 +936,7 @@ class ApprovalEngine:
         if self._resume is not None:
             if is_in_investigation_graph(event_id=event_id):
                 defer_nested_graph_resume(event_id)
+                await persist_nested_graph_wakeup(event_id, "graph_still_bound")
                 logger.debug(
                     "defer resume_investigation while graph active event=%s",
                     event_id,

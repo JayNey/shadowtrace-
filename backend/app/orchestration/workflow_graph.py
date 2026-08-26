@@ -515,20 +515,16 @@ async def _mark_graph_failed(
         logger.exception("failed to mark event=%s FAILED", event_id)
 
 
-_IN_FLIGHT_EXECUTE_STATUSES = frozenset(
-    {
-        ActionStatus.EXECUTING,
-        ActionStatus.UNKNOWN,
-    }
-)
+_IN_FLIGHT_EXECUTE_STATUSES = frozenset({ActionStatus.EXECUTING})
 _PENDING_EXECUTION_DETAILS = frozenset({"pending_execution"})
 
 
 def _classify_execution_summary(summary: Any) -> str:
-    """Split execute_plan outcomes: succeeded / empty / inflight / failed / missing.
+    """Split execute_plan outcomes: succeeded / empty / inflight / unknown / failed / missing.
 
     ACCEPTED writebacks leave actions in EXECUTING; that is in-flight, not
-    failure. Empty counts mean no IMMEDIATE work (disposition-only / no-op),
+    failure. UNKNOWN is submitted-unconfirmed — lookup or manual, not WAIT.
+    Empty counts mean no IMMEDIATE work (disposition-only / no-op),
     not execute failure. PENDING/WAITING_APPROVAL on the same revision are
     later-phase work and do not fail this node.
     """
@@ -541,6 +537,8 @@ def _classify_execution_summary(summary: Any) -> str:
         return "empty"
     if int(counts.get(ActionStatus.FAILED.value, 0) or 0) > 0:
         return "failed"
+    if int(counts.get(ActionStatus.UNKNOWN.value, 0) or 0) > 0:
+        return "unknown"
     for status in _IN_FLIGHT_EXECUTE_STATUSES:
         if int(counts.get(status.value, 0) or 0) > 0:
             return "inflight"

@@ -4535,6 +4535,49 @@ class TestIssue060ReviewNewTests:
         assert r.detail == "pending_execution"
         assert result.need_manual_resolution is False
 
+    async def test_accepted_writeback_escalates_after_accepted_wait_budget(self):
+        """ACCEPTED wait past 1800s must escalate so resume re-verify can go MANUAL."""
+        from datetime import timedelta
+        from types import SimpleNamespace
+
+        from app.agents.verify_agent import _ACCEPTED_WAIT_SECONDS
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,
+            execution_job_id="job-accepted-timeout",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.ACCEPTED,
+        )
+        job = _job(
+            job_id="job-accepted-timeout",
+            action_id=action.action_id,
+            started_at=datetime.now(UTC) - timedelta(seconds=60),
+        )
+        outbox = SimpleNamespace(
+            latest_writeback_status=WritebackStatus.ACCEPTED.value,
+            updated_at=datetime.now(UTC) - timedelta(seconds=_ACCEPTED_WAIT_SECONDS + 5),
+        )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {action.action_id: job}, {action.action_id: [outbox]})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.UNVERIFIABLE
+        assert r.detail == "execution_timeout"
+        assert result.need_manual_resolution is True
+
     async def test_executing_action_within_timeout_skipped(self):
         """SF-3: EXECUTING action with started_at < 300s ago → SKIPPED
         (still within timeout window)."""

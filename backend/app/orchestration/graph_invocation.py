@@ -246,6 +246,17 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
             await _notify_nested_resume_failure(resume_event_id, exc, [resume_event_id])
             if flush_error is None:
                 flush_error = exc
+        except BaseException:
+            remaining = pending[pending.index(resume_event_id) :]
+            logger.warning(
+                "deferred nested graph resume cancelled during flush event=%s remaining=%s",
+                resume_event_id,
+                remaining,
+            )
+            await asyncio.shield(
+                _persist_pending_nested_wakeups(remaining, "nested_resume_cancelled")
+            )
+            raise
     if flush_error is not None:
         raise flush_error
 
@@ -276,9 +287,21 @@ async def bind_investigation_graph(event_id: str) -> AsyncIterator[None]:
         else:
             try:
                 await _flush_deferred_graph_resumes(event_id, pending)
-            except Exception as flush_error:
-                if yield_error is None:
-                    raise flush_error
+            except BaseException as flush_error:
+                flush_persist = _persist_without_flush_reason(flush_error)
+                if pending and flush_persist is not None:
+                    logger.warning(
+                        "persist nested graph resume after flush cancel event=%s "
+                        "reason=%s pending=%s",
+                        event_id,
+                        flush_persist,
+                        pending,
+                    )
+                    await asyncio.shield(
+                        _persist_pending_nested_wakeups(pending, flush_persist)
+                    )
+                if yield_error is None or not isinstance(flush_error, Exception):
+                    raise
                 logger.exception(
                     "nested graph resume flush failed after graph error event=%s",
                     event_id,

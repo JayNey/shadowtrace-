@@ -35,7 +35,6 @@ from app.models.enums import (
 from app.orchestration.workflow_graph import (
     NODE_APPROVAL,
     NODE_EXECUTE,
-    NODE_VERIFY,
     invoke_investigation_graph,
 )
 from app.services.analysis_only_complete_persistence import (
@@ -96,19 +95,15 @@ def _only_stale_verify_degraded(degraded_flags: list[Any]) -> bool:
     )
 
 
-_IN_FLIGHT_ACTION_STATUSES = frozenset(
-    {
-        ActionStatus.EXECUTING.value,
-        ActionStatus.UNKNOWN.value,
-    }
-)
+# UNKNOWN is submitted-unconfirmed: lookup or manual, never durable inflight WAIT.
+_IN_FLIGHT_ACTION_STATUSES = frozenset({ActionStatus.EXECUTING.value})
 
 
 async def _still_inflight_action_ids(
     session_factory: async_sessionmaker[AsyncSession],
     action_ids: list[str],
 ) -> list[str]:
-    """Return action_ids that are still EXECUTING/UNKNOWN (durable WAIT resume)."""
+    """Return action_ids that are still EXECUTING (durable WAIT resume)."""
     if not action_ids:
         return []
     async with session_factory() as session:
@@ -128,7 +123,7 @@ async def _event_inflight_action_ids(
     session_factory: async_sessionmaker[AsyncSession],
     event_id: str,
 ) -> list[str]:
-    """EXECUTING/UNKNOWN action ids for an event (in-flight WAIT resume)."""
+    """EXECUTING action ids for an event (in-flight WAIT resume)."""
     async with session_factory() as session:
         result = await session.execute(
             select(orm.Action.action_id, orm.Action.status).where(
@@ -419,11 +414,15 @@ async def prepare_graph_resume_state(
             await graph.aupdate_state(
                 config,
                 resume_patch,
-                # Mark the patch as the execute tail when recovery has resolved,
-                # so the graph schedules a fresh Verify pass.  Using NODE_VERIFY
-                # here would route directly from stale WAITING state to report.
-                as_node=NODE_EXECUTE if recovery_resolved else NODE_VERIFY,
+                # Always the execute tail so VerifyAgent re-runs. as_node=NODE_VERIFY
+                # would skip zombie timeout and UNKNOWN→manual on WAITING_WRITEBACK.
+                as_node=NODE_EXECUTE,
             )
+            if recovery_resolved:
+                logger.info(
+                    "prepare_graph_resume: recovery flags cleared; re-verify event=%s",
+                    event_id,
+                )
             values = {**values, **resume_patch}
         if values.get("execution_substate") == ExecutionSubstate.WAITING_WRITEBACK.value:
             authoritative = await _sync_execution_substate(

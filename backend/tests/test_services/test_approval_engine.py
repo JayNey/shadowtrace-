@@ -1205,11 +1205,35 @@ async def test_evaluate_plan_defers_resume_while_graph_active(
     )
     from app.orchestration.graph_invocation import bind_investigation_graph
 
-    async with bind_investigation_graph(event_id):
-        result = await engine.evaluate_plan(event_id, 1, _risk())
+    persisted: list[tuple[str, str]] = []
+
+    async def _writer(event_id: str, reason: str) -> None:
+        persisted.append((event_id, reason))
+
+    async def _noop_runner(_event_id: str) -> None:
+        return None
+
+    from app.orchestration.graph_invocation import (
+        get_nested_resume_durability_writer,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_runner,
+    )
+
+    previous_writer = get_nested_resume_durability_writer()
+    previous_runner = get_nested_resume_runner()
+    set_nested_resume_durability_writer(_writer)
+    set_nested_resume_runner(_noop_runner)
+    try:
+        async with bind_investigation_graph(event_id):
+            result = await engine.evaluate_plan(event_id, 1, _risk())
+    finally:
+        set_nested_resume_durability_writer(previous_writer)
+        set_nested_resume_runner(previous_runner)
     assert result.needs_wait is False
     assert result.resume_deferred is True
     resume.assert_not_awaited()
+    assert persisted == [(event_id, "graph_still_bound")]
 
 
 @pytest.mark.asyncio

@@ -2390,7 +2390,48 @@ class DispositionSyncService:
                     "reason": "product_missing",
                 },
             )
-        return self._adapters.get(product)
+        try:
+            return self._adapters.get(product)
+        except AdapterNotFoundError as exc:
+            if is_mock_disposition_mode(get_settings().disposition_mode):
+                raise
+            if product.lower() in {"mock_xdr", "mock"}:
+                raise AdapterNotFoundError(
+                    "live disposition refuses mock source_product",
+                    details={
+                        "adapter_name": product,
+                        "kind": "disposition",
+                        "reason": "mock_product_in_live_mode",
+                        "outbox_id": getattr(outbox, "outbox_id", None),
+                        "writeback_id": getattr(outbox, "writeback_id", None),
+                    },
+                ) from exc
+            kind = (get_settings().disposition_adapter_kind or "").strip()
+            if not kind or kind.lower() == "mock":
+                kind = "generic_http_disposition"
+            if kind == product:
+                raise
+            try:
+                adapter = self._adapters.get(kind)
+            except AdapterNotFoundError:
+                raise AdapterNotFoundError(
+                    f"disposition adapter {product!r} not registered",
+                    details={
+                        "adapter_name": product,
+                        "registered_kind": kind,
+                        "kind": "disposition",
+                        "reason": "adapter_not_registered",
+                        "outbox_id": getattr(outbox, "outbox_id", None),
+                        "writeback_id": getattr(outbox, "writeback_id", None),
+                    },
+                ) from exc
+            logger.warning(
+                "live disposition product=%s not registered; using kind=%s "
+                "error_type=adapter_product_kind_alias",
+                product,
+                kind,
+            )
+            return adapter
 
     def _refuse_mock_missing_source_product(
         self,

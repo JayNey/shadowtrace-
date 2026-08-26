@@ -483,6 +483,50 @@ async def test_bind_skips_nested_resume_flush_on_cancellation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bind_flush_cancelled_persists_deferred_approval_wakeup() -> None:
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+
+    flushed: list[str] = []
+
+    async def _runner(event_id: str) -> None:
+        flushed.append(event_id)
+        raise asyncio.CancelledError()
+
+    persisted: list[tuple[str, str]] = []
+
+    async def _writer(event_id: str, reason: str) -> None:
+        persisted.append((event_id, reason))
+
+    previous_runner = get_nested_resume_runner()
+    previous_handler = get_nested_resume_failure_handler()
+    previous_writer = get_nested_resume_durability_writer()
+    set_nested_resume_runner(_runner)
+    set_nested_resume_failure_handler(None)
+    set_nested_resume_durability_writer(_writer)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            async with bind_investigation_graph("evt-flush-cancel"):
+                assert defer_nested_graph_resume("evt-flush-cancel") is True
+    finally:
+        set_nested_resume_runner(previous_runner)
+        set_nested_resume_failure_handler(previous_handler)
+        set_nested_resume_durability_writer(previous_writer)
+
+    assert flushed == ["evt-flush-cancel"]
+    assert ("evt-flush-cancel", "nested_resume_cancelled") in persisted
+    assert all(reason == "nested_resume_cancelled" for _event_id, reason in persisted)
+
+
+@pytest.mark.asyncio
 async def test_bind_flush_treats_deferred_resume_as_success() -> None:
     from app.orchestration.graph_invocation import (
         bind_investigation_graph,
