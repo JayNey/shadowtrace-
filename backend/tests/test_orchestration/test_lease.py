@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.core.errors import DependencyUnavailableError
+from app.core.errors import DependencyUnavailableError, ValidationError
 from app.orchestration.lease import EventLease
 
 _OWNER = "worker-test"
@@ -26,11 +26,18 @@ class _FakeRedis:
     ) -> None:
         self._owner_id = owner_id
         self._renew_side_effect = renew_side_effect
+        self._store: dict[str, bytes] = {}
+        self._ttls: dict[str, int] = {}
         self.get_calls: list[str] = []
         self.expire_calls: list[tuple[str, int]] = []
 
     async def get(self, key: str) -> bytes | None:
         self.get_calls.append(key)
+        stored = self._store.get(key)
+        if stored is not None:
+            return stored
+        if key.endswith(":ttl"):
+            return None
         return self._owner_id.encode("utf-8")
 
     async def expire(self, key: str, ttl: int) -> bool:
@@ -39,16 +46,67 @@ class _FakeRedis:
             return self._renew_side_effect(key)
         if isinstance(self._renew_side_effect, Exception):
             raise self._renew_side_effect
+        self._ttls[key] = ttl
         return True
+
+    async def ttl(self, key: str) -> int:
+        if key not in self._store:
+            return -2
+        stored = self._ttls.get(key)
+        if stored is None:
+            return -1
+        return int(stored)
 
     async def set(self, *args: object, **kwargs: object) -> bool:
+        key = str(args[0]) if args else str(kwargs.get("name", ""))
+        value = args[1] if len(args) > 1 else kwargs.get("value", "")
+        encoded = value if isinstance(value, bytes) else str(value).encode("utf-8")
+        if kwargs.get("nx") and key in self._store:
+            return False
+        self._store[key] = encoded
+        ex = kwargs.get("ex")
+        if ex is not None:
+            self._ttls[key] = int(ex)
         return True
 
-    def register_script(self, _script: str) -> object:
-        async def _release(*args: object, **kwargs: object) -> int:
+    def register_script(self, script: str) -> object:
+        from app.orchestration.lease import classify_lease_lua_script
+
+        kind = classify_lease_lua_script(script)
+
+        async def _run(*, keys: list[str], args: list[str]) -> int:
+            key = keys[0]
+            owner_id = args[0]
+            if kind == "acquire":
+                ttl = int(args[1]) if len(args) > 1 else 600
+                if key in self._store:
+                    return 0
+                self._store[key] = owner_id.encode("utf-8")
+                self._ttls[key] = ttl
+                if len(keys) > 1:
+                    self._store[keys[1]] = str(ttl).encode("utf-8")
+                    self._ttls[keys[1]] = ttl
+                return 1
+            if kind == "renew":
+                current = await self.get(key)
+                if current is None:
+                    return -1
+                decoded = current.decode("utf-8") if isinstance(current, bytes) else current
+                if decoded != owner_id:
+                    return 0
+                ttl = int(args[1]) if len(args) > 1 else 600
+                await self.expire(key, ttl)
+                if len(keys) > 1:
+                    await self.set(keys[1], str(ttl), ex=ttl)
+                return 1
+            if len(keys) > 1:
+                self._store.pop(keys[1], None)
+                self._ttls.pop(keys[1], None)
+            self._store.pop(key, None)
+            self._ttls.pop(key, None)
             return 1
 
-        return _release
+        return _run
 
 
 class _FakeRedisClient:
@@ -63,6 +121,15 @@ class _FakeRedisClient:
 
 def _lease_with_fake(fake_redis: _FakeRedis) -> EventLease:
     return EventLease(_FakeRedisClient(fake_redis))  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_acquire_and_renew_reject_non_positive_ttl() -> None:
+    lease = _lease_with_fake(_FakeRedis())
+    with pytest.raises(ValidationError):
+        await lease.acquire("evt-ttl", _OWNER, ttl_s=0)
+    with pytest.raises(ValidationError):
+        await lease.renew("evt-ttl", _OWNER, ttl_s=-1)
 
 
 _real_asyncio_sleep = asyncio.sleep
@@ -112,6 +179,7 @@ async def test_renew_exception_triggers_on_renewal_failed_after_threshold() -> N
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
@@ -144,6 +212,7 @@ async def test_renew_exception_resets_after_successful_renew() -> None:
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
@@ -169,6 +238,7 @@ async def test_renew_owner_mismatch_still_triggers_immediately() -> None:
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
         )
         try:
@@ -200,6 +270,7 @@ async def test_renew_single_exception_below_threshold_does_not_trigger() -> None
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
@@ -232,6 +303,7 @@ async def test_renew_exception_default_threshold() -> None:
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
         )
         try:
@@ -253,6 +325,7 @@ async def test_renew_loop_exits_on_first_exception_with_threshold_zero() -> None
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
             max_renew_failures=0,
         )
@@ -281,6 +354,7 @@ async def test_renew_redis_unavailable_single_attempt_below_threshold() -> None:
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
@@ -303,6 +377,7 @@ async def test_renew_redis_unavailable_triggers_after_threshold() -> None:
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
@@ -324,6 +399,7 @@ async def test_renew_success_does_not_trigger() -> None:
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
         )
         try:
@@ -331,3 +407,152 @@ async def test_renew_success_does_not_trigger() -> None:
             assert not renewal_failed.is_set()
         finally:
             await _cancel_renew_task(task)
+
+
+@pytest.mark.asyncio
+async def test_start_renewal_reuses_acquire_ttl() -> None:
+    fake_redis = _FakeRedis()
+    lease = _lease_with_fake(fake_redis)
+    await lease.acquire("evt-custom-ttl", _OWNER, ttl_s=120)
+    async with _fast_renew_loop():
+        task = await lease.start_renewal("evt-custom-ttl", _OWNER)
+        try:
+            await _wait_until(lambda: len(fake_redis.expire_calls) >= 1)
+            assert fake_redis.expire_calls[0][1] == 120
+        finally:
+            await _cancel_renew_task(task)
+
+
+@pytest.mark.asyncio
+async def test_start_renewal_reads_persisted_ttl_after_process_rebind() -> None:
+    """Celery loop-rebind drops _acquired_ttl; Redis TTL key must still win over 600s."""
+    fake_redis = _FakeRedis()
+    lease = _lease_with_fake(fake_redis)
+    await lease.acquire("evt-rebind-ttl", _OWNER, ttl_s=90)
+    lease._acquired_ttl.clear()
+    async with _fast_renew_loop():
+        task = await lease.start_renewal("evt-rebind-ttl", _OWNER)
+        try:
+            await _wait_until(lambda: len(fake_redis.expire_calls) >= 1)
+            assert fake_redis.expire_calls[0][1] == 90
+        finally:
+            await _cancel_renew_task(task)
+
+
+@pytest.mark.asyncio
+async def test_start_renewal_uses_live_lease_ttl_when_ttl_key_missing() -> None:
+    """HTTP acquire + worker rebind must not fail-close when the TTL key is gone."""
+    fake_redis = _FakeRedis()
+    lease = _lease_with_fake(fake_redis)
+    await lease.acquire("evt-missing-ttl", _OWNER, ttl_s=120)
+    for key in [stored for stored in list(fake_redis._store) if stored.endswith(":ttl")]:
+        fake_redis._store.pop(key)
+        fake_redis._ttls.pop(key, None)
+    lease._acquired_ttl.clear()
+    renewal_failed = asyncio.Event()
+    async with _fast_renew_loop():
+        task = await lease.start_renewal(
+            "evt-missing-ttl",
+            _OWNER,
+            on_renewal_failed=renewal_failed,
+        )
+        try:
+            await _wait_until(lambda: len(fake_redis.expire_calls) >= 1)
+            assert not renewal_failed.is_set()
+            assert fake_redis.expire_calls[0][1] == 120
+        finally:
+            await _cancel_renew_task(task)
+
+
+@pytest.mark.asyncio
+async def test_start_renewal_fail_closes_when_remaining_ttl_below_renew_interval() -> None:
+    from app.orchestration.lease import RENEW_INTERVAL_S, _lease_key
+
+    fake_redis = _FakeRedis()
+    lease = _lease_with_fake(fake_redis)
+    await lease.acquire("evt-short-ttl", _OWNER, ttl_s=120)
+    for key in [stored for stored in list(fake_redis._store) if stored.endswith(":ttl")]:
+        fake_redis._store.pop(key)
+        fake_redis._ttls.pop(key, None)
+    fake_redis._ttls[_lease_key("evt-short-ttl")] = RENEW_INTERVAL_S - 1
+    lease._acquired_ttl.clear()
+    renewal_failed = asyncio.Event()
+    task = await lease.start_renewal(
+        "evt-short-ttl",
+        _OWNER,
+        on_renewal_failed=renewal_failed,
+    )
+    try:
+        assert renewal_failed.is_set()
+        await asyncio.sleep(0)
+        assert fake_redis.expire_calls == []
+    finally:
+        await _cancel_renew_task(task)
+
+
+@pytest.mark.asyncio
+async def test_start_renewal_fail_closes_when_lease_key_absent() -> None:
+    fake_redis = _FakeRedis()
+    lease = _lease_with_fake(fake_redis)
+    await lease.acquire("evt-lease-gone", _OWNER, ttl_s=120)
+    fake_redis._store.clear()
+    fake_redis._ttls.clear()
+    lease._acquired_ttl.clear()
+    renewal_failed = asyncio.Event()
+    task = await lease.start_renewal(
+        "evt-lease-gone",
+        _OWNER,
+        on_renewal_failed=renewal_failed,
+    )
+    try:
+        assert renewal_failed.is_set()
+        await asyncio.sleep(0)
+        assert fake_redis.expire_calls == []
+    finally:
+        await _cancel_renew_task(task)
+
+
+def test_classify_lease_lua_script_uses_expire_vs_del() -> None:
+    from app.orchestration.lease import classify_lease_lua_script
+
+    assert classify_lease_lua_script('redis.call("EXPIRE", KEYS[1], ARGV[2])') == "renew"
+    assert classify_lease_lua_script('redis.call("DEL", KEYS[1])') == "release"
+
+
+def test_classify_lease_lua_script_acquire() -> None:
+    from app.orchestration.lease import _ACQUIRE_SCRIPT, classify_lease_lua_script
+
+    assert classify_lease_lua_script(_ACQUIRE_SCRIPT) == "acquire"
+    assert (
+        classify_lease_lua_script(
+            'redis.call("SET", KEYS[1], ARGV[1], "NX", "EX", tonumber(ARGV[2]))'
+        )
+        == "acquire"
+    )
+
+
+@pytest.mark.asyncio
+async def test_acquire_persists_ttl_key_atomically() -> None:
+    fake_redis = _FakeRedis()
+    lease = _lease_with_fake(fake_redis)
+    assert await lease.acquire("evt-atomic-ttl", _OWNER, ttl_s=90) is True
+    ttl_keys = [key for key in fake_redis._store if key.endswith(":ttl")]
+    assert ttl_keys
+    assert fake_redis._store[ttl_keys[0]] == b"90"
+
+
+@pytest.mark.asyncio
+async def test_release_forgets_acquired_ttl() -> None:
+    lease = _lease_with_fake(_FakeRedis())
+    await lease.acquire("evt-ttl-leak", _OWNER, ttl_s=90)
+    assert lease._acquired_ttl["evt-ttl-leak"] == 90
+    await lease.release("evt-ttl-leak", _OWNER)
+    assert "evt-ttl-leak" not in lease._acquired_ttl
+
+
+@pytest.mark.asyncio
+async def test_release_without_redis_forgets_acquired_ttl() -> None:
+    lease = EventLease(None)
+    lease._acquired_ttl["evt-gone"] = 90
+    assert await lease.release("evt-gone", _OWNER) is False
+    assert "evt-gone" not in lease._acquired_ttl

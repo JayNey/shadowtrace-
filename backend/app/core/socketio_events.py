@@ -285,6 +285,15 @@ def register_handlers(
             await _emit_auth_error(sio, sid, "subscribe requires a valid event_id string")
             return
 
+        if not session.principal.has_read_access():
+            logger.info(
+                "socketio subscribe rejected sid=%s subject=%s — missing read role",
+                sid,
+                session.principal.subject,
+            )
+            await _emit_auth_error(sio, sid, "not authorized to subscribe")
+            return
+
         if not await _event_readable(event_id):
             logger.info(
                 "socketio subscribe rejected sid=%s subject=%s event_id=%s — not found",
@@ -309,6 +318,27 @@ def register_handlers(
         )
 
     @sio.event(namespace=SOCKETIO_NAMESPACE)  # type: ignore[untyped-decorator]
+    async def leave_event(sid: str, data: dict[str, Any] | None = None) -> None:
+        """Leave one event room without joining global (detail unmount)."""
+        session = await _require_session(sio, sid, sessions)
+        if session is None:
+            return
+
+        event_id = data.get("event_id") if isinstance(data, dict) else None
+        if not event_id or not isinstance(event_id, str):
+            return
+
+        room = _event_room(event_id)
+        await sio.leave_room(sid, room, namespace=SOCKETIO_NAMESPACE)
+        sessions.untrack_room(sid, room)
+        logger.debug(
+            "socketio leave_event sid=%s subject=%s room=%s",
+            sid,
+            session.principal.subject,
+            room,
+        )
+
+    @sio.event(namespace=SOCKETIO_NAMESPACE)  # type: ignore[untyped-decorator]
     async def join_global(sid: str, data: dict[str, Any] | None = None) -> None:  # noqa: ARG001
         """Re-enter the global room when the principal has dashboard broadcast access."""
         session = await _require_session(sio, sid, sessions)
@@ -324,14 +354,6 @@ def register_handlers(
             await _emit_auth_error(sio, sid, "not authorized for global broadcasts")
             return
 
-        try:
-            rooms = sio.rooms(sid, namespace=SOCKETIO_NAMESPACE)
-        except KeyError:
-            rooms = []
-        for room in list(rooms):
-            if isinstance(room, str) and room.startswith(EVENT_ROOM_PREFIX):
-                await sio.leave_room(sid, room, namespace=SOCKETIO_NAMESPACE)
-                sessions.untrack_room(sid, room)
         await sio.enter_room(sid, GLOBAL_ROOM, namespace=SOCKETIO_NAMESPACE)
         sessions.track_room(sid, GLOBAL_ROOM)
         logger.debug(

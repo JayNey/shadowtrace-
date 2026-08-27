@@ -1832,7 +1832,9 @@ class TestRegressionShouldFix:
             row for row in phase1_gate["results"] if row["action_id"] == immediate.action_id
         ]
         assert immediate_rows[0]["detail"] == "pending_execution"
-        assert result.overall_status is not VerificationOverallStatus.SUCCESS
+        assert ed_svc.calls == []
+        assert result.overall_status == VerificationOverallStatus.WAITING
+        assert result.need_manual_resolution is False
 
     async def test_phase1_persist_success_when_only_deferred_pending(self):
         """ISSUE-216: deferred-only plans must still persist SUCCESS for EDS gate."""
@@ -4454,6 +4456,260 @@ class TestIssue060ReviewNewTests:
         assert result.need_manual_resolution is True
         assert result.need_action_replan is False
 
+    async def test_accepted_writeback_does_not_use_zombie_timeout(self):
+        """ACCEPTED writebacks keep pending_execution past the 300s zombie budget."""
+        from datetime import timedelta
+        from types import SimpleNamespace
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,
+            execution_job_id="job-accepted-1",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.ACCEPTED,
+        )
+        stale_start = datetime.now(UTC) - timedelta(seconds=400)
+        job = _job(
+            job_id="job-accepted-1",
+            action_id=action.action_id,
+            started_at=stale_start,
+        )
+        outbox = SimpleNamespace(
+            latest_writeback_status=WritebackStatus.ACCEPTED.value,
+            delivered_at=datetime.now(UTC) - timedelta(seconds=60),
+            updated_at=datetime.now(UTC),
+        )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {action.action_id: job}, {action.action_id: [outbox]})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.SKIPPED
+        assert r.detail == "pending_execution"
+        assert result.need_manual_resolution is False
+
+    async def test_accepted_writeback_timeout_uses_accepted_clock_not_job_start(self):
+        """Long-running jobs that only recently ACCEPTED must not use zombie budget."""
+        from datetime import timedelta
+        from types import SimpleNamespace
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,
+            execution_job_id="job-accepted-old-start",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.ACCEPTED,
+        )
+        stale_start = datetime.now(UTC) - timedelta(seconds=2400)
+        job = _job(
+            job_id="job-accepted-old-start",
+            action_id=action.action_id,
+            started_at=stale_start,
+        )
+        outbox = SimpleNamespace(
+            latest_writeback_status=WritebackStatus.ACCEPTED.value,
+            delivered_at=datetime.now(UTC) - timedelta(seconds=60),
+            updated_at=datetime.now(UTC),
+        )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {action.action_id: job}, {action.action_id: [outbox]})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.SKIPPED
+        assert r.detail == "pending_execution"
+        assert result.need_manual_resolution is False
+
+    async def test_accepted_writeback_escalates_after_accepted_wait_budget(self):
+        """ACCEPTED wait past 1800s must escalate so resume re-verify can go MANUAL."""
+        from datetime import timedelta
+        from types import SimpleNamespace
+
+        from app.agents.verify_agent import _ACCEPTED_WAIT_SECONDS
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,
+            execution_job_id="job-accepted-timeout",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.ACCEPTED,
+        )
+        job = _job(
+            job_id="job-accepted-timeout",
+            action_id=action.action_id,
+            started_at=datetime.now(UTC) - timedelta(seconds=60),
+        )
+        outbox = SimpleNamespace(
+            latest_writeback_status=WritebackStatus.ACCEPTED.value,
+            delivered_at=datetime.now(UTC) - timedelta(seconds=_ACCEPTED_WAIT_SECONDS + 5),
+            updated_at=datetime.now(UTC),
+        )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {action.action_id: job}, {action.action_id: [outbox]})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.UNVERIFIABLE
+        assert r.detail == "execution_timeout"
+        assert result.need_manual_resolution is True
+
+    async def test_accepted_executing_without_timestamps_escalates_manual(self):
+        """ACCEPTED without a measurable clock must fail-close, not wait forever."""
+        from types import SimpleNamespace
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,
+            execution_job_id="job-accepted-no-clock",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.ACCEPTED,
+            updated_at=None,
+        )
+        job = _job(
+            job_id="job-accepted-no-clock",
+            action_id=action.action_id,
+            started_at=datetime.now(UTC),
+        )
+        outbox = SimpleNamespace(latest_writeback_status=WritebackStatus.ACCEPTED.value)
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {action.action_id: job}, {action.action_id: [outbox]})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.UNVERIFIABLE
+        assert r.detail == "execution_timeout"
+        assert result.need_manual_resolution is True
+
+    async def test_accepted_action_with_confirmed_outbox_does_not_missing_clock_manual(self):
+        """Stale Action.writeback_status=ACCEPTED must not fail-close once outbox is terminal."""
+        from datetime import timedelta
+        from types import SimpleNamespace
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,
+            execution_job_id="job-stale-accepted-confirmed",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.ACCEPTED,
+        )
+        job = _job(
+            job_id="job-stale-accepted-confirmed",
+            action_id=action.action_id,
+            started_at=datetime.now(UTC) - timedelta(seconds=60),
+        )
+        outbox = SimpleNamespace(
+            latest_writeback_status=WritebackStatus.CONFIRMED.value,
+            delivered_at=datetime.now(UTC) - timedelta(seconds=30),
+        )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {action.action_id: job}, {action.action_id: [outbox]})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.detail != "execution_timeout"
+        assert result.need_manual_resolution is False
+        assert r.effect_status == EffectStatus.SKIPPED
+        assert r.detail == "pending_execution"
+
+    async def test_accepted_wait_clock_ignores_outbox_updated_at_onupdate(self):
+        """ORM onupdate updated_at must not reset the 1800s ACCEPTED wait."""
+        from datetime import timedelta
+        from types import SimpleNamespace
+
+        from app.agents.verify_agent import _ACCEPTED_WAIT_SECONDS
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,
+            execution_job_id="job-accepted-onupdate",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.ACCEPTED,
+        )
+        job = _job(
+            job_id="job-accepted-onupdate",
+            action_id=action.action_id,
+            started_at=datetime.now(UTC) - timedelta(seconds=60),
+        )
+        outbox = SimpleNamespace(
+            latest_writeback_status=WritebackStatus.ACCEPTED.value,
+            delivered_at=datetime.now(UTC) - timedelta(seconds=_ACCEPTED_WAIT_SECONDS + 5),
+            updated_at=datetime.now(UTC),
+        )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {action.action_id: job}, {action.action_id: [outbox]})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.UNVERIFIABLE
+        assert r.detail == "execution_timeout"
+        assert result.need_manual_resolution is True
+
     async def test_executing_action_within_timeout_skipped(self):
         """SF-3: EXECUTING action with started_at < 300s ago → SKIPPED
         (still within timeout window)."""
@@ -4818,26 +5074,28 @@ class TestIssue060ReviewNewTests:
         """Blocker fix: writeback_not_applicable results from Phase 2
         must have verification_phase=DISPOSITION, not EFFECT.
 
-        Uses status=PENDING so Phase 1 produces SKIPPED (action_not_executed)
-        which allows writeback_required=True + writeback_readiness=NOT_REQUIRED
-        per the VerificationActionResult validator.  Phase 2 then evaluates
-        writeback_applicable=False and must produce DISPOSITION phase."""
+        Uses SUCCESS so Phase 1 is not IMMEDIATE-pending (PENDING would skip
+        Phase 2 activation). writeback_applicable=False is evaluated in Phase 2.
+        """
         action = _action(
             tool_name="block_ip",
-            status=ActionStatus.PENDING,
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
             writeback_required=True,
             writeback_applicable=False,
             writeback_readiness=WritebackReadiness.NOT_REQUIRED,
         )
+        job = _job(job_id="job-0001", action_id=action.action_id)
         ed_svc = FakeEventDispositionService(activated=True)
         agent = VerifyAgent(
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
             event_disposition_service=ed_svc,
         )
         agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
-            return_value=([action], {}, {})
+            return_value=([action], {"job-0001": job}, {})
         )
         agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
             return_value=DispositionPolicy.REQUIRED,
@@ -4953,13 +5211,19 @@ class TestShouldFixRegression:
             "event_id": action.event_id,
             **_verification_result_state_update(result),
         }
-        recovery = await writeback_recovery_graph_node(
-            recovery_state,  # type: ignore[arg-type]
-            handler=WritebackRecoveryHandler(
-                state_machine=MagicMock(),
-                runtime=runtime,
-            ),
-        )
+        persist_wakeup = AsyncMock(return_value=True)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "app.orchestration.graph_invocation.persist_nested_graph_wakeup",
+                persist_wakeup,
+            )
+            recovery = await writeback_recovery_graph_node(
+                recovery_state,  # type: ignore[arg-type]
+                handler=WritebackRecoveryHandler(
+                    state_machine=MagicMock(),
+                    runtime=runtime,
+                ),
+            )
         assert recovery["halted"] is True
         assert recovery["verify_pending_writeback_action_ids"] == [action.action_id]
         assert recovery["verify_recoverable_writeback_ids"] == []

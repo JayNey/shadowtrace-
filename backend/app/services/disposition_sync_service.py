@@ -24,8 +24,9 @@ from app.adapters.disposition.error_classification import (
     is_deterministic_adapter_rejection_code,
 )
 from app.adapters.registry import DispositionAdapterRegistry
-from app.core.config import get_settings
+from app.core.config import get_settings, is_mock_disposition_mode
 from app.core.errors import (
+    AdapterNotFoundError,
     DependencyUnavailableError,
     EventNotFoundError,
     GuardrailViolationError,
@@ -105,6 +106,12 @@ ResumeInvestigationHook = Callable[[str], Awaitable[None]]
 _DEFAULT_LEASE_SECONDS = 30
 _ERROR_DETAIL_MAX_LEN = 500
 OUTBOX_SUPERSEDED_ERROR_CODE = "superseded_by_new_head"
+MISSING_SOURCE_PRODUCT_ERROR_CODE = "missing_source_product"
+
+
+def _is_missing_source_product_fence(outbox: Any) -> bool:
+    """Locator was never submitted because source_product is missing."""
+    return getattr(outbox, "last_error_code", None) == MISSING_SOURCE_PRODUCT_ERROR_CODE
 _OPERATOR_RETRY_REPLAY_PREFIX = "operator_retry:replay"
 _OPERATOR_RETRY_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
@@ -1347,7 +1354,18 @@ class DispositionSyncService:
                         "source_locator": command.source_locator,
                     },
                 )
-                adapter = self._resolve_adapter(outbox)
+                try:
+                    adapter = self._resolve_adapter(outbox)
+                except AdapterNotFoundError as exc:
+                    if self._refuse_mock_missing_source_product(outbox, exc):
+                        await self._publish_missing_source_product_fence(outbox)
+                        return
+                    self._block_outbox_for_writeback_fence(
+                        outbox,
+                        now=datetime.now(UTC),
+                        error_detail=str(exc),
+                    )
+                    return
                 adapter.validate_command(command)
                 adapter_label = adapter.name
                 with disposition_span(
@@ -1556,7 +1574,10 @@ class DispositionSyncService:
         current = ActionStatus(action.status)
         if current is not ActionStatus.EXECUTING:
             return
-        if receipt.status in {WritebackStatus.CONFIRMED, WritebackStatus.ACCEPTED}:
+        if receipt.status is WritebackStatus.ACCEPTED:
+            # ACCEPTED is provider-received, not terminal success.
+            return
+        if receipt.status is WritebackStatus.CONFIRMED:
             target = ActionStatus.SUCCESS
         elif receipt.status is WritebackStatus.PARTIAL:
             target = ActionStatus.PARTIAL_SUCCESS
@@ -1673,21 +1694,28 @@ class DispositionSyncService:
         return mapped
 
     @staticmethod
+    def _entity_effect_readback_enabled(
+        adapter: BaseDispositionAdapter,
+        receipt: DispositionReceipt,
+    ) -> bool:
+        caps = adapter.capabilities()
+        if not caps.supports_entity_effect_readback:
+            return False
+        settings = get_settings()
+        if is_mock_disposition_mode(settings.disposition_mode):
+            return (
+                settings.simulation_enabled
+                and adapter.name == "mock_xdr"
+                and bool(receipt.simulated)
+            )
+        return not bool(receipt.simulated)
+
+    @staticmethod
     def _mock_entity_effect_readback_enabled(
         adapter: BaseDispositionAdapter,
         receipt: DispositionReceipt,
     ) -> bool:
-        settings = get_settings()
-        if settings.disposition_mode.strip().lower() != "mock_xdr":
-            return False
-        if not settings.simulation_enabled:
-            return False
-        if adapter.name != "mock_xdr":
-            return False
-        if not receipt.simulated:
-            return False
-        caps = adapter.capabilities()
-        return caps.supports_entity_effect_readback
+        return DispositionSyncService._entity_effect_readback_enabled(adapter, receipt)
 
     async def reconcile_pending_entity_effects(self, *, limit: int = 10) -> int:
         """Poll independently-applied provider effects for delivered entity commands."""
@@ -1940,7 +1968,7 @@ class DispositionSyncService:
             return None
         if receipt.status is not WritebackStatus.ACCEPTED:
             return None
-        if not self._mock_entity_effect_readback_enabled(adapter, receipt):
+        if not self._entity_effect_readback_enabled(adapter, receipt):
             return None
         completion = await adapter.read_entity_effect_completion(command, receipt)
         return completion
@@ -2359,8 +2387,95 @@ class DispositionSyncService:
     def _resolve_adapter(self, outbox: orm.DispositionOutbox) -> BaseDispositionAdapter:
         payload = outbox.command_payload or {}
         locator = payload.get("source_locator") or {}
-        product = str(locator.get("source_product") or "mock_xdr")
-        return self._adapters.get(product)
+        product = str(locator.get("source_product") or "").strip()
+        if not product:
+            raise AdapterNotFoundError(
+                "disposition adapter product missing on outbox",
+                details={
+                    "outbox_id": getattr(outbox, "outbox_id", None),
+                    "writeback_id": getattr(outbox, "writeback_id", None),
+                    "reason": "product_missing",
+                },
+            )
+        try:
+            return self._adapters.get(product)
+        except AdapterNotFoundError as exc:
+            if is_mock_disposition_mode(get_settings().disposition_mode):
+                raise
+            if product.lower() in {"mock_xdr", "mock"}:
+                raise AdapterNotFoundError(
+                    "live disposition refuses mock source_product",
+                    details={
+                        "adapter_name": product,
+                        "kind": "disposition",
+                        "reason": "mock_product_in_live_mode",
+                        "outbox_id": getattr(outbox, "outbox_id", None),
+                        "writeback_id": getattr(outbox, "writeback_id", None),
+                    },
+                ) from exc
+            raise AdapterNotFoundError(
+                f"disposition adapter {product!r} not registered",
+                details={
+                    "adapter_name": product,
+                    "kind": "disposition",
+                    "reason": "adapter_not_registered",
+                    "outbox_id": getattr(outbox, "outbox_id", None),
+                    "writeback_id": getattr(outbox, "writeback_id", None),
+                },
+            ) from exc
+
+    def _refuse_mock_missing_source_product(
+        self,
+        outbox: orm.DispositionOutbox,
+        exc: AdapterNotFoundError,
+    ) -> bool:
+        """Refuse silent mock_xdr fallback without spinning READY deliveries.
+
+        Returns True when the caller should stop this delivery attempt.
+        READY and LEASED are paused so the worker does not retry forever.
+        Live mode returns False so the fence can fail-close.
+        """
+        if not is_mock_disposition_mode(get_settings().disposition_mode):
+            return False
+        if (getattr(exc, "details", None) or {}).get("reason") != "product_missing":
+            return False
+        logger.error(
+            "mock disposition missing source_product; refusing silent mock_xdr "
+            "fallback without dead-lettering outbox=%s",
+            getattr(outbox, "outbox_id", None),
+        )
+        current = OutboxDeliveryStatus(outbox.delivery_status)
+        if current in {OutboxDeliveryStatus.READY, OutboxDeliveryStatus.LEASED}:
+            self._pause_outbox_after_unknown_submission(
+                outbox,
+                now=datetime.now(UTC),
+                error_code=MISSING_SOURCE_PRODUCT_ERROR_CODE,
+                error_detail=str(exc),
+            )
+        return True
+
+    async def _publish_missing_source_product_fence(self, outbox: Any) -> None:
+        """Operator-visible signal after PAUSE for missing source_product."""
+        event_id = getattr(outbox, "event_id", None)
+        if not event_id or self._bus is None:
+            return
+        try:
+            await self._bus.publish_event(
+                event_id,
+                "writeback_updated",
+                {
+                    "writeback_id": getattr(outbox, "writeback_id", None),
+                    "error_code": MISSING_SOURCE_PRODUCT_ERROR_CODE,
+                    "delivery_status": getattr(outbox, "delivery_status", None),
+                },
+            )
+        except Exception:
+            logger.warning(
+                "failed to publish missing_source_product fence event=%s outbox=%s",
+                event_id,
+                getattr(outbox, "outbox_id", None),
+                exc_info=True,
+            )
 
     async def _sync_writeback_summary(self, event_id: str) -> None:
         summary_payload: dict[str, Any] | None = None
@@ -2434,8 +2549,18 @@ class DispositionSyncService:
             try:
                 await self._resume(event_id)
             except Exception as exc:
-                from app.orchestration.graph_resume_observability import GraphResumeFailedError
+                from app.orchestration.graph_resume_observability import (
+                    GraphResumeDeferredError,
+                    GraphResumeFailedError,
+                )
 
+                if isinstance(exc, GraphResumeDeferredError):
+                    logger.info(
+                        "resume_investigation hook deferred event=%s error_type=%s",
+                        event_id,
+                        exc.error_type,
+                    )
+                    return
                 if isinstance(exc, GraphResumeFailedError):
                     logger.warning(
                         "resume_investigation hook failed event=%s error_type=%s",
@@ -2638,6 +2763,11 @@ class DispositionSyncService:
                                 orm.DispositionOutbox.lease_expires_at.is_(None),
                                 orm.DispositionOutbox.lease_expires_at <= now,
                             ),
+                            or_(
+                                orm.DispositionOutbox.last_error_code.is_(None),
+                                orm.DispositionOutbox.last_error_code
+                                != MISSING_SOURCE_PRODUCT_ERROR_CODE,
+                            ),
                         )
                         .order_by(orm.DispositionOutbox.updated_at.asc())
                         .limit(limit)
@@ -2645,6 +2775,8 @@ class DispositionSyncService:
                     )
                 ).all()
                 for row in rows:
+                    if _is_missing_source_product_fence(row):
+                        continue
                     try:
                         command = DispositionCommand.model_validate(row.command_payload)
                         adapter = self._resolve_adapter(row)
@@ -2783,6 +2915,8 @@ class DispositionSyncService:
                     return False, outbox.event_id, WritebackStatus.UNKNOWN
 
                 if outcome.kind is _PausedLookupKind.NOT_FOUND:
+                    if _is_missing_source_product_fence(outbox):
+                        return False, None, None
                     if is_deterministic_adapter_rejection_code(
                         getattr(outbox, "last_error_code", None),
                     ):

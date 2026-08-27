@@ -31,6 +31,7 @@ import socket
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import jsonschema
@@ -485,8 +486,53 @@ class TestEventHandlers:
         assert sid not in ns_rooms.get(GLOBAL_ROOM, {}), "subscribe must leave global room"
 
     @pytest.mark.asyncio
+    async def test_subscribe_rejects_missing_read_role(
+        self,
+        sio: socketio.AsyncServer,
+        sessions: SocketIOSessionRegistry,
+    ) -> None:
+        sid = _fake_sid()
+        event_id = "evt-20260712-noread"
+        environ = {
+            "HTTP_AUTHORIZATION": "Bearer norole-token",
+            "HTTP_ORIGIN": _ALLOWED_TEST_ORIGIN,
+            "REMOTE_ADDR": "127.0.0.1",
+        }
+
+        _connect_session(sio, sid)
+        connect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
+        assert connect_handler is not None
+        await connect_handler(sid, environ, None)
+
+        handler = sio.handlers[SOCKETIO_NAMESPACE].get("subscribe")
+        assert handler is not None
+
+        emitted: list[tuple[str, dict[str, Any]]] = []
+
+        async def _capture(
+            event: str,
+            data: dict[str, Any],
+            **_kwargs: object,
+        ) -> None:
+            emitted.append((event, data))
+
+        sio.emit = _capture  # type: ignore[method-assign, assignment]
+        await handler(sid, {"event_id": event_id})
+
+        ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
+        assert sid not in ns_rooms.get(_event_room(event_id), {})
+        session = sessions.get(sid)
+        assert session is not None
+        assert not session.principal.has_read_access()
+        assert any(
+            event == "error" and "not authorized" in str(payload.get("message", ""))
+            for event, payload in emitted
+        )
+
+
+    @pytest.mark.asyncio
     async def test_join_global_rejoins_after_subscribe(self, sio: socketio.AsyncServer) -> None:
-        """join_global re-enters global and leaves the prior event room."""
+        """join_global re-enters global without dropping the prior event room."""
         sid = _fake_sid()
         event_id = "evt-20260712-rejoinglobal"
 
@@ -508,7 +554,58 @@ class TestEventHandlers:
 
         ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
         assert sid in ns_rooms.get(GLOBAL_ROOM, {})
+        assert sid in ns_rooms.get(_event_room(event_id), {})
+
+    @pytest.mark.asyncio
+    async def test_join_global_does_not_drop_other_event_rooms(
+        self, sio: socketio.AsyncServer
+    ) -> None:
+        sid = _fake_sid()
+        first = "evt-20260712-room-a"
+        second = "evt-20260712-room-b"
+
+        _connect_session(sio, sid)
+        connect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
+        assert connect_handler is not None
+        await connect_handler(sid, _auth_environ(), None)
+
+        sub_h = sio.handlers[SOCKETIO_NAMESPACE].get("subscribe")
+        assert sub_h is not None
+        await sub_h(sid, {"event_id": first})
+        await sub_h(sid, {"event_id": second})
+
+        join_h = sio.handlers[SOCKETIO_NAMESPACE].get("join_global")
+        assert join_h is not None
+        await join_h(sid, {})
+
+        ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
+        assert sid in ns_rooms.get(GLOBAL_ROOM, {})
+        assert sid in ns_rooms.get(_event_room(first), {})
+        assert sid in ns_rooms.get(_event_room(second), {})
+
+    @pytest.mark.asyncio
+    async def test_leave_event_drops_event_room_without_joining_global(
+        self, sio: socketio.AsyncServer
+    ) -> None:
+        sid = _fake_sid()
+        event_id = "evt-20260712-leave"
+
+        _connect_session(sio, sid)
+        connect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
+        assert connect_handler is not None
+        await connect_handler(sid, _auth_environ(), None)
+
+        sub_h = sio.handlers[SOCKETIO_NAMESPACE].get("subscribe")
+        assert sub_h is not None
+        await sub_h(sid, {"event_id": event_id})
+
+        leave_h = sio.handlers[SOCKETIO_NAMESPACE].get("leave_event")
+        assert leave_h is not None, "leave_event handler not registered"
+        await leave_h(sid, {"event_id": event_id})
+
+        ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
         assert sid not in ns_rooms.get(_event_room(event_id), {})
+        assert sid not in ns_rooms.get(GLOBAL_ROOM, {})
 
     @pytest.mark.asyncio
     async def test_subscribe_rejects_missing_event_id(self, sio: socketio.AsyncServer) -> None:

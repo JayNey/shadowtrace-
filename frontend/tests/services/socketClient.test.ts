@@ -104,18 +104,61 @@ describe("socketClient", () => {
     expect(mockEmit).not.toHaveBeenCalled();
   });
 
-  it("ensureGlobalRoom emits join_global and clears pending event rooms", async () => {
+  it("forgetEvent leaves the event room without joining global", async () => {
+    const { socketClient } = await import("../../src/services/socketClient");
+    socketClient.connect();
+    connectHandler?.();
+    socketClient.subscribe("evt-a");
+    mockEmit.mockClear();
+
+    socketClient.forgetEvent("evt-a");
+
+    expect(mockEmit).toHaveBeenCalledWith("leave_event", { event_id: "evt-a" });
+    expect(mockEmit).not.toHaveBeenCalledWith("join_global", {});
+  });
+
+  it("ensureGlobalRoom is a no-op while an event room is still pending", async () => {
+    const { socketClient } = await import("../../src/services/socketClient");
+    socketClient.connect();
+    connectHandler?.();
+    socketClient.subscribe("evt-keep");
+    mockEmit.mockClear();
+
+    socketClient.ensureGlobalRoom();
+
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it("ensureGlobalRoom does not drop a different pending event room", async () => {
+    const { socketClient } = await import("../../src/services/socketClient");
+    socketClient.connect();
+    connectHandler?.();
+    socketClient.subscribe("evt-a");
+    socketClient.subscribe("evt-b");
+    socketClient.forgetEvent("evt-a");
+    mockEmit.mockClear();
+
+    socketClient.ensureGlobalRoom();
+
+    expect(mockEmit).not.toHaveBeenCalledWith("join_global", {});
+    mockEmit.mockClear();
+    connectHandler?.();
+    expect(mockEmit).toHaveBeenCalledWith("subscribe", { event_id: "evt-b" });
+    expect(mockEmit).not.toHaveBeenCalledWith("subscribe", { event_id: "evt-a" });
+  });
+
+  it("ensureGlobalRoom emits join_global after the last event room is forgotten", async () => {
     const { socketClient } = await import("../../src/services/socketClient");
     socketClient.connect();
     connectHandler?.();
     socketClient.subscribe("evt-detail");
+    socketClient.forgetEvent("evt-detail");
     mockEmit.mockClear();
 
     socketClient.ensureGlobalRoom();
 
     expect(mockEmit).toHaveBeenCalledWith("join_global", {});
     mockEmit.mockClear();
-    // Reconnect should re-join global, not the forgotten event room.
     connectHandler?.();
     expect(mockEmit).toHaveBeenCalledWith("join_global", {});
     expect(mockEmit).not.toHaveBeenCalledWith("subscribe", {

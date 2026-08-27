@@ -148,10 +148,15 @@ async def execute_investigation(
     *event_id* with *owner_id*; SuperAgent will skip its own acquire and only
     start renewal (ISSUE-186).
     """
-    from app.api.v1.deps import _get_session_factory, get_super_agent
+    from app.api.v1.deps import (
+        _get_session_factory,
+        ensure_nested_resume_runner,
+        get_super_agent,
+    )
     from app.services.evidence_projection import EvidenceProjection, bind_evidence_projection
     from app.services.investigation_guidance import record_investigation_workflow_path
 
+    ensure_nested_resume_runner()
     session_factory = _get_session_factory()
     if include_response_execution:
         await record_investigation_workflow_path(
@@ -384,7 +389,10 @@ async def execute_redelivery_resume(
         get_super_agent,
         get_workflow_runtime,
     )
-    from app.orchestration.graph_resume_observability import execute_graph_resume_with_retry
+    from app.orchestration.graph_resume_observability import (
+        GraphResumeDeferredError,
+        execute_graph_resume_with_retry,
+    )
 
     if analysis_only or event_status not in REDELIVERY_RESUME_STATUSES:
         if analysis_only:
@@ -400,13 +408,20 @@ async def execute_redelivery_resume(
             lease_acquired=lease_acquired,
         )
 
-    await execute_graph_resume_with_retry(
-        event_id,
-        session_factory=_get_session_factory(),
-        get_super_agent=get_super_agent,
-        get_workflow_runtime=get_workflow_runtime,
-        degraded_flags=_get_degraded_flags(),
-    )
+    try:
+        await execute_graph_resume_with_retry(
+            event_id,
+            session_factory=_get_session_factory(),
+            get_super_agent=get_super_agent,
+            get_workflow_runtime=get_workflow_runtime,
+            degraded_flags=_get_degraded_flags(),
+        )
+    except GraphResumeDeferredError as exc:
+        return {
+            "status": "deferred",
+            "event_id": event_id,
+            "reason": exc.error_type or "graph_resume_deferred",
+        }
     return {"status": "completed", "event_id": event_id}
 
 
@@ -483,6 +498,20 @@ async def _handle_redelivered_investigation(
     )
 
 
+# GraphResumeDeferredError / lease contention: stay RETRY without burning DEAD.
+_INVESTIGATION_DEFER_WITHOUT_ATTEMPT = frozenset(
+    {
+        "waiting_approval",
+        "graph_still_bound",
+        "investigation_in_progress",
+        "investigation_lease_lost",
+        "lease_unavailable",
+        "manual_resolution_hold",
+        "graph_resume_deferred",
+    }
+)
+
+
 async def _finalize_intent_from_result(
     intent_id: str,
     result: dict[str, str],
@@ -494,6 +523,15 @@ async def _finalize_intent_from_result(
 
     service = InvestigationIntentService(get_session_factory())
     status = str(result.get("status") or "")
+    if status == "deferred":
+        reason = str(result.get("reason") or "graph_resume_deferred")
+        await service.mark_retry(
+            intent_id,
+            error=reason,
+            broker_task_id=broker_task_id,
+            increment_attempt=reason not in _INVESTIGATION_DEFER_WITHOUT_ATTEMPT,
+        )
+        return
     if status == "skipped":
         reason = str(result.get("reason") or "investigation_skipped")
         if reason in {"investigation_in_progress", "investigation_lease_lost"}:
@@ -503,6 +541,7 @@ async def _finalize_intent_from_result(
                 intent_id,
                 error=reason,
                 broker_task_id=broker_task_id,
+                increment_attempt=False,
             )
             return
         await service.mark_skipped(
@@ -510,11 +549,11 @@ async def _finalize_intent_from_result(
             reason=reason,
             broker_task_id=broker_task_id,
         )
-    else:
-        await service.mark_terminal(
-            intent_id,
-            broker_task_id=broker_task_id,
-        )
+        return
+    await service.mark_terminal(
+        intent_id,
+        broker_task_id=broker_task_id,
+    )
 
 
 async def resolve_task_state(task_id: str) -> tuple[str, str | None]:
@@ -603,7 +642,7 @@ async def _handle_soft_time_limit_exceeded(
         # Full-loop SuperAgent and analysis_only both defer release until here.
         try:
             lease = get_event_lease()
-            await lease.release(event_id, resolved_owner)
+            released = await lease.release(event_id, resolved_owner)
         except SoftTimeLimitExceeded:
             raise
         except Exception:
@@ -614,6 +653,13 @@ async def _handle_soft_time_limit_exceeded(
                 resolved_owner,
                 exc_info=True,
             )
+        else:
+            if released:
+                from app.orchestration.graph_invocation import (
+                    kick_nested_wakeup_after_lease_release,
+                )
+
+                await kick_nested_wakeup_after_lease_release(event_id)
 
 
 @celery_app.task(  # type: ignore[untyped-decorator]
@@ -914,7 +960,7 @@ async def execute_analysis_only_investigation(
                 await renewal_task
         if owns_lease and not soft_limited:
             try:
-                await lease.release(event_id, owner_id)
+                released = await lease.release(event_id, owner_id)
             except SoftTimeLimitExceeded:
                 raise
             except Exception:
@@ -924,6 +970,13 @@ async def execute_analysis_only_investigation(
                     owner_id,
                     exc_info=True,
                 )
+            else:
+                if released:
+                    from app.orchestration.graph_invocation import (
+                        kick_nested_wakeup_after_lease_release,
+                    )
+
+                    await kick_nested_wakeup_after_lease_release(event_id)
 
 
 async def dispatch_analysis_only_investigation(

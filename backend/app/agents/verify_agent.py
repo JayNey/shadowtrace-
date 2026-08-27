@@ -62,7 +62,10 @@ from app.models.enums import (
 )
 from app.models.execution import ActionExecutionJob
 from app.models.tool_meta import ToolResult, ToolResultStatus
-from app.models.verification_readiness import has_immediate_effect_pending
+from app.models.verification_readiness import (
+    IMMEDIATE_PENDING_SKIP_DETAILS,
+    has_immediate_effect_pending,
+)
 from app.models.workflow import CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE
 from app.services.event_disposition_service import DispositionActivationResult
 from app.services.execution_job_persistence import job_from_row, load_target_results_by_job_ids
@@ -200,6 +203,9 @@ _EXECUTED_STATUSES: frozenset[ActionStatus] = frozenset(
 # and need_manual=True.  Within the threshold, the Action is skipped with
 # detail "pending_execution" so the caller can wait for it to complete.
 _EXECUTING_TIMEOUT_SECONDS: int = 300
+# ACCEPTED writebacks stay EXECUTING until CONFIRMED; do not reuse the
+# zombie budget for healthy provider-accepted work.
+_ACCEPTED_WAIT_SECONDS: int = 1800
 
 _VERIFY_OPERATOR = "VerifyAgent"
 
@@ -352,6 +358,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             event_id=event_id,
             actions=actions,
             jobs_map=jobs_map,
+            outbox_map=outbox_map,
         )
         # EventDispositionService.after_effect_resolution_ready reads
         # verification_result from EventContext.  Persist phase-1 outcome
@@ -387,6 +394,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             disposition_policy=disposition_policy,
             phase1_need_replan=phase1_need_replan,
             phase1_need_manual=phase1_need_manual,
+            phase1_results=phase1_results,
             actions=actions,
             jobs_map=jobs_map,
             outbox_map=outbox_map,
@@ -500,6 +508,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         event_id: str,
         actions: list[Action],
         jobs_map: dict[str, ActionExecutionJob],
+        outbox_map: dict[str, list[Any]] | None = None,
     ) -> tuple[
         list[VerificationActionResult],
         set[str],
@@ -511,6 +520,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         failed_action_ids: set[str] = set()
         need_replan = False
         need_manual = False
+        outboxes = outbox_map or {}
 
         for action in actions:
             # POST_VERIFY deferred → skipped, never in failed_actions.
@@ -528,22 +538,26 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             # EXECUTING may mean: (a) in progress → wait; (b) stuck/zombie → escalate.
             if action.status == ActionStatus.EXECUTING:
                 job = jobs_map.get(action.action_id)
-                timeout_s = _EXECUTING_TIMEOUT_SECONDS
+                accepted_wait = _action_has_accepted_writeback(action, outboxes)
+                timeout_s = (
+                    _ACCEPTED_WAIT_SECONDS if accepted_wait else _EXECUTING_TIMEOUT_SECONDS
+                )
                 now_utc = datetime.now(UTC)
-                if (
-                    job is not None
-                    and job.started_at is not None
-                    and (now_utc - job.started_at).total_seconds() > timeout_s
-                ):
-                    # Zombie Action — stuck in EXECUTING past the timeout.
-                    # The execution job may have completed but the Action
-                    # status was never CAS-synced (or the runner crashed).
+                anchor = _executing_timeout_anchor(action, job, outboxes)
+                missing_accepted_clock = accepted_wait and anchor is None
+                timed_out = missing_accepted_clock or (
+                    anchor is not None
+                    and (now_utc - anchor).total_seconds() > timeout_s
+                )
+                if timed_out:
+                    # Zombie Action — stuck in EXECUTING past the timeout, or
+                    # ACCEPTED with no measurable clock (fail-close: cannot wait).
                     logger.warning(
-                        "Action %s stuck in EXECUTING for >%ss (started_at=%s) "
+                        "Action %s stuck in EXECUTING for >%ss (anchor=%s) "
                         "event=%s — escalating to manual resolution",
                         action.action_id,
                         timeout_s,
-                        job.started_at.isoformat(),
+                        "none" if anchor is None else anchor.isoformat(),
                         event_id,
                     )
                     results.append(
@@ -885,6 +899,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         disposition_policy: DispositionPolicy | None,
         phase1_need_replan: bool,
         phase1_need_manual: bool,
+        phase1_results: list[VerificationActionResult],
         actions: list[Action],
         jobs_map: dict[str, ActionExecutionJob],
         outbox_map: dict[str, list[Any]],
@@ -940,6 +955,30 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 overall_status,
                 need_wb_recovery,
                 need_manual,
+            )
+
+        # IMMEDIATE EXECUTING/ACCEPTED is not effect-ready. Calling EDS here
+        # returns skipped_reason=effect_not_ready, which this method used to
+        # map to need_manual=True and skip the graph WAIT fence.
+        if has_immediate_effect_pending(None, results=phase1_results):
+            logger.info(
+                "Phase 2 skipped: IMMEDIATE effects still pending event=%s",
+                event_id,
+            )
+            pending_action_ids = {
+                item.action_id
+                for item in phase1_results
+                if item.detail in IMMEDIATE_PENDING_SKIP_DETAILS
+            }
+            overall_status = VerificationOverallStatus.WAITING
+            return (
+                results,
+                recoverable_wb,
+                pending_action_ids,
+                blocked_wb,
+                overall_status,
+                False,
+                False,
             )
 
         # If disposition is not required, no writeback to verify.
@@ -2179,6 +2218,70 @@ def _plan_actions(response_plan: Any) -> list[Action]:
         raw = response_plan.get("actions", [])
         return [Action.model_validate(a) if isinstance(a, dict) else a for a in raw]
     return []
+
+
+def _action_has_accepted_writeback(
+    action: Action,
+    outbox_map: dict[str, list[Any]],
+) -> bool:
+    """True when the live outbox (or empty outbox + Action) is still ACCEPTED.
+
+    Stale ``Action.writeback_status=ACCEPTED`` must not keep the 1800s clock
+    after every outbox has already moved to CONFIRMED/FAILED.
+    """
+    records = outbox_map.get(action.action_id, [])
+    if any(
+        getattr(record, "latest_writeback_status", None) is WritebackStatus.ACCEPTED
+        or getattr(record, "latest_writeback_status", None)
+        == WritebackStatus.ACCEPTED.value
+        for record in records
+    ):
+        return True
+    return action.writeback_status is WritebackStatus.ACCEPTED and not records
+
+
+_ACCEPTED_CLOCK_ATTRS = ("delivered_at", "observed_at", "submitted_at")
+
+
+def _accepted_wait_clock(record: Any) -> datetime | None:
+    """First accept-time stamp on an outbox or receipt. Never ORM ``updated_at``."""
+    stamps: list[datetime] = []
+    for attr in _ACCEPTED_CLOCK_ATTRS:
+        ts = getattr(record, attr, None)
+        if isinstance(ts, datetime):
+            stamps.append(ts)
+    if not stamps:
+        return None
+    return min(stamps)
+
+
+def _executing_timeout_anchor(
+    action: Action,
+    job: ActionExecutionJob | None,
+    outbox_map: dict[str, list[Any]],
+) -> datetime | None:
+    """Clock for EXECUTING zombie budget.
+
+    ACCEPTED work is measured from accept time (``delivered_at``, or receipt
+    ``observed_at`` / ``submitted_at``), never from auto-refreshing
+    ``updated_at`` or original job start. Missing accept clock fail-closes.
+    """
+    if _action_has_accepted_writeback(action, outbox_map):
+        stamps: list[datetime] = []
+        for record in outbox_map.get(action.action_id, []):
+            raw = getattr(record, "latest_writeback_status", None)
+            if raw is not WritebackStatus.ACCEPTED and raw != WritebackStatus.ACCEPTED.value:
+                continue
+            ts = _accepted_wait_clock(record)
+            if ts is not None:
+                stamps.append(ts)
+        if stamps:
+            return min(stamps)
+        # No measurable ACCEPTED clock — caller fail-closes instead of waiting forever.
+        return None
+    if job is not None:
+        return job.started_at
+    return None
 
 
 def _make_execution_failed_non_verifiable_result(

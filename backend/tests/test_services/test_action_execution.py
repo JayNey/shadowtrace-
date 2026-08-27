@@ -48,6 +48,7 @@ from app.models.enums import (
     Severity,
     SourceObjectKind,
     WritebackReadiness,
+    WritebackStatus,
 )
 from app.models.source import SourceReference
 from app.services.action_execution_service import ActionExecutionService
@@ -1264,6 +1265,83 @@ async def test_xdr_executing_with_active_outbox_not_reclaimed(
         row = await session.get(orm.Action, action_id)
         assert row is not None
         assert row.status == ActionStatus.EXECUTING.value
+
+
+@pytest.mark.asyncio
+async def test_delivered_accepted_outbox_is_not_reclaimed_to_approved(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models.enums import OutboxDeliveryStatus
+
+    lookups = {"n": 0}
+
+    async def _lookup(*, limit: int = 10) -> int:
+        lookups["n"] += 1
+        return 0
+
+    monkeypatch.setattr(
+        execution_service._sync,
+        "reconcile_pending_entity_effects",
+        _lookup,
+    )
+
+    oid = f"INC-{_sfx()}"
+    await _seed_connector_and_source(
+        session_factory, object_id=oid, mock_xdr_client=mock_xdr_client
+    )
+    event_id = await _create_event(session_factory, store, object_id=oid)
+    expired = datetime.now(UTC) - timedelta(seconds=600)
+    action_id, job_id = await _insert_stale_executing_with_job(
+        session_factory,
+        event_id=event_id,
+        lease_expires_at=expired,
+        attempt=1,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            source = await session.scalar(
+                select(orm.SourceObject).where(orm.SourceObject.source_object_id == oid)
+            )
+            assert source is not None
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-{_sfx()}",
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source.source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-wb-{action_id}",
+                    command_payload={"action_id": action_id},
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.DELIVERED.value,
+                    latest_writeback_status=WritebackStatus.ACCEPTED.value,
+                )
+            )
+
+    reconciled = await execution_service.reconcile_stale_executions(limit=10)
+    assert lookups["n"] == 1
+    assert reconciled == 0
+
+    async with session_factory() as session:
+        action_row = await session.get(orm.Action, action_id)
+        job_row = await session.get(orm.ActionExecutionJob, job_id)
+        assert action_row is not None
+        assert job_row is not None
+        assert action_row.status == ActionStatus.EXECUTING.value
+        assert action_row.execution_job_id == job_id
+        assert job_row.status == ExecutionJobStatus.RUNNING.value
+
 
 
 @pytest.mark.asyncio

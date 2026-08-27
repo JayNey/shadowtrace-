@@ -171,7 +171,7 @@ class DispositionCommandFactory:
             operation_params=RecordCompensationParams(summary_code=summary_code),
             target_results=[],
             operator_id=operator_id,
-            idempotency_key=f"{rollback_action.action_id}:compensation:{disposition_id}",
+            idempotency_key=f"{rollback_action.action_id}:compensation:{parent_disposition_id}",
             source_concurrency_token=source_concurrency_token,
             execution_owner=rollback_action.execution_owner or ExecutionOwner.XDR_MANAGED,
             parent_disposition_id=parent_disposition_id,

@@ -312,6 +312,36 @@ class TestSearchServiceFallback:
         assert len(page3.items) <= 2
 
     @pytest.mark.asyncio
+    async def test_ilike_scan_cap_keeps_total_aligned_with_fetched_window(
+        self,
+        service: SearchService,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``total`` must not exceed the in-memory window after the per-table cap."""
+        from app.services import search_service as search_mod
+
+        monkeypatch.setattr(search_mod, "ILIKE_SCAN_CAP", 3)
+        for i in range(5):
+            await _seed_tool_call(
+                session_factory,
+                call_id=f"call-cap-{i:02d}",
+                tool_name="block_ip",
+            )
+
+        page1 = await service.search("block_ip", scope="tool-calls", page=1, page_size=2)
+        assert page1.total == 3
+        assert len(page1.items) == 2
+
+        page2 = await service.search("block_ip", scope="tool-calls", page=2, page_size=2)
+        assert page2.total == 3
+        assert len(page2.items) == 1
+
+        page3 = await service.search("block_ip", scope="tool-calls", page=3, page_size=2)
+        assert page3.total == 3
+        assert page3.items == []
+
+    @pytest.mark.asyncio
     async def test_search_scope_filter(
         self,
         service: SearchService,

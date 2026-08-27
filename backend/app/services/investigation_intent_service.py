@@ -1070,12 +1070,13 @@ class InvestigationIntentService:
         *,
         error: str,
         broker_task_id: str | None = None,
+        increment_attempt: bool = True,
     ) -> bool:
         return await self._transition(
             intent_id,
             InvestigationIntentStatus.RETRY,
             last_error=error,
-            increment_attempt=True,
+            increment_attempt=increment_attempt,
             clear_claim=True,
             expected_broker_task_id=broker_task_id,
         )
@@ -1660,6 +1661,7 @@ class InvestigationIntentService:
                     row.last_error = last_error
                 if increment_attempt:
                     row.attempt = int(row.attempt or 0) + 1
+                if increment_attempt or target is InvestigationIntentStatus.RETRY:
                     row.revision = int(row.revision or 1) + 1
                     row.broker_task_id = (
                         deterministic_investigation_task_id(

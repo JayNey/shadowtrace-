@@ -11,6 +11,7 @@ resume must never fall back to a full-graph ``execute_investigation()`` restart
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -24,6 +25,8 @@ from app.core.errors import ValidationError
 from app.db import models as orm
 from app.models.agent_io import EvidenceOutput, RiskAssessment
 from app.models.enums import (
+    ActionCategory,
+    ActionStatus,
     DispositionIntentKind,
     DispositionPolicy,
     EventStatus,
@@ -33,7 +36,6 @@ from app.models.enums import (
 from app.orchestration.workflow_graph import (
     NODE_APPROVAL,
     NODE_EXECUTE,
-    NODE_VERIFY,
     invoke_investigation_graph,
 )
 from app.services.analysis_only_complete_persistence import (
@@ -92,6 +94,99 @@ def _only_stale_verify_degraded(degraded_flags: list[Any]) -> bool:
     return bool(degraded_flags) and all(
         _degraded_flag_name(flag) == "verify_degraded" for flag in degraded_flags
     )
+
+
+# UNKNOWN is submitted-unconfirmed: lookup or manual, never durable inflight WAIT.
+_IN_FLIGHT_ACTION_STATUSES = frozenset({ActionStatus.EXECUTING.value})
+
+# Sentinel: resume found NEW/TRIAGING with no checkpoint while holding EventLease.
+# Caller must release first, then delegate to execute_investigation (its own lease).
+_DELEGATE_EXECUTE = object()
+
+
+def _parse_action_inflight_row(row: Any) -> tuple[str, str, str, Any, int] | None:
+    try:
+        seq = tuple(row)
+    except TypeError:
+        return None
+    if len(seq) >= 5:
+        action_id, status, category, superseded, plan_revision = seq[:5]
+        try:
+            revision = int(plan_revision or 0)
+        except (TypeError, ValueError):
+            revision = 0
+        return (str(action_id), str(status), str(category), superseded, revision)
+    if len(seq) == 2:
+        # Unit-test fakes share execute() with outbox rows: (id, status).
+        action_id, status = seq
+        return (
+            str(action_id),
+            str(status),
+            ActionCategory.RESPONSE.value,
+            None,
+            0,
+        )
+    return None
+
+
+def _current_executing_response_ids(rows: list[Any]) -> list[str]:
+    """Current-revision RESPONSE EXECUTING ids (same scope as resume plan load)."""
+    parsed: list[tuple[str, str, int]] = []
+    for row in rows:
+        item = _parse_action_inflight_row(row)
+        if item is None:
+            continue
+        action_id, status, category, superseded, plan_revision = item
+        if category != ActionCategory.RESPONSE.value:
+            continue
+        if superseded is not None:
+            continue
+        if status == ActionStatus.SUPERSEDED.value:
+            continue
+        parsed.append((action_id, status, plan_revision))
+    if not parsed:
+        return []
+    latest = max(plan_revision for _action_id, _status, plan_revision in parsed)
+    return [
+        action_id
+        for action_id, status, plan_revision in parsed
+        if plan_revision == latest and status in _IN_FLIGHT_ACTION_STATUSES
+    ]
+
+
+async def _still_inflight_action_ids(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    action_ids: list[str],
+) -> list[str]:
+    """Return checkpoint ids that are still current-revision RESPONSE EXECUTING."""
+    if not action_ids:
+        return []
+    current = set(await _event_inflight_action_ids(session_factory, event_id))
+    return [action_id for action_id in action_ids if action_id in current]
+
+
+async def _event_inflight_action_ids(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> list[str]:
+    """Current-revision RESPONSE EXECUTING ids for in-flight WAIT resume."""
+    async with session_factory() as session:
+        result = await session.execute(
+            select(
+                orm.Action.action_id,
+                orm.Action.status,
+                orm.Action.action_category,
+                orm.Action.superseded_by_revision,
+                orm.Action.plan_revision,
+            ).where(
+                orm.Action.event_id == event_id,
+                orm.Action.action_category == ActionCategory.RESPONSE.value,
+                orm.Action.superseded_by_revision.is_(None),
+                orm.Action.status != ActionStatus.SUPERSEDED.value,
+            )
+        )
+        return _current_executing_response_ids(list(result.all()))
 
 
 async def _active_outbox_writeback_rows(
@@ -199,6 +294,25 @@ async def _reconcile_verify_resume_patch(
         values.get("verify_recoverable_writeback_ids") or failed_writebacks
     )
     pending_actions = list(values.get("verify_pending_writeback_action_ids") or [])
+    if not pending_actions:
+        pending_actions = list(values.get("execution_inflight_action_ids") or [])
+    had_pending = bool(pending_actions) or bool(values.get("execution_inflight"))
+    if pending_actions:
+        still_pending = await _still_inflight_action_ids(
+            session_factory, event_id, pending_actions
+        )
+        if still_pending != pending_actions:
+            patch["verify_pending_writeback_action_ids"] = still_pending
+        pending_actions = still_pending
+    elif values.get("execution_inflight"):
+        pending_actions = await _event_inflight_action_ids(session_factory, event_id)
+        patch["verify_pending_writeback_action_ids"] = pending_actions
+    if had_pending and not pending_actions:
+        # Left EXECUTING (UNKNOWN/FAILED/CONFIRMED) is not durable inflight WAIT.
+        # Do not treat this as writeback success — Verify must still re-run.
+        patch["execution_inflight"] = False
+        patch["execution_inflight_action_ids"] = []
+        patch.setdefault("verify_pending_writeback_action_ids", [])
     if not (need_writeback or need_manual or values.get("halted")):
         return patch
 
@@ -207,7 +321,10 @@ async def _reconcile_verify_resume_patch(
     outbox_rows = await _active_outbox_writeback_rows(session_factory, event_id)
     wb_statuses = [status for _intent, status in outbox_rows]
     writebacks_resolved = (
-        not recoverable_writebacks and not pending_actions and _all_writebacks_resolved(wb_statuses)
+        not recoverable_writebacks
+        and not pending_actions
+        and not failed_writebacks
+        and _all_writebacks_resolved(wb_statuses)
     )
     disposition_policy = values.get("disposition_policy")
 
@@ -216,6 +333,8 @@ async def _reconcile_verify_resume_patch(
         patch["verify_failed_writebacks"] = []
         patch["verify_recoverable_writeback_ids"] = []
         patch["verify_pending_writeback_action_ids"] = []
+        patch["execution_inflight"] = False
+        patch["execution_inflight_action_ids"] = []
         patch["execution_substate"] = ExecutionSubstate.NONE.value
 
     if (
@@ -309,6 +428,110 @@ async def _sync_execution_substate(
         ) from exc
 
 
+async def _load_response_actions_for_resume(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> list[Any]:
+    """Load current-revision response Actions. Empty if the session cannot scalars()."""
+    from app.services.action_mapper import action_from_orm
+
+    async with session_factory() as session:
+        scalars = getattr(session, "scalars", None)
+        if scalars is None:
+            return []
+        rows = (
+            await scalars(
+                select(orm.Action).where(
+                    orm.Action.event_id == event_id,
+                    orm.Action.action_category == ActionCategory.RESPONSE.value,
+                    orm.Action.superseded_by_revision.is_(None),
+                    orm.Action.status != ActionStatus.SUPERSEDED.value,
+                )
+            )
+        ).all()
+    actions = [action_from_orm(row) for row in rows]
+    if not actions:
+        return []
+    latest = max(int(action.plan_revision or 0) for action in actions)
+    return [action for action in actions if int(action.plan_revision or 0) == latest]
+
+
+async def _get_resume_state_machine() -> Any:
+    from app.api.v1.deps import get_state_machine
+
+    return await get_state_machine()
+
+
+async def _advance_waiting_approval_if_plan_decided(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> None:
+    """CAS-advance WAITING_APPROVAL when the plan is fully decided.
+
+    Still waiting on a human decision → GraphResumeDeferredError.
+    Fully decided but the status CAS fails → GraphResumeFailedError.
+    """
+    from app.orchestration.graph_resume_observability import (
+        GraphResumeDeferredError,
+        GraphResumeFailedError,
+    )
+    from app.services.approval_engine import (
+        APPROVAL_ENGINE_OPERATOR,
+        plan_actions_fully_decided,
+        resolve_plan_advance_target,
+    )
+
+    actions = await _load_response_actions_for_resume(session_factory, event_id)
+    if not plan_actions_fully_decided(actions):
+        raise GraphResumeDeferredError(
+            "cannot resume while event is still WAITING_APPROVAL",
+            event_id=event_id,
+            error_type="waiting_approval",
+        )
+    target = resolve_plan_advance_target(actions)
+    if target is None:
+        raise GraphResumeFailedError(
+            "fully decided plan has no legal EventStatus advance target",
+            event_id=event_id,
+            error_type="plan_advance_failed",
+        )
+
+    machine = await _get_resume_state_machine()
+    try:
+        await machine.transition(
+            event_id,
+            target,
+            operator=APPROVAL_ENGINE_OPERATOR,
+            reason="plan_fully_decided",
+        )
+    except Exception as exc:
+        current = await _read_event_status(session_factory, event_id)
+        if current in {
+            target.value,
+            EventStatus.EXECUTING_RESPONSE.value,
+            EventStatus.REPORTING.value,
+        }:
+            logger.info(
+                "plan advance CAS raced but status already advanced event=%s status=%s",
+                event_id,
+                current,
+            )
+            return
+        raise GraphResumeFailedError(
+            f"plan advance CAS failed while WAITING_APPROVAL target={target.value}",
+            event_id=event_id,
+            error_type="plan_advance_failed",
+        ) from exc
+
+    advanced = await _read_event_status(session_factory, event_id)
+    if advanced == EventStatus.WAITING_APPROVAL.value:
+        raise GraphResumeFailedError(
+            "plan advance committed but event remained WAITING_APPROVAL",
+            event_id=event_id,
+            error_type="plan_advance_failed",
+        )
+
+
 async def prepare_graph_resume_state(
     session_factory: async_sessionmaker[AsyncSession],
     graph: Any,
@@ -326,6 +549,9 @@ async def prepare_graph_resume_state(
         return False
 
     status_value = await _read_event_status(session_factory, event_id)
+    if status_value == EventStatus.WAITING_APPROVAL.value:
+        await _advance_waiting_approval_if_plan_decided(session_factory, event_id)
+        status_value = await _read_event_status(session_factory, event_id)
     if status_value in {
         EventStatus.FAILED.value,
         EventStatus.CLOSED.value,
@@ -354,11 +580,15 @@ async def prepare_graph_resume_state(
             await graph.aupdate_state(
                 config,
                 resume_patch,
-                # Mark the patch as the execute tail when recovery has resolved,
-                # so the graph schedules a fresh Verify pass.  Using NODE_VERIFY
-                # here would route directly from stale WAITING state to report.
-                as_node=NODE_EXECUTE if recovery_resolved else NODE_VERIFY,
+                # Always the execute tail so VerifyAgent re-runs. as_node=NODE_VERIFY
+                # would skip zombie timeout and UNKNOWN→manual on WAITING_WRITEBACK.
+                as_node=NODE_EXECUTE,
             )
+            if recovery_resolved:
+                logger.info(
+                    "prepare_graph_resume: recovery flags cleared; re-verify event=%s",
+                    event_id,
+                )
             values = {**values, **resume_patch}
         if values.get("execution_substate") == ExecutionSubstate.WAITING_WRITEBACK.value:
             authoritative = await _sync_execution_substate(
@@ -568,6 +798,87 @@ async def _resume_report_only_from_analysis(
     logger.info("report-only resume completed event=%s (status remains REPORTING)", event_id)
 
 
+async def _with_investigation_lease(
+    agent: Any,
+    event_id: str,
+    op: Callable[[], Awaitable[Any]],
+) -> Any:
+    """Hold EventLease across WAITING_APPROVAL CAS, prepare, and ainvoke.
+
+    ``execute_investigation`` acquires its own lease; callers that need to
+    delegate must return :data:`_DELEGATE_EXECUTE` so this helper releases first.
+    """
+    from app.agents.super_agent import _run_orchestration_with_renewal_watch
+    from app.core.errors import DependencyUnavailableError, InvestigationLeaseLostError
+    from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+    from app.orchestration.lease import EventLease, generate_owner_id
+
+    lease = getattr(agent, "lease", None)
+    if not isinstance(lease, EventLease):
+        raise GraphResumeDeferredError(
+            "event lease unavailable; not starting graph resume",
+            event_id=event_id,
+            error_type="lease_unavailable",
+        )
+
+    owner_id = generate_owner_id()
+    try:
+        acquired = await lease.acquire(event_id, owner_id)
+    except DependencyUnavailableError as exc:
+        raise GraphResumeDeferredError(
+            "event lease store unavailable; not starting graph resume",
+            event_id=event_id,
+            error_type="lease_unavailable",
+        ) from exc
+    if not acquired:
+        raise GraphResumeDeferredError(
+            "investigation already in progress for this event",
+            event_id=event_id,
+            error_type="investigation_in_progress",
+        )
+
+    renewal_failed = asyncio.Event()
+    renewal_task = await lease.start_renewal(
+        event_id,
+        owner_id,
+        on_renewal_failed=renewal_failed,
+    )
+    try:
+        return await _run_orchestration_with_renewal_watch(
+            op(),
+            renewal_failed,
+            event_id=event_id,
+        )
+    except InvestigationLeaseLostError as exc:
+        raise GraphResumeDeferredError(
+            "investigation lease lost during graph resume",
+            event_id=event_id,
+            error_type="investigation_lease_lost",
+        ) from exc
+    finally:
+        renewal_task.cancel()
+        try:
+            await renewal_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            released = await lease.release(event_id, owner_id)
+        except Exception:
+            logger.warning(
+                "graph resume lease release failed event=%s owner=%s",
+                event_id,
+                owner_id,
+                exc_info=True,
+            )
+        else:
+            if released:
+                from app.orchestration.graph_invocation import (
+                    kick_nested_wakeup_after_lease_release,
+                )
+
+                await kick_nested_wakeup_after_lease_release(event_id)
+
+
 async def _delegate_execute_investigation(
     session_factory: async_sessionmaker[AsyncSession],
     event_id: str,
@@ -601,28 +912,85 @@ async def resume_investigation_from_checkpoint(
     checkpoint → ``report_node``, or a report-only narrow path when no graph is
     wired. Missing checkpoint on ``REPORTING`` raises ``checkpoint_missing``
     while leaving the event at ``REPORTING`` (caller records degraded flags).
+
+    EventLease is acquired before WAITING_APPROVAL CAS and
+    ``prepare_graph_resume_state`` so nested flush / Celery cannot mutate the
+    checkpoint while SuperAgent still holds the lease.
     """
+    from app.orchestration.graph_invocation import persist_nested_graph_wakeup
     from app.orchestration.graph_resume_observability import GraphResumeFailedError
 
     agent = await get_super_agent()
     graph = getattr(agent, "_investigation_graph", None)
     status_value = await _read_event_status(session_factory, event_id)
-    if status_value in _NO_FULL_GRAPH_RESTART_STATUSES:
-        if status_value in {EventStatus.CLOSED.value, EventStatus.FAILED.value}:
+
+    if (
+        status_value in _NO_FULL_GRAPH_RESTART_STATUSES
+        and status_value != EventStatus.REPORTING.value
+    ):
+        logger.info(
+            "resume skipped for terminal status=%s event=%s",
+            status_value,
+            event_id,
+        )
+        return
+
+    if status_value == EventStatus.REPORTING.value and graph is None:
+        await _resume_report_only_from_analysis(session_factory, event_id, agent)
+        return
+
+    if graph is None:
+        if status_value in _GRAPH_NEVER_STARTED_STATUSES:
+            await _delegate_execute_investigation(session_factory, event_id)
+            return
+        if status_value == EventStatus.WAITING_APPROVAL.value:
+            async def _advance_only() -> None:
+                await _advance_waiting_approval_if_plan_decided(session_factory, event_id)
+
+            await _with_investigation_lease(agent, event_id, _advance_only)
+            status_value = await _read_event_status(session_factory, event_id)
+            if (
+                status_value in _NO_FULL_GRAPH_RESTART_STATUSES
+                and status_value != EventStatus.REPORTING.value
+            ):
+                return
+            if status_value == EventStatus.REPORTING.value:
+                await _resume_report_only_from_analysis(session_factory, event_id, agent)
+                return
+        await persist_nested_graph_wakeup(
+            event_id,
+            "graph_unavailable_operator_replay",
+        )
+        raise GraphResumeFailedError(
+            f"investigation graph unavailable for status {status_value}; "
+            "operator replay after graph is wired",
+            event_id=event_id,
+            error_type="graph_unavailable_operator_replay",
+        )
+
+    async def _run_resume_under_lease() -> Any:
+        status_now = await _read_event_status(session_factory, event_id)
+        if (
+            status_now in _NO_FULL_GRAPH_RESTART_STATUSES
+            and status_now != EventStatus.REPORTING.value
+        ):
             logger.info(
                 "resume skipped for terminal status=%s event=%s",
-                status_value,
+                status_now,
                 event_id,
             )
-            return
+            return None
+        if status_now == EventStatus.WAITING_APPROVAL.value:
+            await _advance_waiting_approval_if_plan_decided(session_factory, event_id)
+            status_now = await _read_event_status(session_factory, event_id)
+            if (
+                status_now in _NO_FULL_GRAPH_RESTART_STATUSES
+                and status_now != EventStatus.REPORTING.value
+            ):
+                return None
 
-        # REPORTING: continue report phase only — never restart triage.
-        if graph is None:
-            await _resume_report_only_from_analysis(session_factory, event_id, agent)
-            return
-
-        reporting_config: RunnableConfig = {"configurable": {"thread_id": event_id}}
         runtime = await get_workflow_runtime()
+        config: RunnableConfig = {"configurable": {"thread_id": event_id}}
         has_checkpoint = await prepare_graph_resume_state(
             session_factory,
             graph,
@@ -630,43 +998,22 @@ async def resume_investigation_from_checkpoint(
             runtime,
         )
         if not has_checkpoint:
+            if status_now in _GRAPH_NEVER_STARTED_STATUSES:
+                return _DELEGATE_EXECUTE
             raise GraphResumeFailedError(
-                f"no checkpoint for event in status {status_value}",
+                f"no checkpoint for event in status {status_now}",
                 event_id=event_id,
                 error_type="checkpoint_missing",
             )
 
         projection = EvidenceProjection(session_factory)
         with bind_evidence_projection(projection):
-            await invoke_investigation_graph(graph, None, reporting_config)
-        return
+            await invoke_investigation_graph(graph, None, config)
+        return None
 
-    if graph is None:
-        # Only safe for pre-graph statuses; post-analysis handled above.
+    outcome = await _with_investigation_lease(agent, event_id, _run_resume_under_lease)
+    if outcome is _DELEGATE_EXECUTE:
         await _delegate_execute_investigation(session_factory, event_id)
-        return
-
-    config: RunnableConfig = {"configurable": {"thread_id": event_id}}
-    runtime = await get_workflow_runtime()
-    has_checkpoint = await prepare_graph_resume_state(
-        session_factory,
-        graph,
-        event_id,
-        runtime,
-    )
-    if not has_checkpoint:
-        if status_value in _GRAPH_NEVER_STARTED_STATUSES:
-            await _delegate_execute_investigation(session_factory, event_id)
-            return
-        raise GraphResumeFailedError(
-            f"no checkpoint for event in status {status_value}",
-            event_id=event_id,
-            error_type="checkpoint_missing",
-        )
-
-    projection = EvidenceProjection(session_factory)
-    with bind_evidence_projection(projection):
-        await invoke_investigation_graph(graph, None, config)
 
 
 __all__ = [

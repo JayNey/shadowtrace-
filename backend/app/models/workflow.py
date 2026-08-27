@@ -397,6 +397,7 @@ JOB_STATUS_TRANSITIONS: dict[ExecutionJobStatus, set[ExecutionJobStatus]] = {
         ExecutionJobStatus.CANCELLED,
         ExecutionJobStatus.FAILED,  # lease-expired reclaim only (validate gate)
         ExecutionJobStatus.TIMED_OUT,  # lease-expired reclaim only (validate gate)
+        ExecutionJobStatus.UNKNOWN,  # side-effect CAS miss after dispatch
     },
     ExecutionJobStatus.RUNNING: {
         ExecutionJobStatus.PARTIAL_SUCCESS,
@@ -424,6 +425,7 @@ JOB_STATUS_TRANSITIONS: dict[ExecutionJobStatus, set[ExecutionJobStatus]] = {
 OUTBOX_DELIVERY_TRANSITIONS: dict[OutboxDeliveryStatus, set[OutboxDeliveryStatus]] = {
     OutboxDeliveryStatus.READY: {
         OutboxDeliveryStatus.LEASED,
+        OutboxDeliveryStatus.PAUSED,  # missing locator / repairable fail-close
         OutboxDeliveryStatus.DEAD_LETTER,  # writeback fence blocked (ISSUE-222)
         OutboxDeliveryStatus.DELIVERED,  # provider lookup confirmed before egress (ISSUE-274)
     },

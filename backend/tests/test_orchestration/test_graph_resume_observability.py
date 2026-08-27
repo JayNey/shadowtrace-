@@ -2,21 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.core.errors import InvalidStateTransitionError, ValidationError
-from app.models.enums import EventStatus
+from app.models.enums import ActionStatus, EventStatus
 from app.orchestration.graph_resume_observability import (
     GRAPH_RESUME_FAILED_FLAG,
+    GraphResumeDeferredError,
     GraphResumeFailedError,
     GraphResumeFailureContext,
     execute_graph_resume_with_retry,
     record_graph_resume_failure,
 )
 from app.services.approval_engine import ApprovalEngine
+
+
+def _fresh_event_lease() -> Any:
+    from app.orchestration.lease import EventLease
+    from tests.support.fake_redis import InMemoryFakeRedisClient
+
+    return EventLease(InMemoryFakeRedisClient())
 
 
 class _BeginCtx:
@@ -36,6 +45,13 @@ class _ScalarSession:
 
     async def scalar(self, _stmt: Any) -> str:
         return self._status
+
+    async def scalars(self, _stmt: Any) -> Any:
+        class _Empty:
+            def all(self) -> list[Any]:
+                return []
+
+        return _Empty()
 
     def add(self, _row: Any) -> None:
         return None
@@ -75,6 +91,7 @@ async def test_execute_graph_resume_records_degraded_and_raises() -> None:
     graph.aget_state = AsyncMock(return_value=MagicMock(values={}))
     agent = MagicMock()
     agent._investigation_graph = graph
+    agent.lease = _fresh_event_lease()
 
     async def _get_super_agent() -> Any:
         return agent
@@ -114,6 +131,7 @@ async def test_reporting_checkpoint_missing_keeps_status_reporting() -> None:
     graph.aget_state = AsyncMock(return_value=MagicMock(values={}))
     agent = MagicMock()
     agent._investigation_graph = graph
+    agent.lease = _fresh_event_lease()
     factory = _SessionFactory(EventStatus.REPORTING.value)
 
     with pytest.raises(GraphResumeFailedError) as exc_info:
@@ -156,8 +174,12 @@ async def test_execute_graph_resume_retries_transient_errors() -> None:
     graph.aget_state = _aget_state
     graph.aupdate_state = AsyncMock()
     graph.ainvoke = AsyncMock(return_value={"halted": False})
+    from app.orchestration.lease import EventLease
+    from tests.support.fake_redis import InMemoryFakeRedisClient
+
     agent = MagicMock()
     agent._investigation_graph = graph
+    agent.lease = EventLease(InMemoryFakeRedisClient())
 
     async def _get_super_agent() -> Any:
         return agent
@@ -200,6 +222,29 @@ async def test_approve_returns_resume_failed_without_rollback() -> None:
 
     status = await engine._maybe_advance_plan("evt-1", 1)
     assert status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_maybe_advance_plan_still_resumes_after_transition_error() -> None:
+    from app.models.enums import ActionStatus
+
+    resume = AsyncMock()
+    engine = ApprovalEngine(MagicMock(), resume_investigation=resume)
+    engine.is_plan_fully_decided = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    approved = MagicMock()
+    approved.status = ActionStatus.APPROVED
+    approved.tool_name = "block_ip"
+    approved.writeback_required = False
+    engine._load_plan_response_actions = AsyncMock(return_value=[approved])  # type: ignore[method-assign]
+    engine._event_status = AsyncMock(return_value=EventStatus.WAITING_APPROVAL)  # type: ignore[method-assign]
+    machine = MagicMock()
+    machine.transition = AsyncMock(side_effect=RuntimeError("cas conflict"))
+    engine._state_machine = machine
+
+    status = await engine._maybe_advance_plan("evt-transition-err", 1)
+
+    assert status == "ok"
+    resume.assert_awaited_once_with("evt-transition-err")
 
 
 @pytest.mark.asyncio
@@ -249,6 +294,7 @@ async def test_execute_graph_resume_classifies_invalid_transition() -> None:
     )
     agent = MagicMock()
     agent._investigation_graph = MagicMock(aget_state=AsyncMock(side_effect=exc))
+    agent.lease = _fresh_event_lease()
 
     with pytest.raises(GraphResumeFailedError) as exc_info:
         await execute_graph_resume_with_retry(
@@ -271,18 +317,529 @@ async def test_execute_graph_resume_skips_nested_active_graph() -> None:
     async def _get_super_agent() -> Any:
         return agent
 
-    from app.orchestration.graph_invocation import bind_investigation_graph
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        get_nested_resume_runner,
+        set_nested_resume_runner,
+    )
 
-    async with bind_investigation_graph("evt-nested"):
-        await execute_graph_resume_with_retry(
-            "evt-nested",
-            session_factory=_SessionFactory(),
-            get_super_agent=_get_super_agent,
-            get_workflow_runtime=AsyncMock(return_value=MagicMock()),
-            degraded_flags=MagicMock(),
-        )
+    previous = get_nested_resume_runner()
+    set_nested_resume_runner(AsyncMock())
+    try:
+        async with bind_investigation_graph("evt-nested"):
+            with pytest.raises(GraphResumeDeferredError) as exc_info:
+                await execute_graph_resume_with_retry(
+                    "evt-nested",
+                    session_factory=_SessionFactory(),
+                    get_super_agent=_get_super_agent,
+                    get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+                    degraded_flags=MagicMock(),
+                )
+            assert exc_info.value.error_type == "graph_still_bound"
+    finally:
+        set_nested_resume_runner(previous)
 
     agent._investigation_graph.aget_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_execute_graph_resume_flushes_nested_defer_after_unbind() -> None:
+    flushed: list[str] = []
+
+    async def _runner(event_id: str) -> None:
+        flushed.append(event_id)
+
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        get_nested_resume_runner,
+        set_nested_resume_runner,
+    )
+
+    previous = get_nested_resume_runner()
+    set_nested_resume_runner(_runner)
+    try:
+        async with bind_investigation_graph("evt-nested-flush"):
+            with pytest.raises(GraphResumeDeferredError) as exc_info:
+                await execute_graph_resume_with_retry(
+                    "evt-nested-flush",
+                    session_factory=_SessionFactory(),
+                    get_super_agent=AsyncMock(),
+                    get_workflow_runtime=AsyncMock(),
+                    degraded_flags=MagicMock(),
+                )
+            assert exc_info.value.error_type == "graph_still_bound"
+            assert flushed == []
+        assert flushed == ["evt-nested-flush"]
+    finally:
+        set_nested_resume_runner(previous)
+
+
+@pytest.mark.asyncio
+async def test_bind_fails_closed_when_nested_resume_has_no_runner() -> None:
+    from app.orchestration.graph_invocation import (
+        NestedGraphResumeError,
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+
+    persisted: list[tuple[str, str]] = []
+    notified: list[str] = []
+
+    async def _writer(event_id: str, reason: str) -> None:
+        persisted.append((event_id, reason))
+
+    async def _handler(event_id: str, exc: BaseException, pending: list[str]) -> None:
+        del event_id, pending
+        notified.append(type(exc).__name__)
+
+    previous = get_nested_resume_runner()
+    previous_writer = get_nested_resume_durability_writer()
+    previous_handler = get_nested_resume_failure_handler()
+    set_nested_resume_runner(None)
+    set_nested_resume_durability_writer(_writer)
+    set_nested_resume_failure_handler(_handler)
+    try:
+        async with bind_investigation_graph("evt-no-runner"):
+            assert defer_nested_graph_resume("evt-no-runner") is True
+    finally:
+        set_nested_resume_runner(previous)
+        set_nested_resume_durability_writer(previous_writer)
+        set_nested_resume_failure_handler(previous_handler)
+
+    assert persisted == [("evt-no-runner", "nested_resume_no_runner")]
+    assert notified == [NestedGraphResumeError.__name__]
+
+
+@pytest.mark.asyncio
+async def test_bind_persists_when_nested_resume_flush_fails() -> None:
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+
+    persisted: list[tuple[str, str]] = []
+    notified: list[str] = []
+
+    async def _boom(_event_id: str) -> None:
+        raise RuntimeError("flush failed")
+
+    async def _writer(event_id: str, reason: str) -> None:
+        persisted.append((event_id, reason))
+
+    async def _handler(event_id: str, exc: BaseException, pending: list[str]) -> None:
+        del event_id, pending
+        notified.append(type(exc).__name__)
+
+    previous = get_nested_resume_runner()
+    previous_writer = get_nested_resume_durability_writer()
+    previous_handler = get_nested_resume_failure_handler()
+    set_nested_resume_runner(_boom)
+    set_nested_resume_durability_writer(_writer)
+    set_nested_resume_failure_handler(_handler)
+    try:
+        async with bind_investigation_graph("evt-flush-boom"):
+            assert defer_nested_graph_resume("evt-flush-boom") is True
+    finally:
+        set_nested_resume_runner(previous)
+        set_nested_resume_durability_writer(previous_writer)
+        set_nested_resume_failure_handler(previous_handler)
+
+    assert persisted == [("evt-flush-boom", "nested_resume_flush_failed")]
+    assert notified == ["RuntimeError"]
+
+
+@pytest.mark.asyncio
+async def test_bind_raises_when_nested_resume_persist_fails_after_flush_error() -> None:
+    from app.orchestration.graph_invocation import (
+        NestedGraphResumeError,
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+
+    notified: list[str] = []
+
+    async def _boom(_event_id: str) -> None:
+        raise RuntimeError("flush failed")
+
+    async def _writer(_event_id: str, _reason: str) -> None:
+        raise RuntimeError("persist failed")
+
+    async def _handler(event_id: str, exc: BaseException, pending: list[str]) -> None:
+        del event_id, pending
+        notified.append(type(exc).__name__)
+
+    previous = get_nested_resume_runner()
+    previous_writer = get_nested_resume_durability_writer()
+    previous_handler = get_nested_resume_failure_handler()
+    set_nested_resume_runner(_boom)
+    set_nested_resume_durability_writer(_writer)
+    set_nested_resume_failure_handler(_handler)
+    try:
+        with pytest.raises(NestedGraphResumeError) as exc_info:
+            async with bind_investigation_graph("evt-persist-fail"):
+                assert defer_nested_graph_resume("evt-persist-fail") is True
+        assert exc_info.value.error_type == "nested_wakeup_persist_failed"
+        assert notified == ["RuntimeError"]
+    finally:
+        set_nested_resume_runner(previous)
+        set_nested_resume_durability_writer(previous_writer)
+        set_nested_resume_failure_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+async def test_bind_does_not_fail_parent_when_nested_resume_plan_advance_fails() -> None:
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_runner,
+    )
+
+    persisted: list[tuple[str, str]] = []
+
+    async def _boom(_event_id: str) -> None:
+        raise GraphResumeFailedError(
+            "plan advance CAS failed while WAITING_APPROVAL",
+            event_id=_event_id,
+            error_type="plan_advance_failed",
+        )
+
+    async def _writer(event_id: str, reason: str) -> None:
+        persisted.append((event_id, reason))
+
+    previous = get_nested_resume_runner()
+    previous_writer = get_nested_resume_durability_writer()
+    set_nested_resume_runner(_boom)
+    set_nested_resume_durability_writer(_writer)
+    try:
+        async with bind_investigation_graph("evt-plan-advance-flush"):
+            assert defer_nested_graph_resume("evt-plan-advance-flush") is True
+    finally:
+        set_nested_resume_runner(previous)
+        set_nested_resume_durability_writer(previous_writer)
+
+    assert persisted == [("evt-plan-advance-flush", "nested_resume_flush_failed")]
+
+
+@pytest.mark.asyncio
+async def test_bind_notifies_failure_handler_when_nested_resume_has_no_runner() -> None:
+    from app.orchestration.graph_invocation import (
+        NestedGraphResumeError,
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+
+    notified: list[tuple[str, str, list[str]]] = []
+
+    async def _handler(event_id: str, exc: BaseException, pending: list[str]) -> None:
+        notified.append((event_id, type(exc).__name__, list(pending)))
+
+    async def _writer(_event_id: str, _reason: str) -> None:
+        return None
+
+    previous_runner = get_nested_resume_runner()
+    previous_handler = get_nested_resume_failure_handler()
+    previous_writer = get_nested_resume_durability_writer()
+    set_nested_resume_runner(None)
+    set_nested_resume_failure_handler(_handler)
+    set_nested_resume_durability_writer(_writer)
+    try:
+        async with bind_investigation_graph("evt-no-runner-obs"):
+            assert defer_nested_graph_resume("evt-no-runner-obs") is True
+    finally:
+        set_nested_resume_runner(previous_runner)
+        set_nested_resume_failure_handler(previous_handler)
+        set_nested_resume_durability_writer(previous_writer)
+
+    assert notified == [
+        ("evt-no-runner-obs", "NestedGraphResumeError", ["evt-no-runner-obs"])
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bind_skips_nested_resume_flush_on_cancellation() -> None:
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+
+    flushed: list[str] = []
+
+    async def _runner(event_id: str) -> None:
+        flushed.append(event_id)
+
+    notified: list[tuple[str, str, str]] = []
+
+    async def _handler(event_id: str, exc: BaseException, pending: list[str]) -> None:
+        error_type = getattr(exc, "error_type", type(exc).__name__)
+        notified.append((event_id, str(error_type), list(pending)[0] if pending else ""))
+
+    persisted: list[tuple[str, str]] = []
+
+    async def _writer(event_id: str, reason: str) -> None:
+        persisted.append((event_id, reason))
+
+    previous_runner = get_nested_resume_runner()
+    previous_handler = get_nested_resume_failure_handler()
+    from app.orchestration.graph_invocation import (
+        get_nested_resume_durability_writer,
+        set_nested_resume_durability_writer,
+    )
+
+    previous_writer = get_nested_resume_durability_writer()
+    set_nested_resume_runner(_runner)
+    set_nested_resume_failure_handler(_handler)
+    set_nested_resume_durability_writer(_writer)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            async with bind_investigation_graph("evt-cancel"):
+                assert defer_nested_graph_resume("evt-cancel") is True
+                raise asyncio.CancelledError()
+    finally:
+        set_nested_resume_runner(previous_runner)
+        set_nested_resume_failure_handler(previous_handler)
+        set_nested_resume_durability_writer(previous_writer)
+
+    assert flushed == []
+    assert persisted == [("evt-cancel", "nested_resume_cancelled")]
+    assert notified == []
+
+
+@pytest.mark.asyncio
+async def test_bind_flush_cancelled_persists_deferred_approval_wakeup() -> None:
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+
+    flushed: list[str] = []
+
+    async def _runner(event_id: str) -> None:
+        flushed.append(event_id)
+        raise asyncio.CancelledError()
+
+    persisted: list[tuple[str, str]] = []
+
+    async def _writer(event_id: str, reason: str) -> None:
+        persisted.append((event_id, reason))
+
+    previous_runner = get_nested_resume_runner()
+    previous_handler = get_nested_resume_failure_handler()
+    previous_writer = get_nested_resume_durability_writer()
+    set_nested_resume_runner(_runner)
+    set_nested_resume_failure_handler(None)
+    set_nested_resume_durability_writer(_writer)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            async with bind_investigation_graph("evt-flush-cancel"):
+                assert defer_nested_graph_resume("evt-flush-cancel") is True
+    finally:
+        set_nested_resume_runner(previous_runner)
+        set_nested_resume_failure_handler(previous_handler)
+        set_nested_resume_durability_writer(previous_writer)
+
+    assert flushed == ["evt-flush-cancel"]
+    assert ("evt-flush-cancel", "nested_resume_cancelled") in persisted
+    assert all(reason == "nested_resume_cancelled" for _event_id, reason in persisted)
+
+
+@pytest.mark.asyncio
+async def test_bind_flush_treats_deferred_resume_as_success() -> None:
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+    from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+
+    notified: list[str] = []
+    persisted: list[tuple[str, str]] = []
+
+    async def _deferred(event_id: str) -> None:
+        raise GraphResumeDeferredError(
+            "cannot resume while event is still WAITING_APPROVAL",
+            event_id=event_id,
+            error_type="waiting_approval",
+        )
+
+    async def _handler(event_id: str, exc: BaseException, _pending: list[str]) -> None:
+        notified.append(event_id)
+
+    async def _writer(event_id: str, reason: str) -> None:
+        persisted.append((event_id, reason))
+
+    previous_runner = get_nested_resume_runner()
+    previous_handler = get_nested_resume_failure_handler()
+    previous_writer = get_nested_resume_durability_writer()
+    set_nested_resume_runner(_deferred)
+    set_nested_resume_failure_handler(_handler)
+    set_nested_resume_durability_writer(_writer)
+    try:
+        async with bind_investigation_graph("evt-defer-flush"):
+            assert defer_nested_graph_resume("evt-defer-flush") is True
+    finally:
+        set_nested_resume_runner(previous_runner)
+        set_nested_resume_failure_handler(previous_handler)
+        set_nested_resume_durability_writer(previous_writer)
+
+    assert persisted == [("evt-defer-flush", "waiting_approval")]
+    assert notified == []
+
+
+@pytest.mark.asyncio
+async def test_bind_persists_nested_resume_on_soft_time_limit() -> None:
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_runner,
+    )
+
+    flushed: list[str] = []
+
+    async def _runner(event_id: str) -> None:
+        flushed.append(event_id)
+
+    persisted: list[tuple[str, str]] = []
+
+    async def _writer(event_id: str, reason: str) -> None:
+        persisted.append((event_id, reason))
+
+    previous_runner = get_nested_resume_runner()
+    previous_writer = get_nested_resume_durability_writer()
+    set_nested_resume_runner(_runner)
+    set_nested_resume_durability_writer(_writer)
+    try:
+        with pytest.raises(SoftTimeLimitExceeded):
+            async with bind_investigation_graph("evt-soft-limit"):
+                assert defer_nested_graph_resume("evt-soft-limit") is True
+                raise SoftTimeLimitExceeded()
+    finally:
+        set_nested_resume_runner(previous_runner)
+        set_nested_resume_durability_writer(previous_writer)
+
+    assert flushed == []
+    assert persisted == [("evt-soft-limit", "nested_resume_soft_time_limit")]
+
+
+@pytest.mark.asyncio
+async def test_bind_preserves_graph_error_when_flush_fails() -> None:
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_runner,
+    )
+
+    async def _boom(_event_id: str) -> None:
+        raise RuntimeError("flush failed")
+
+    persisted: list[tuple[str, str]] = []
+
+    async def _writer(event_id: str, reason: str) -> None:
+        persisted.append((event_id, reason))
+
+    previous = get_nested_resume_runner()
+    previous_writer = get_nested_resume_durability_writer()
+    set_nested_resume_runner(_boom)
+    set_nested_resume_durability_writer(_writer)
+    try:
+        with pytest.raises(ValueError, match="graph boom"):
+            async with bind_investigation_graph("evt-graph-boom"):
+                assert defer_nested_graph_resume("evt-graph-boom") is True
+                raise ValueError("graph boom")
+    finally:
+        set_nested_resume_runner(previous)
+        set_nested_resume_durability_writer(previous_writer)
+
+    assert persisted == [("evt-graph-boom", "nested_resume_flush_failed")]
+
+
+def test_reset_deps_clears_nested_resume_hooks() -> None:
+    from app.api.v1.deps import reset_deps
+    from app.orchestration.graph_invocation import (
+        get_investigation_lease_held_probe,
+        get_nested_resume_durability_writer,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        get_nested_wakeup_lease_release_kicker,
+        set_investigation_lease_held_probe,
+        set_nested_resume_durability_writer,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+        set_nested_wakeup_lease_release_kicker,
+    )
+
+    previous_runner = get_nested_resume_runner()
+    previous_handler = get_nested_resume_failure_handler()
+    previous_writer = get_nested_resume_durability_writer()
+    previous_probe = get_investigation_lease_held_probe()
+    previous_kicker = get_nested_wakeup_lease_release_kicker()
+    set_nested_resume_runner(AsyncMock())
+    set_nested_resume_failure_handler(AsyncMock())
+    set_nested_resume_durability_writer(AsyncMock())
+    set_investigation_lease_held_probe(AsyncMock())
+    set_nested_wakeup_lease_release_kicker(AsyncMock())
+    try:
+        reset_deps()
+        assert get_nested_resume_runner() is None
+        assert get_nested_resume_failure_handler() is None
+        assert get_nested_resume_durability_writer() is None
+        assert get_investigation_lease_held_probe() is None
+        assert get_nested_wakeup_lease_release_kicker() is None
+    finally:
+        set_nested_resume_runner(previous_runner)
+        set_nested_resume_failure_handler(previous_handler)
+        set_nested_resume_durability_writer(previous_writer)
+        set_investigation_lease_held_probe(previous_probe)
+        set_nested_wakeup_lease_release_kicker(previous_kicker)
 
 
 @pytest.mark.asyncio
@@ -309,6 +866,7 @@ async def test_execute_graph_resume_state_mismatch_is_not_retried() -> None:
     )
     agent = MagicMock()
     agent._investigation_graph = graph
+    agent.lease = _fresh_event_lease()
     runtime = MagicMock()
     runtime.set_execution_substate = AsyncMock(side_effect=exc)
 
@@ -334,6 +892,7 @@ async def test_execute_graph_resume_transient_exhaustion_records_single_failure(
     agent = MagicMock()
     agent._investigation_graph = MagicMock()
     agent._investigation_graph.aget_state = AsyncMock(side_effect=TimeoutError("redis timeout"))
+    agent.lease = _fresh_event_lease()
 
     with pytest.raises(GraphResumeFailedError):
         await execute_graph_resume_with_retry(
@@ -379,3 +938,259 @@ async def test_execute_graph_resume_with_retry_preserves_soft_time_limit(
 
     record.assert_not_awaited()
     degraded.set_flag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_graph_resume_waiting_approval_is_deferred_not_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[tuple[str, str]] = []
+
+    async def _persist(event_id: str, reason: str = "nested_wakeup") -> bool:
+        persisted.append((event_id, reason))
+        return True
+
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.persist_nested_graph_wakeup",
+        _persist,
+    )
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability._RESUME_RETRY_BASE_SECONDS",
+        0,
+    )
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume._load_response_actions_for_resume",
+        AsyncMock(
+            return_value=[
+                MagicMock(
+                    status=ActionStatus.WAITING_APPROVAL,
+                    tool_name="block_ip",
+                    writeback_required=False,
+                    plan_revision=1,
+                )
+            ]
+        ),
+    )
+    degraded = MagicMock()
+    degraded.set_flag = AsyncMock(return_value=[])
+    degraded.has_flag = AsyncMock(return_value=False)
+    agent = MagicMock()
+    agent._investigation_graph = MagicMock()
+    agent.lease = _fresh_event_lease()
+
+    with pytest.raises(GraphResumeDeferredError) as exc_info:
+        await execute_graph_resume_with_retry(
+            "evt-waiting-deferred",
+            session_factory=_SessionFactory(EventStatus.WAITING_APPROVAL.value),
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+            degraded_flags=degraded,
+        )
+
+    assert exc_info.value.error_type == "waiting_approval"
+    assert persisted == [("evt-waiting-deferred", "waiting_approval")]
+    degraded.set_flag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_graph_resume_defers_when_manual_hold_active_without_ainvoke(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resume = AsyncMock()
+    persisted: list[tuple[str, str]] = []
+
+    async def _persist(event_id: str, reason: str = "nested_wakeup") -> bool:
+        persisted.append((event_id, reason))
+        return True
+
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability._manual_hold_blocks_resume",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.resume_investigation_from_checkpoint",
+        resume,
+    )
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.persist_nested_graph_wakeup",
+        _persist,
+    )
+
+    with pytest.raises(GraphResumeDeferredError) as exc_info:
+        await execute_graph_resume_with_retry(
+            "evt-hold-fence",
+            session_factory=_SessionFactory(),
+            get_super_agent=AsyncMock(side_effect=AssertionError("must not ainvoke")),
+            get_workflow_runtime=AsyncMock(side_effect=AssertionError("must not ainvoke")),
+            degraded_flags=None,
+        )
+
+    assert exc_info.value.error_type == "manual_resolution_hold"
+    resume.assert_not_awaited()
+    assert persisted == []
+
+
+@pytest.mark.asyncio
+async def test_execute_graph_resume_manual_hold_deferred_does_not_persist_wakeup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[tuple[str, str]] = []
+
+    async def _persist(event_id: str, reason: str = "nested_wakeup") -> bool:
+        persisted.append((event_id, reason))
+        return True
+
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability._manual_hold_blocks_resume",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.resume_investigation_from_checkpoint",
+        AsyncMock(
+            side_effect=GraphResumeDeferredError(
+                "cannot resume while a durable manual hold owns the event",
+                event_id="evt-hold-persist",
+                error_type="manual_resolution_hold",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.persist_nested_graph_wakeup",
+        _persist,
+    )
+
+    with pytest.raises(GraphResumeDeferredError) as exc_info:
+        await execute_graph_resume_with_retry(
+            "evt-hold-persist",
+            session_factory=_SessionFactory(),
+            get_super_agent=AsyncMock(),
+            get_workflow_runtime=AsyncMock(),
+            degraded_flags=None,
+        )
+
+    assert exc_info.value.error_type == "manual_resolution_hold"
+    assert persisted == []
+
+
+@pytest.mark.asyncio
+async def test_persist_nested_graph_wakeup_propagates_cancelled_error() -> None:
+    from app.orchestration.graph_invocation import (
+        get_nested_resume_durability_writer,
+        persist_nested_graph_wakeup,
+        set_nested_resume_durability_writer,
+    )
+
+    async def _cancel(_event_id: str, _reason: str) -> None:
+        raise asyncio.CancelledError()
+
+    previous = get_nested_resume_durability_writer()
+    set_nested_resume_durability_writer(_cancel)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await persist_nested_graph_wakeup("evt-cancel-persist", "nested_resume_cancelled")
+    finally:
+        set_nested_resume_durability_writer(previous)
+
+
+def test_claimed_intent_deferred_path_does_not_use_mark_failure() -> None:
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "app"
+        / "services"
+        / "manual_resolution_service.py"
+    ).read_text(encoding="utf-8")
+    start = source.index("async def _run_claimed_intent")
+    end = source.index("async def _clear_manual_resolution_for_resume")
+    body = source[start:end]
+    assert "GraphResumeDeferredError" in body
+    assert body.index("await self._mark_deferred") < body.index("await self._mark_failure")
+    deferred = body[
+        body.index("if isinstance(exc, GraphResumeDeferredError)") : body.index(
+            "await self._mark_failure"
+        )
+    ]
+    assert "attempt" not in deferred
+
+
+@pytest.mark.asyncio
+async def test_bind_flush_while_outer_lease_held_does_not_start_second_ainvoke() -> None:
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_investigation_lease_held_probe,
+        get_nested_resume_durability_writer,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_investigation_lease_held_probe,
+        set_nested_resume_durability_writer,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+    from app.orchestration.graph_resume import resume_investigation_from_checkpoint
+    from app.orchestration.lease import EventLease, generate_owner_id
+    from tests.support.fake_redis import InMemoryFakeRedisClient
+
+    event_id = "evt-bind-lease"
+    lease = EventLease(InMemoryFakeRedisClient())
+    assert await lease.acquire(event_id, generate_owner_id()) is True
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "halted": True,
+                "event_status": EventStatus.EXECUTING_RESPONSE.value,
+            }
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+    graph.ainvoke = AsyncMock()
+    agent = MagicMock()
+    agent._investigation_graph = graph
+    agent.lease = lease
+    runtime = MagicMock()
+    runtime.set_execution_substate = AsyncMock()
+    flushed: list[str] = []
+
+    async def _runner(resume_event_id: str) -> None:
+        flushed.append(resume_event_id)
+        await resume_investigation_from_checkpoint(
+            _SessionFactory(EventStatus.EXECUTING_RESPONSE.value),
+            resume_event_id,
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=runtime),
+        )
+
+    persisted: list[tuple[str, str]] = []
+
+    async def _writer(resume_event_id: str, reason: str) -> None:
+        persisted.append((resume_event_id, reason))
+
+    async def _lease_held(resume_event_id: str) -> bool:
+        return await lease.get_owner(resume_event_id) is not None
+
+    previous_runner = get_nested_resume_runner()
+    previous_handler = get_nested_resume_failure_handler()
+    previous_writer = get_nested_resume_durability_writer()
+    previous_probe = get_investigation_lease_held_probe()
+    set_nested_resume_runner(_runner)
+    set_nested_resume_failure_handler(None)
+    set_nested_resume_durability_writer(_writer)
+    set_investigation_lease_held_probe(_lease_held)
+    try:
+        async with bind_investigation_graph(event_id):
+            assert defer_nested_graph_resume(event_id) is True
+    finally:
+        set_nested_resume_runner(previous_runner)
+        set_nested_resume_failure_handler(previous_handler)
+        set_nested_resume_durability_writer(previous_writer)
+        set_investigation_lease_held_probe(previous_probe)
+
+    assert flushed == []
+    graph.ainvoke.assert_not_called()
+    graph.aupdate_state.assert_not_awaited()
+    graph.aget_state.assert_not_called()
+    assert persisted == [(event_id, "investigation_in_progress")]
+

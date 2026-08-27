@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -155,3 +157,217 @@ async def test_production_graph_response_agent_default_scenario_id_to_none(
 
     assert captured["response"].get("scenario_id") is None
     assert "insider_data_exfiltration" not in str(captured)
+
+
+def _stub_fcntl_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    if sys.platform != "win32" or "fcntl" in sys.modules:
+        return
+    fake = ModuleType("fcntl")
+    fake.LOCK_EX = 2
+    fake.LOCK_SH = 1
+    fake.LOCK_UN = 8
+    fake.flock = lambda *_a, **_k: None  # type: ignore[method-assign]
+    monkeypatch.setitem(sys.modules, "fcntl", fake)
+
+
+def test_live_disposition_without_base_url_does_not_register_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deps.reset_deps()
+    settings = SimpleNamespace(
+        disposition_mode="live",
+        disposition_adapter_kind="generic_http_disposition",
+        disposition_base_url="",
+        disposition_credential_ref="",
+        allow_live_side_effects=True,
+        allow_xdr_writeback=True,
+    )
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.core.config.is_mock_disposition_mode",
+        lambda _mode: False,
+    )
+    try:
+        registry = deps._get_adapter_registry()
+        assert registry.list_names() == []
+    finally:
+        deps.reset_deps()
+
+
+def test_live_disposition_registers_enabled_http_adapter_when_url_and_credential_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_fcntl_on_windows(monkeypatch)
+    deps.reset_deps()
+    monkeypatch.setenv("SHADOWTRACE_XDR_WRITE_TOKEN", "test-write-token")
+    settings = SimpleNamespace(
+        disposition_mode="live",
+        disposition_adapter_kind="generic_http_disposition",
+        disposition_base_url="https://xdr.example",
+        disposition_credential_ref="SHADOWTRACE_XDR_WRITE_TOKEN",
+        allow_live_side_effects=True,
+        allow_xdr_writeback=True,
+    )
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.core.config.is_mock_disposition_mode",
+        lambda _mode: False,
+    )
+    try:
+        registry = deps._get_adapter_registry()
+        assert registry.list_names() == ["generic_http_disposition"]
+        adapter = registry.get("generic_http_disposition")
+        assert adapter.config.enabled is True
+        assert adapter.config.endpoint == "https://xdr.example"
+        assert adapter.config.credential_ref == "SHADOWTRACE_XDR_WRITE_TOKEN"
+        assert adapter.config.auth_type == "bearer"
+        assert adapter._allow_side_effects is True
+    finally:
+        deps.reset_deps()
+
+
+def test_live_disposition_registers_source_product_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_fcntl_on_windows(monkeypatch)
+    deps.reset_deps()
+    monkeypatch.setenv("SHADOWTRACE_XDR_WRITE_TOKEN", "test-write-token")
+    settings = SimpleNamespace(
+        disposition_mode="live",
+        disposition_adapter_kind="generic_http_disposition",
+        disposition_source_product="crowdstrike",
+        disposition_base_url="https://xdr.example",
+        disposition_credential_ref="SHADOWTRACE_XDR_WRITE_TOKEN",
+        allow_live_side_effects=True,
+        allow_xdr_writeback=True,
+    )
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.core.config.is_mock_disposition_mode",
+        lambda _mode: False,
+    )
+    try:
+        registry = deps._get_adapter_registry()
+        assert registry.list_names() == ["crowdstrike", "generic_http_disposition"]
+        assert registry.get("crowdstrike") is registry.get("generic_http_disposition")
+    finally:
+        deps.reset_deps()
+
+
+def test_live_disposition_auth_type_basic_registers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_fcntl_on_windows(monkeypatch)
+    deps.reset_deps()
+    monkeypatch.setenv("SHADOWTRACE_XDR_WRITE_TOKEN", "test-write-token")
+    settings = SimpleNamespace(
+        disposition_mode="live",
+        disposition_adapter_kind="generic_http_disposition",
+        disposition_base_url="https://xdr.example",
+        disposition_credential_ref="SHADOWTRACE_XDR_WRITE_TOKEN",
+        disposition_auth_type="basic",
+        allow_live_side_effects=True,
+        allow_xdr_writeback=True,
+    )
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.core.config.is_mock_disposition_mode",
+        lambda _mode: False,
+    )
+    try:
+        registry = deps._get_adapter_registry()
+        adapter = registry.get("generic_http_disposition")
+        assert adapter.config.auth_type == "basic"
+    finally:
+        deps.reset_deps()
+
+
+def test_live_disposition_invalid_auth_type_does_not_register(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_fcntl_on_windows(monkeypatch)
+    deps.reset_deps()
+    monkeypatch.setenv("SHADOWTRACE_XDR_WRITE_TOKEN", "test-write-token")
+    settings = SimpleNamespace(
+        disposition_mode="live",
+        disposition_adapter_kind="generic_http_disposition",
+        disposition_base_url="https://xdr.example",
+        disposition_credential_ref="SHADOWTRACE_XDR_WRITE_TOKEN",
+        disposition_auth_type="api_key",
+        allow_live_side_effects=True,
+        allow_xdr_writeback=True,
+    )
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.core.config.is_mock_disposition_mode",
+        lambda _mode: False,
+    )
+    try:
+        registry = deps._get_adapter_registry()
+        assert registry.list_names() == []
+    finally:
+        deps.reset_deps()
+
+
+def test_live_env_example_lists_disposition_credential_ref() -> None:
+    from pathlib import Path
+
+    example = Path(__file__).resolve().parents[3] / "infra" / ".env.live.example"
+    text = example.read_text(encoding="utf-8")
+    assert "DISPOSITION_CREDENTIAL_REF=" in text
+    assert "DISPOSITION_BASE_URL=" in text
+    assert "DISPOSITION_ADAPTER_KIND=" in text
+    assert "DISPOSITION_AUTH_TYPE=" in text
+    assert "DISPOSITION_SOURCE_PRODUCT=" in text
+
+
+def test_live_disposition_invalid_or_missing_credential_ref_does_not_register(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_fcntl_on_windows(monkeypatch)
+    for credential_ref in ("", "not-an-env", "mixedCase"):
+        deps.reset_deps()
+        settings = SimpleNamespace(
+            disposition_mode="live",
+            disposition_adapter_kind="generic_http_disposition",
+            disposition_base_url="https://xdr.example",
+            disposition_credential_ref=credential_ref,
+            allow_live_side_effects=True,
+            allow_xdr_writeback=True,
+        )
+        monkeypatch.setattr(deps, "get_settings", lambda current=settings: current)
+        monkeypatch.setattr(
+            "app.core.config.is_mock_disposition_mode",
+            lambda _mode: False,
+        )
+        try:
+            registry = deps._get_adapter_registry()
+            assert registry.list_names() == []
+        finally:
+            deps.reset_deps()
+
+
+def test_live_disposition_missing_credential_env_does_not_register(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_fcntl_on_windows(monkeypatch)
+    deps.reset_deps()
+    monkeypatch.delenv("MISSING_XDR_WRITE_TOKEN", raising=False)
+    settings = SimpleNamespace(
+        disposition_mode="live",
+        disposition_adapter_kind="generic_http_disposition",
+        disposition_base_url="https://xdr.example",
+        disposition_credential_ref="MISSING_XDR_WRITE_TOKEN",
+        allow_live_side_effects=True,
+        allow_xdr_writeback=True,
+    )
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.core.config.is_mock_disposition_mode",
+        lambda _mode: False,
+    )
+    try:
+        registry = deps._get_adapter_registry()
+        assert registry.list_names() == []
+    finally:
+        deps.reset_deps()

@@ -508,7 +508,18 @@ class WritebackRecoveryHandler:
                 writeback.lookup_count += 1
                 if writeback.lookup_count >= writeback.max_lookups:
                     return await self._handle_escalate(event_id, writeback, result, op)
-                return result
+                await self._runtime.set_execution_substate(
+                    event_id,
+                    ExecutionSubstate.WAITING_WRITEBACK,
+                    event_status=EventStatus.VERIFYING,
+                )
+                return WritebackRecoveryResult(
+                    action=WritebackRecoveryAction.WAIT,
+                    writeback_id=writeback.writeback_id,
+                    writeback_status=writeback.current_status,
+                    reason="lookup_exception_wait",
+                    lookup_attempt=writeback.lookup_count,
+                )
 
         if result.action is WritebackRecoveryAction.RETRY:
             if self._disposition_sync is None:
@@ -572,7 +583,18 @@ class WritebackRecoveryHandler:
                 writeback.retry_count += 1
                 if writeback.retry_count >= writeback.max_retries:
                     return await self._handle_escalate(event_id, writeback, result, op)
-                return result
+                await self._runtime.set_execution_substate(
+                    event_id,
+                    ExecutionSubstate.WAITING_WRITEBACK,
+                    event_status=EventStatus.VERIFYING,
+                )
+                return WritebackRecoveryResult(
+                    action=WritebackRecoveryAction.WAIT,
+                    writeback_id=writeback.writeback_id,
+                    writeback_status=writeback.current_status,
+                    reason="retry_exception_wait",
+                    retry_attempt=writeback.retry_count,
+                )
 
         if result.action is WritebackRecoveryAction.MANUAL:
             return await self._handle_escalate(event_id, writeback, result, op)
@@ -891,6 +913,43 @@ def _recovery_invariant_failure_patch(event_id: str) -> InvestigationState:
     )
 
 
+def _wakeup_persist_failure_patch(event_id: str) -> InvestigationState:
+    """Fail-close when WAIT would halt without a durable nested wakeup."""
+    logger.error(
+        "writeback_recovery_node: nested wakeup persist failed event=%s",
+        event_id,
+    )
+    return cast(
+        InvestigationState,
+        {
+            "verify_need_writeback_recovery": False,
+            "verify_need_action_replan": False,
+            "verify_need_manual_resolution": True,
+            "verify_recoverable_writeback_ids": [],
+            "verify_pending_writeback_action_ids": [],
+            "verify_failed_writebacks": [],
+            "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+            "error": "nested_wakeup_persist_failed",
+            "halted": False,
+            "writeback_lookup_count": 0,
+            "writeback_retry_count": 0,
+        },
+    )
+
+
+async def _persist_writeback_wait_wakeup(event_id: str, reason: str) -> bool:
+    """Durable nested wakeup so WAIT halt is not a silent stall."""
+    from app.orchestration.graph_invocation import (
+        defer_nested_graph_resume,
+        persist_nested_graph_wakeup,
+    )
+
+    persisted = await persist_nested_graph_wakeup(event_id, reason or "writeback_wait")
+    if persisted:
+        defer_nested_graph_resume(event_id)
+    return persisted
+
+
 def _pending_action_wait_patch(
     *,
     pending_actions: list[str],
@@ -962,8 +1021,17 @@ async def writeback_recovery_graph_node(
                 pending_actions,
                 event_id,
             )
+            persisted = await _persist_writeback_wait_wakeup(event_id, "writeback_wait")
+            if not persisted:
+                return _wakeup_persist_failure_patch(event_id)
             return _pending_action_wait_patch(pending_actions=pending_actions)
         if need_recovery:
+            logger.error(
+                "writeback_recovery_node: need_recovery without outbox ids "
+                "event=%s execution_inflight=%s",
+                event_id,
+                bool(state.get("execution_inflight")),
+            )
             return _recovery_invariant_failure_patch(event_id)
         logger.debug("writeback_recovery_node: no recovery targets for event=%s", event_id)
         return cast(
@@ -1060,8 +1128,15 @@ async def writeback_recovery_graph_node(
 
     if result.action is WritebackRecoveryAction.WAIT:
         # WAIT is non-terminal: retain the current writeback so a receipt-triggered
-        # resume can re-evaluate the same real outbox ID.
+        # resume can re-evaluate the same real outbox ID. Nested wakeup is required
+        # because the graph node sets halted=True and ACCEPTED reclaim is skipped.
         remaining_recoverable = failed_writebacks
+        persisted = await _persist_writeback_wait_wakeup(
+            event_id,
+            result.reason or "writeback_wait",
+        )
+        if not persisted:
+            return _wakeup_persist_failure_patch(event_id)
         return cast(
             InvestigationState,
             {
@@ -1112,8 +1187,16 @@ async def writeback_recovery_graph_node(
             "verify_pending_writeback_action_ids": pending_actions,
             "verify_failed_writebacks": remaining_recoverable,
             "verify_writeback_status_map": status_map or None,
-            "writeback_lookup_count": wb_state.lookup_count,
-            "writeback_retry_count": wb_state.retry_count,
+            "writeback_lookup_count": (
+                0
+                if result.action in (WritebackRecoveryAction.NOOP, WritebackRecoveryAction.MANUAL)
+                else wb_state.lookup_count
+            ),
+            "writeback_retry_count": (
+                0
+                if result.action in (WritebackRecoveryAction.NOOP, WritebackRecoveryAction.MANUAL)
+                else wb_state.retry_count
+            ),
         },
     )
 

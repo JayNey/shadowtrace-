@@ -15,6 +15,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from pydantic import ValidationError
 
 from app.core.errors import BudgetExceededError, is_retryable
+from app.core.errors import ValidationError as ShadowTraceValidationError
 from app.core.event_bus import EventBus
 from app.core.telemetry import traced_operation
 from app.models.enums import ExecutionJobStatus, ExecutionOwner, ToolCategory
@@ -628,10 +629,57 @@ class ToolExecutor:
             updated.status = ExecutionJobStatus.TIMED_OUT
         elif result.status is ToolResultStatus.FAILED:
             updated.status = ExecutionJobStatus.FAILED
-        await self.job_store.cas_update_job(
+        applied = await self.job_store.cas_update_job(
             execution_job_id,
             updated,
             expected_status=current.status,
+        )
+        if applied:
+            return
+        latest = await self.job_store.get_job(execution_job_id)
+        if latest is not None and latest.status in {
+            ExecutionJobStatus.SUCCESS,
+            ExecutionJobStatus.PARTIAL_SUCCESS,
+            ExecutionJobStatus.FAILED,
+            ExecutionJobStatus.TIMED_OUT,
+            ExecutionJobStatus.CANCELLED,
+            ExecutionJobStatus.UNKNOWN,
+        }:
+            logger.info(
+                "job CAS miss after dispatch but job already terminal job=%s status=%s",
+                execution_job_id,
+                latest.status.value,
+            )
+            return
+        logger.error(
+            "job CAS missed after side-effect dispatch job=%s expected=%s latest=%s",
+            execution_job_id,
+            current.status.value,
+            None if latest is None else latest.status.value,
+        )
+        if latest is not None and latest.status in {
+            ExecutionJobStatus.QUEUED,
+            ExecutionJobStatus.RUNNING,
+        }:
+            unknown = latest.model_copy(update={"status": ExecutionJobStatus.UNKNOWN})
+            forced = await self.job_store.cas_update_job(
+                execution_job_id,
+                unknown,
+                expected_status=latest.status,
+            )
+            if forced:
+                logger.error(
+                    "marked job UNKNOWN after side-effect CAS miss job=%s",
+                    execution_job_id,
+                )
+                return
+        raise ShadowTraceValidationError(
+            "execution job changed during tool dispatch",
+            details={
+                "execution_job_id": execution_job_id,
+                "expected_status": current.status.value,
+                "latest_status": None if latest is None else latest.status.value,
+            },
         )
 
     @staticmethod

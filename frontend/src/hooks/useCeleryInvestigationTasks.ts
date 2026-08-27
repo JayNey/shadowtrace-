@@ -7,8 +7,10 @@ import {
   shouldAcceptTaskStateUpdate,
 } from "../utils/investigationTaskTracking";
 
-const POLL_INTERVAL_MS = 3_000;
-const MAX_POLL_FAILURES = 5;
+export const POLL_INTERVAL_MS = 3_000;
+export const MAX_POLL_FAILURES = 5;
+/** After marking poll_interrupted, retry getTask once this cooldown elapses. */
+export const POLL_INTERRUPT_RETRY_MS = 15_000;
 
 export interface RegisterCeleryTrackInput {
   event_id: string;
@@ -38,9 +40,11 @@ export function useCeleryInvestigationTasks(
 
   const pollInFlightRef = useRef(false);
   const pollFailuresRef = useRef<Map<string, number>>(new Map());
+  const interruptAtRef = useRef<Map<string, number>>(new Map());
 
   const registerTrack = useCallback((input: RegisterCeleryTrackInput) => {
     pollFailuresRef.current.delete(input.event_id);
+    interruptAtRef.current.delete(input.event_id);
     setTracksByEventId((prev) => {
       const next = new Map(prev);
       next.set(input.event_id, {
@@ -56,6 +60,7 @@ export function useCeleryInvestigationTasks(
 
   const clearTrack = useCallback((eventId: string) => {
     pollFailuresRef.current.delete(eventId);
+    interruptAtRef.current.delete(eventId);
     setTracksByEventId((prev) => {
       if (!prev.has(eventId)) return prev;
       const next = new Map(prev);
@@ -78,9 +83,16 @@ export function useCeleryInvestigationTasks(
           if (isTerminalTaskState(track.state)) {
             return [eventId, track] as const;
           }
+          if (track.poll_interrupted) {
+            const interruptedAt = interruptAtRef.current.get(eventId) ?? 0;
+            if (Date.now() - interruptedAt < POLL_INTERRUPT_RETRY_MS) {
+              return [eventId, track] as const;
+            }
+          }
           try {
             const res = await getTask(track.task_id);
             pollFailuresRef.current.delete(eventId);
+            interruptAtRef.current.delete(eventId);
             const nextState = normalizeTaskState(res.data.state);
             if (!shouldAcceptTaskStateUpdate(track.state, nextState)) {
               return [eventId, track] as const;
@@ -96,11 +108,15 @@ export function useCeleryInvestigationTasks(
           } catch {
             const failures = (pollFailuresRef.current.get(eventId) ?? 0) + 1;
             pollFailuresRef.current.set(eventId, failures);
+            const interrupted = failures >= MAX_POLL_FAILURES;
+            if (interrupted) {
+              interruptAtRef.current.set(eventId, Date.now());
+            }
             return [
               eventId,
               {
                 ...track,
-                poll_interrupted: failures >= MAX_POLL_FAILURES,
+                poll_interrupted: interrupted,
               },
             ] as const;
           }

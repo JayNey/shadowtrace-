@@ -40,7 +40,11 @@ from app.models.workflow import (
     AUTO_APPROVABLE_ACTION_LEVELS,
     validate_action_status_transition,
 )
-from app.orchestration.graph_invocation import is_in_investigation_graph
+from app.orchestration.graph_invocation import (
+    defer_nested_graph_resume,
+    is_in_investigation_graph,
+    persist_nested_graph_wakeup,
+)
 from app.services.action_approval_policy import (
     action_level_rank,
     resolve_runtime_max_auto_level,
@@ -64,6 +68,40 @@ APPROVAL_ENGINE_OPERATOR = "ApprovalEngine"
 ResumeHook = Callable[[str], Awaitable[None]]
 
 _APPROVAL_TERMINAL = frozenset({ActionStatus.APPROVED, ActionStatus.REJECTED})
+
+
+def plan_actions_fully_decided(actions: list[Any]) -> bool:
+    """True when no response action still needs a human approval decision.
+
+    An empty plan is fully decided (nothing left to approve). Resume and
+    ApprovalEngine must share this predicate so WAITING_APPROVAL cannot
+    defer forever on a vacant revision.
+    """
+    if not actions:
+        return True
+    return all(action.status in _APPROVAL_TERMINAL for action in actions)
+
+
+def resolve_plan_advance_target(actions: list[Action]) -> EventStatus | None:
+    """Return the EventStatus to CAS after a fully decided plan, or None."""
+    approved = [a for a in actions if a.status is ActionStatus.APPROVED]
+    rejected = [a for a in actions if a.status is ActionStatus.REJECTED]
+    deferred = [a for a in actions if a.tool_name == TERMINAL_DISPOSITION_TOOL]
+    deferred_approved = any(a.status is ActionStatus.APPROVED for a in deferred)
+    deferred_rejected = any(a.status is ActionStatus.REJECTED for a in deferred)
+    required = any(a.writeback_required for a in actions)
+
+    if approved and (not required or deferred_approved):
+        return EventStatus.EXECUTING_RESPONSE
+    if rejected and not approved:
+        return EventStatus.REPORTING
+    if required and deferred_rejected:
+        return EventStatus.REPORTING
+    if approved:
+        return EventStatus.REPORTING
+    return None
+
+
 # Lifecycle statuses reachable after a human approve (not the decision itself).
 _POST_APPROVE_LIFECYCLE = frozenset(
     {
@@ -556,9 +594,7 @@ class ApprovalEngine:
 
     async def is_plan_fully_decided(self, event_id: str, plan_revision: int) -> bool:
         actions = await self._load_plan_response_actions(event_id, plan_revision)
-        if not actions:
-            return True
-        return all(action.status in _APPROVAL_TERMINAL for action in actions)
+        return plan_actions_fully_decided(actions)
 
     async def _decide(
         self,
@@ -893,22 +929,7 @@ class ApprovalEngine:
         if not await self.is_plan_fully_decided(event_id, plan_revision):
             return None
         actions = await self._load_plan_response_actions(event_id, plan_revision)
-        approved = [a for a in actions if a.status is ActionStatus.APPROVED]
-        rejected = [a for a in actions if a.status is ActionStatus.REJECTED]
-        deferred = [a for a in actions if a.tool_name == TERMINAL_DISPOSITION_TOOL]
-        deferred_approved = any(a.status is ActionStatus.APPROVED for a in deferred)
-        deferred_rejected = any(a.status is ActionStatus.REJECTED for a in deferred)
-        required = any(a.writeback_required for a in actions)
-
-        target: EventStatus | None = None
-        if approved and (not required or deferred_approved):
-            target = EventStatus.EXECUTING_RESPONSE
-        elif rejected and not approved:
-            target = EventStatus.REPORTING
-        elif required and deferred_rejected:
-            target = EventStatus.REPORTING
-        elif approved:
-            target = EventStatus.REPORTING
+        target = resolve_plan_advance_target(actions)
 
         if target is not None and self._state_machine is not None:
             status = await self._event_status(event_id)
@@ -922,7 +943,8 @@ class ApprovalEngine:
                     )
                 except Exception:
                     logger.warning(
-                        "plan advance transition failed event=%s target=%s",
+                        "plan advance transition failed event=%s target=%s; "
+                        "continuing to resume",
                         event_id,
                         target.value,
                         exc_info=True,
@@ -930,6 +952,14 @@ class ApprovalEngine:
 
         if self._resume is not None:
             if is_in_investigation_graph(event_id=event_id):
+                defer_nested_graph_resume(event_id)
+                persisted = await persist_nested_graph_wakeup(event_id, "graph_still_bound")
+                if not persisted:
+                    logger.error(
+                        "nested wakeup persist failed while graph bound event=%s; "
+                        "approval halt remains deferred (human/watchdog owns resume)",
+                        event_id,
+                    )
                 logger.debug(
                     "defer resume_investigation while graph active event=%s",
                     event_id,
@@ -938,8 +968,18 @@ class ApprovalEngine:
             try:
                 await self._resume(event_id)
             except Exception as exc:
-                from app.orchestration.graph_resume_observability import GraphResumeFailedError
+                from app.orchestration.graph_resume_observability import (
+                    GraphResumeDeferredError,
+                    GraphResumeFailedError,
+                )
 
+                if isinstance(exc, GraphResumeDeferredError):
+                    logger.warning(
+                        "resume_investigation hook deferred event=%s error_type=%s",
+                        event_id,
+                        exc.error_type,
+                    )
+                    return "deferred"
                 if isinstance(exc, GraphResumeFailedError):
                     logger.warning(
                         "resume_investigation hook failed event=%s error_type=%s",

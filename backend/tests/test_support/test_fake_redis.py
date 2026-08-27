@@ -75,8 +75,64 @@ async def test_renew_extends_fake_redis_lease_ttl() -> None:
 
 
 @pytest.mark.asyncio
+async def test_renew_does_not_extend_foreign_lease_after_expiry() -> None:
+    now = [300.0]
+    fake = InMemoryFakeRedis(clock=lambda: now[0])
+    lease = _lease_with_fake(fake)
+    event_id = "evt-fake-ttl-renew-stolen"
+    first_owner = generate_owner_id()
+    second_owner = generate_owner_id()
+
+    assert await lease.acquire(event_id, first_owner, ttl_s=10) is True
+    now[0] += 10
+    assert await lease.acquire(event_id, second_owner, ttl_s=10) is True
+    assert await lease.renew(event_id, first_owner) is False
+    assert await lease.get_owner(event_id) == second_owner
+    now[0] += 9
+    assert await lease.get_owner(event_id) == second_owner
+
+
+@pytest.mark.asyncio
 async def test_set_rejects_unsupported_options() -> None:
     fake = InMemoryFakeRedis()
 
     with pytest.raises(TypeError, match="unsupported.*px"):
         await fake.set("key", "value", nx=True, px=1000)
+
+
+@pytest.mark.asyncio
+async def test_lease_rejects_non_positive_ttl() -> None:
+    from app.core.errors import ValidationError
+
+    fake = InMemoryFakeRedis()
+    lease = _lease_with_fake(fake)
+    owner = generate_owner_id()
+    with pytest.raises(ValidationError):
+        await lease.acquire("evt-ttl", owner, ttl_s=0)
+    with pytest.raises(ValidationError):
+        await lease.renew("evt-ttl", owner, ttl_s=-1)
+
+
+@pytest.mark.asyncio
+async def test_acquire_writes_ttl_key_with_same_expiry() -> None:
+    now = [400.0]
+    fake = InMemoryFakeRedis(clock=lambda: now[0])
+    lease = _lease_with_fake(fake)
+    event_id = "evt-fake-acquire-ttl"
+    owner = generate_owner_id()
+    assert await lease.acquire(event_id, owner, ttl_s=10) is True
+    ttl_key = f"shadowtrace:lease:event:{event_id}:ttl"
+    assert await fake.get(ttl_key) == b"10"
+    assert await fake.ttl(f"shadowtrace:lease:event:{event_id}") == 10
+    now[0] += 10
+    assert await fake.get(ttl_key) is None
+    assert await lease.get_owner(event_id) is None
+
+
+@pytest.mark.asyncio
+async def test_fake_redis_renew_script_rejects_non_positive_ttl() -> None:
+    fake = InMemoryFakeRedis()
+    await fake.set("k", "owner-a", nx=True, ex=10)
+    renew = fake.register_script('redis.call("EXPIRE", KEYS[1], ARGV[2])')
+    assert await renew(keys=["k"], args=["owner-a", "0"]) == 0
+    assert await fake.get("k") == b"owner-a"

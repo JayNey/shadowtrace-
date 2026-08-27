@@ -655,7 +655,9 @@ def test_collection_status_from_event_after_unwrap(full_loop_mod, approve_mod) -
 
 
 def test_openapi_get_event_detail_returns_event_detail_response() -> None:
-    spec = json.loads((REPO_ROOT / "contracts" / "openapi" / "openapi.json").read_text())
+    spec = json.loads(
+        (REPO_ROOT / "contracts" / "openapi" / "openapi.json").read_text(encoding="utf-8")
+    )
     schema_ref = spec["paths"]["/api/v1/events/{event_id}"]["get"]["responses"]["200"]["content"][
         "application/json"
     ]["schema"]["$ref"]

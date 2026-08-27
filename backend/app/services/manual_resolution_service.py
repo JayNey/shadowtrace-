@@ -11,7 +11,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -22,9 +22,12 @@ from app.models.enums import EventStatus, ExecutionSubstate, GraphResumeIntentSt
 from app.models.graph_resume_intent import (
     ACTIVE_GRAPH_RESUME_STATUSES,
     INTENT_KIND_MANUAL_RESOLUTION_RESUME,
+    INTENT_KIND_NESTED_GRAPH_WAKEUP,
     INTENT_VERSION_ISSUE277_V1,
     MANUAL_HOLD_JOURNAL_FIELD,
+    NESTED_WAKEUP_HOLD_GENERATION,
     RESOLUTION_SOURCE_ACTION_UNKNOWN,
+    RESOLUTION_SOURCE_NESTED_WAKEUP,
     RESOLUTION_SOURCE_WRITEBACK_AUTO,
     RESOLUTION_SOURCE_WRITEBACK_MANUAL,
     SUBJECT_KIND_ACTION,
@@ -49,6 +52,23 @@ _CLAIM_LEASE_S = 120
 _DISPATCH_WORKER_ID = "graph-resume-dispatcher-1"
 _STARTED_STALE_MIN_S = 660
 _MAX_ATTEMPTS = 5
+_NESTED_WAKEUP_RETRY_BACKOFF_S = 15
+# Halt substates whose resume owner is still the nested wakeup watchdog.
+# MANUAL_RESOLUTION is owned by the operator intent — nested wakeup SKIPs.
+_NESTED_WAKEUP_STILL_WAITING = frozenset(
+    {
+        ExecutionSubstate.WAITING_WRITEBACK,
+        ExecutionSubstate.WAITING_EXECUTION,
+        ExecutionSubstate.WAITING_APPROVAL,
+    }
+)
+_NESTED_WAKEUP_SKIP_ON_HOLD_STATUSES = frozenset(
+    {
+        GraphResumeIntentStatus.PENDING,
+        GraphResumeIntentStatus.CLAIMED,
+        GraphResumeIntentStatus.RETRY,
+    }
+)
 
 
 def new_graph_resume_intent_id() -> str:
@@ -88,6 +108,7 @@ class ManualResolutionService:
         degraded_flags: DegradedFlagService | None = None,
         claim_lease_s: int = _CLAIM_LEASE_S,
         max_attempts: int = _MAX_ATTEMPTS,
+        nested_retry_backoff_s: int = _NESTED_WAKEUP_RETRY_BACKOFF_S,
     ) -> None:
         self._session_factory = session_factory
         self._runtime = workflow_runtime
@@ -95,6 +116,7 @@ class ManualResolutionService:
         self._degraded = degraded_flags
         self._claim_lease_s = claim_lease_s
         self._max_attempts = max_attempts
+        self._nested_retry_backoff_s = max(0, int(nested_retry_backoff_s))
         self._dispatch_scheduled = False
         self._pending_in_process: list[tuple[str | None, str | None, str, tuple[str, ...]]] = []
 
@@ -171,6 +193,11 @@ class ManualResolutionService:
                         "execution_substate",
                         ExecutionSubstate.MANUAL_RESOLUTION.value,
                     )
+                await self._skip_active_nested_wakeups(
+                    session,
+                    event_id,
+                    reason="manual_resolution_hold",
+                )
         # Journal already holds authoritative MANUAL_RESOLUTION. Runtime sync is
         # best-effort for WM observers and must not fail the durable hold commit.
         if self._runtime is not None:
@@ -237,6 +264,249 @@ class ManualResolutionService:
                 hold_generation=hold_generation,
             )
 
+    async def enqueue_nested_wakeup(
+        self,
+        event_id: str,
+        *,
+        reason: str = "nested_wakeup",
+    ) -> GraphResumeIntentRecord | None:
+        """Durable wakeup that does not require a MANUAL_RESOLUTION hold.
+
+        Uses hold_generation=0 so it cannot collide with real manual holds
+        (those start at 1). One active nested wakeup per event is enough.
+        """
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    event = await session.get(
+                        orm.SecurityEvent,
+                        event_id,
+                        with_for_update=True,
+                    )
+                    if event is None:
+                        logger.error(
+                            "nested wakeup skipped: event missing event=%s",
+                            event_id,
+                        )
+                        return None
+                    payload_hash = resolution_payload_sha256(
+                        event_id=event_id,
+                        hold_generation=NESTED_WAKEUP_HOLD_GENERATION,
+                        resolution_source=RESOLUTION_SOURCE_NESTED_WAKEUP,
+                        subject_kind=SUBJECT_KIND_EVENT,
+                        subject_id=event_id,
+                        resolution=reason,
+                    )
+                    active = await session.scalar(
+                        select(orm.GraphResumeIntent)
+                        .where(
+                            orm.GraphResumeIntent.event_id == event_id,
+                            orm.GraphResumeIntent.hold_generation
+                            == NESTED_WAKEUP_HOLD_GENERATION,
+                            orm.GraphResumeIntent.status.in_(
+                                [status.value for status in ACTIVE_GRAPH_RESUME_STATUSES]
+                            ),
+                        )
+                        .with_for_update()
+                    )
+                    if active is not None:
+                        record = self._record_from_row(active)
+                    else:
+                        row = orm.GraphResumeIntent(
+                            intent_id=new_graph_resume_intent_id(),
+                            event_id=event_id,
+                            intent_kind=INTENT_KIND_NESTED_GRAPH_WAKEUP,
+                            intent_version=INTENT_VERSION_ISSUE277_V1,
+                            status=GraphResumeIntentStatus.PENDING.value,
+                            revision=1,
+                            attempt=0,
+                            hold_generation=NESTED_WAKEUP_HOLD_GENERATION,
+                            checkpoint_id=event_id,
+                            operation_id=None,
+                            resolution_source=RESOLUTION_SOURCE_NESTED_WAKEUP,
+                            subject_kind=SUBJECT_KIND_EVENT,
+                            subject_id=event_id,
+                            resolution=reason,
+                            principal="NestedGraphResume",
+                            comment=reason,
+                            evidence_ref=None,
+                            payload_sha256=payload_hash,
+                        )
+                        session.add(row)
+                        await session.flush()
+                        record = self._record_from_row(row)
+            await self._dispatch_nested_wakeup_if_unbound(record)
+            return record
+        except IntegrityError:
+            logger.info(
+                "nested graph wakeup insert raced event=%s",
+                event_id,
+            )
+            try:
+                record = await self._lookup_resume_intent_after_race(
+                    event_id,
+                    operation_id=None,
+                    hold_generation=NESTED_WAKEUP_HOLD_GENERATION,
+                )
+                await self._dispatch_nested_wakeup_if_unbound(record)
+                return record
+            except ValidationError:
+                logger.exception(
+                    "nested graph wakeup race lookup failed event=%s",
+                    event_id,
+                )
+                raise
+        except Exception:
+            logger.exception("failed to enqueue nested graph wakeup event=%s", event_id)
+            raise
+
+    async def _dispatch_nested_wakeup_if_unbound(
+        self,
+        record: GraphResumeIntentRecord,
+        *,
+        ignore_lease: bool = False,
+    ) -> None:
+        """Dispatch only after the investigation graph has unbound this event.
+
+        ContextVar is process-local; Redis EventLease on the parent SuperAgent
+        outlives bind exit, so skip dispatch while that lock is still held.
+        After a successful lease release, callers pass ``ignore_lease=True``:
+        resume still fences via ``EventLease.acquire``.
+        """
+        from app.orchestration.graph_invocation import (
+            investigation_lease_is_held,
+            is_in_investigation_graph,
+        )
+
+        if is_in_investigation_graph(event_id=record.event_id):
+            logger.info(
+                "nested wakeup persisted without dispatch; graph still bound event=%s",
+                record.event_id,
+            )
+            return
+        if not ignore_lease and await investigation_lease_is_held(record.event_id):
+            logger.info(
+                "nested wakeup persisted without dispatch; event lease held event=%s",
+                record.event_id,
+            )
+            return
+        if record.status not in {
+            GraphResumeIntentStatus.PENDING,
+            GraphResumeIntentStatus.RETRY,
+        }:
+            return
+        self.schedule_dispatch(
+            event_id=record.event_id,
+            intent_id=record.intent_id,
+            trigger="nested_wakeup",
+        )
+
+    async def kick_nested_wakeup_dispatch(self, event_id: str) -> None:
+        """Re-enqueue a PENDING/RETRY nested wakeup after EventLease release.
+
+        Does not insert a new intent — a second insert would resume every
+        investigation that happens to have no active nested row.
+        """
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(orm.GraphResumeIntent)
+                .where(
+                    orm.GraphResumeIntent.event_id == event_id,
+                    orm.GraphResumeIntent.hold_generation == NESTED_WAKEUP_HOLD_GENERATION,
+                    orm.GraphResumeIntent.intent_kind == INTENT_KIND_NESTED_GRAPH_WAKEUP,
+                    orm.GraphResumeIntent.status.in_(
+                        [
+                            GraphResumeIntentStatus.PENDING.value,
+                            GraphResumeIntentStatus.RETRY.value,
+                        ]
+                    ),
+                )
+                .order_by(orm.GraphResumeIntent.updated_at.desc())
+            )
+            if row is None:
+                return
+            record = self._record_from_row(row)
+        await self._dispatch_nested_wakeup_if_unbound(record, ignore_lease=True)
+
+    def _nested_retry_ready(self, row: orm.GraphResumeIntent, now: datetime) -> bool:
+        if str(row.intent_kind) != INTENT_KIND_NESTED_GRAPH_WAKEUP:
+            return True
+        if GraphResumeIntentStatus(row.status) is not GraphResumeIntentStatus.RETRY:
+            return True
+        if self._nested_retry_backoff_s <= 0:
+            return True
+        updated = row.updated_at
+        if updated is None:
+            return True
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=UTC)
+        return updated <= now - timedelta(seconds=self._nested_retry_backoff_s)
+
+    async def _nested_wakeup_still_waiting(self, event_id: str) -> bool:
+        async with self._session_factory() as session:
+            event = await session.get(orm.SecurityEvent, event_id)
+            if event is not None and str(event.status) == EventStatus.WAITING_APPROVAL.value:
+                return True
+            substate = await self._read_execution_substate(session, event_id)
+            return substate in _NESTED_WAKEUP_STILL_WAITING
+
+    async def _hold_blocks_nested_wakeup(
+        self,
+        session: AsyncSession,
+        event_id: str,
+    ) -> bool:
+        """True when a durable manual hold already owns the event.
+
+        Nested ainvoke would re-run Verify → manual_hold_node and bump
+        hold generation, invalidating the operator's resume intent.
+        """
+        substate = await self._read_execution_substate(session, event_id)
+        if substate is not ExecutionSubstate.MANUAL_RESOLUTION:
+            return False
+        return await self._read_manual_hold(session, event_id) is not None
+
+    async def _nested_wakeup_blocked_by_manual_hold(self, event_id: str) -> bool:
+        async with self._session_factory() as session:
+            return await self._hold_blocks_nested_wakeup(session, event_id)
+
+    async def _skip_active_nested_wakeups(
+        self,
+        session: AsyncSession,
+        event_id: str,
+        *,
+        reason: str,
+    ) -> None:
+        """Skip PENDING/CLAIMED/RETRY nested wakeups; STARTED stays with the in-flight runner."""
+        rows = (
+            await session.scalars(
+                select(orm.GraphResumeIntent)
+                .where(
+                    orm.GraphResumeIntent.event_id == event_id,
+                    orm.GraphResumeIntent.intent_kind == INTENT_KIND_NESTED_GRAPH_WAKEUP,
+                    orm.GraphResumeIntent.status.in_(
+                        [status.value for status in _NESTED_WAKEUP_SKIP_ON_HOLD_STATUSES]
+                    ),
+                )
+                .with_for_update()
+            )
+        ).all()
+        now = datetime.now(UTC)
+        for row in rows:
+            current = GraphResumeIntentStatus(row.status)
+            if current in TERMINAL_GRAPH_RESUME_STATUSES:
+                continue
+            validate_graph_resume_transition(current, GraphResumeIntentStatus.SKIPPED)
+            row.status = GraphResumeIntentStatus.SKIPPED.value
+            row.skip_reason = reason
+            row.claim_owner = None
+            row.claim_expires_at = None
+            row.updated_at = now
+
+    async def _skip_nested_wakeups_for_event(self, event_id: str, *, reason: str) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._skip_active_nested_wakeups(session, event_id, reason=reason)
+
     async def create_or_replay_resume_intent_in_session(
         self,
         session: AsyncSession,
@@ -284,7 +554,7 @@ class ManualResolutionService:
                 "manual hold metadata missing",
                 details={"event_id": event_id},
             )
-        generation = hold_generation or hold.generation
+        generation = hold.generation if hold_generation is None else hold_generation
         if generation != hold.generation:
             raise IdempotencyKeyReuseError(
                 "hold generation mismatch for resume intent",
@@ -427,7 +697,11 @@ class ManualResolutionService:
                 if by_op is not None:
                     return self._record_from_row(by_op)
             hold = await self._read_manual_hold(session, event_id)
-            generation = hold_generation or (hold.generation if hold else None)
+            generation = (
+                hold_generation
+                if hold_generation is not None
+                else (hold.generation if hold else None)
+            )
             if generation is None:
                 raise ValidationError(
                     "failed to locate graph resume intent after race",
@@ -456,6 +730,7 @@ class ManualResolutionService:
         intent_id: str | None = None,
         trigger: str = "unspecified",
         event_ids: list[str] | None = None,
+        countdown_s: int = 0,
     ) -> None:
         """Best-effort durable dispatch; never raises.
 
@@ -463,6 +738,9 @@ class ManualResolutionService:
         in-process task when Celery is unavailable so local/background mode still
         progresses. When no running event loop exists, emit structured signals
         instead of silently returning (ISSUE-324).
+
+        *countdown_s* delays the enqueue so nested RETRY respects
+        ``nested_retry_backoff_s`` instead of no-op claiming during backoff.
         """
         flagged_event_ids: list[str] = []
         if event_id:
@@ -472,6 +750,8 @@ class ManualResolutionService:
                 if eid and eid not in flagged_event_ids:
                     flagged_event_ids.append(eid)
 
+        delay = max(0, int(countdown_s or 0))
+
         try:
             from app.core.config import TaskMode, get_settings
 
@@ -480,13 +760,17 @@ class ManualResolutionService:
                     dispatch_pending_graph_resume_intents,
                 )
 
-                dispatch_pending_graph_resume_intents.delay()
+                if delay > 0:
+                    dispatch_pending_graph_resume_intents.apply_async(countdown=delay)
+                else:
+                    dispatch_pending_graph_resume_intents.delay()
                 record_dispatch_schedule(domain="graph_resume", outcome="resume_scheduled")
                 logger.debug(
-                    "graph resume dispatch enqueued trigger=%s event_id=%s intent_id=%s",
+                    "graph resume dispatch enqueued trigger=%s event_id=%s intent_id=%s delay=%ss",
                     trigger,
                     event_id or "-",
                     intent_id or "-",
+                    delay,
                 )
                 return
         except Exception as exc:
@@ -498,6 +782,33 @@ class ManualResolutionService:
                 intent_id or "-",
                 type(exc).__name__,
             )
+
+        if delay > 0:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+
+                def _dispatch_later() -> None:
+                    self.schedule_dispatch(
+                        event_id=event_id,
+                        intent_id=intent_id,
+                        trigger=trigger,
+                        event_ids=event_ids,
+                        countdown_s=0,
+                    )
+
+                loop.call_later(delay, _dispatch_later)
+                record_dispatch_schedule(domain="graph_resume", outcome="resume_scheduled")
+                logger.debug(
+                    "graph resume dispatch delayed trigger=%s event_id=%s intent_id=%s delay=%ss",
+                    trigger,
+                    event_id or "-",
+                    intent_id or "-",
+                    delay,
+                )
+                return
 
         job = (intent_id, event_id, trigger, tuple(flagged_event_ids))
         if self._dispatch_scheduled:
@@ -743,11 +1054,20 @@ class ManualResolutionService:
                     await session.scalars(
                         select(orm.GraphResumeIntent)
                         .where(
-                            orm.GraphResumeIntent.status.in_(
-                                [
-                                    GraphResumeIntentStatus.PENDING.value,
-                                    GraphResumeIntentStatus.RETRY.value,
-                                ]
+                            or_(
+                                orm.GraphResumeIntent.status
+                                == GraphResumeIntentStatus.PENDING.value,
+                                and_(
+                                    orm.GraphResumeIntent.status
+                                    == GraphResumeIntentStatus.RETRY.value,
+                                    or_(
+                                        orm.GraphResumeIntent.intent_kind
+                                        != INTENT_KIND_NESTED_GRAPH_WAKEUP,
+                                        orm.GraphResumeIntent.updated_at
+                                        <= now
+                                        - timedelta(seconds=self._nested_retry_backoff_s),
+                                    ),
+                                ),
                             )
                         )
                         .order_by(orm.GraphResumeIntent.updated_at.asc())
@@ -784,6 +1104,8 @@ class ManualResolutionService:
                     GraphResumeIntentStatus.RETRY,
                 }:
                     return None
+                if not self._nested_retry_ready(row, now):
+                    return None
                 validate_graph_resume_transition(current, GraphResumeIntentStatus.CLAIMED)
                 row.status = GraphResumeIntentStatus.CLAIMED.value
                 row.claim_owner = _DISPATCH_WORKER_ID
@@ -792,6 +1114,9 @@ class ManualResolutionService:
                 return row.intent_id
 
     async def _run_claimed_intent(self, intent_id: str) -> bool:
+        generation = 0
+        kind = ""
+        event_id = ""
         async with self._session_factory() as session:
             async with session.begin():
                 row = await session.get(
@@ -803,44 +1128,120 @@ class ManualResolutionService:
                     return False
                 if GraphResumeIntentStatus(row.status) is not GraphResumeIntentStatus.CLAIMED:
                     return False
-                hold = await self._read_manual_hold(session, row.event_id)
-                if hold is None or hold.generation != int(row.hold_generation):
-                    validate_graph_resume_transition(
-                        GraphResumeIntentStatus.CLAIMED,
-                        GraphResumeIntentStatus.SKIPPED,
-                    )
-                    row.status = GraphResumeIntentStatus.SKIPPED.value
-                    row.skip_reason = "stale_hold_generation"
-                    row.claim_owner = None
-                    row.claim_expires_at = None
-                    return False
-                substate = await self._read_execution_substate(session, row.event_id)
-                if substate is not ExecutionSubstate.MANUAL_RESOLUTION:
-                    validate_graph_resume_transition(
-                        GraphResumeIntentStatus.CLAIMED,
-                        GraphResumeIntentStatus.SKIPPED,
-                    )
-                    row.status = GraphResumeIntentStatus.SKIPPED.value
-                    row.skip_reason = "hold_already_cleared"
-                    row.claim_owner = None
-                    row.claim_expires_at = None
-                    return False
-                validate_graph_resume_transition(
-                    GraphResumeIntentStatus.CLAIMED,
-                    GraphResumeIntentStatus.STARTED,
-                )
-                row.status = GraphResumeIntentStatus.STARTED.value
-                row.updated_at = datetime.now(UTC)
+                kind = str(row.intent_kind)
                 event_id = row.event_id
-                generation = int(row.hold_generation)
+                if kind == INTENT_KIND_NESTED_GRAPH_WAKEUP:
+                    if await self._hold_blocks_nested_wakeup(session, event_id):
+                        validate_graph_resume_transition(
+                            GraphResumeIntentStatus.CLAIMED,
+                            GraphResumeIntentStatus.SKIPPED,
+                        )
+                        row.status = GraphResumeIntentStatus.SKIPPED.value
+                        row.skip_reason = "manual_resolution_hold"
+                        row.claim_owner = None
+                        row.claim_expires_at = None
+                        row.updated_at = datetime.now(UTC)
+                        return False
+                    validate_graph_resume_transition(
+                        GraphResumeIntentStatus.CLAIMED,
+                        GraphResumeIntentStatus.STARTED,
+                    )
+                    row.status = GraphResumeIntentStatus.STARTED.value
+                    row.updated_at = datetime.now(UTC)
+                else:
+                    hold = await self._read_manual_hold(session, row.event_id)
+                    if hold is None or hold.generation != int(row.hold_generation):
+                        validate_graph_resume_transition(
+                            GraphResumeIntentStatus.CLAIMED,
+                            GraphResumeIntentStatus.SKIPPED,
+                        )
+                        row.status = GraphResumeIntentStatus.SKIPPED.value
+                        row.skip_reason = "stale_hold_generation"
+                        row.claim_owner = None
+                        row.claim_expires_at = None
+                        return False
+                    substate = await self._read_execution_substate(session, row.event_id)
+                    if substate is not ExecutionSubstate.MANUAL_RESOLUTION:
+                        validate_graph_resume_transition(
+                            GraphResumeIntentStatus.CLAIMED,
+                            GraphResumeIntentStatus.SKIPPED,
+                        )
+                        row.status = GraphResumeIntentStatus.SKIPPED.value
+                        row.skip_reason = "hold_already_cleared"
+                        row.claim_owner = None
+                        row.claim_expires_at = None
+                        return False
+                    validate_graph_resume_transition(
+                        GraphResumeIntentStatus.CLAIMED,
+                        GraphResumeIntentStatus.STARTED,
+                    )
+                    row.status = GraphResumeIntentStatus.STARTED.value
+                    row.updated_at = datetime.now(UTC)
+                    generation = int(row.hold_generation)
 
         try:
             if self._resume_runner is None:
                 raise RuntimeError("resume_runner is not bound")
+            if kind == INTENT_KIND_NESTED_GRAPH_WAKEUP:
+                if await self._nested_wakeup_blocked_by_manual_hold(event_id):
+                    logger.warning(
+                        "nested graph wakeup skipped: manual hold active "
+                        "intent=%s event=%s",
+                        intent_id,
+                        event_id,
+                    )
+                    await self._mark_skipped(intent_id, reason="manual_resolution_hold")
+                    return False
+                await self._resume_runner(event_id)
+                if await self._nested_wakeup_blocked_by_manual_hold(event_id):
+                    logger.warning(
+                        "nested graph wakeup skipped after resume: manual hold "
+                        "active intent=%s event=%s",
+                        intent_id,
+                        event_id,
+                    )
+                    await self._mark_skipped(intent_id, reason="manual_resolution_hold")
+                    return False
+                if await self._nested_wakeup_still_waiting(event_id):
+                    logger.warning(
+                        "nested graph wakeup made no progress intent=%s event=%s",
+                        intent_id,
+                        event_id,
+                    )
+                    await self._mark_deferred(
+                        intent_id,
+                        error="nested_wakeup_still_waiting",
+                    )
+                    return False
+                await self._mark_terminal(intent_id)
+                return True
             # Keep MANUAL_RESOLUTION until resume succeeds so a crash mid-run
             # remains reclaimable (clearing first would fence as hold_already_cleared).
             await self._resume_runner(event_id)
         except Exception as exc:
+            from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+
+            if isinstance(exc, GraphResumeDeferredError):
+                if (
+                    kind == INTENT_KIND_NESTED_GRAPH_WAKEUP
+                    and exc.error_type == "manual_resolution_hold"
+                ):
+                    logger.warning(
+                        "nested graph wakeup skipped: resume fenced by manual hold "
+                        "intent=%s event=%s",
+                        intent_id,
+                        event_id,
+                    )
+                    await self._mark_skipped(intent_id, reason="manual_resolution_hold")
+                    return False
+                logger.warning(
+                    "graph resume intent deferred intent=%s event=%s error_type=%s",
+                    intent_id,
+                    event_id,
+                    exc.error_type,
+                )
+                await self._mark_deferred(intent_id, error=str(exc))
+                return False
             logger.exception("graph resume intent failed intent=%s event=%s", intent_id, event_id)
             await self._mark_failure(intent_id, error=str(exc))
             return False
@@ -856,6 +1257,10 @@ class ManualResolutionService:
                 generation,
             )
         await self._mark_terminal(intent_id)
+        await self._skip_nested_wakeups_for_event(
+            event_id,
+            reason="manual_resume_owns_event",
+        )
         return True
 
     async def _clear_manual_resolution_for_resume(
@@ -909,6 +1314,54 @@ class ManualResolutionService:
                 row.claim_owner = None
                 row.claim_expires_at = None
                 row.updated_at = datetime.now(UTC)
+
+    async def _mark_skipped(self, intent_id: str, *, reason: str) -> None:
+        """Terminal skip; do not reschedule nested wakeup dispatch."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(orm.GraphResumeIntent, intent_id, with_for_update=True)
+                if row is None:
+                    return
+                current = GraphResumeIntentStatus(row.status)
+                if current in TERMINAL_GRAPH_RESUME_STATUSES:
+                    return
+                validate_graph_resume_transition(current, GraphResumeIntentStatus.SKIPPED)
+                row.status = GraphResumeIntentStatus.SKIPPED.value
+                row.skip_reason = reason
+                row.claim_owner = None
+                row.claim_expires_at = None
+                row.updated_at = datetime.now(UTC)
+
+    async def _mark_deferred(self, intent_id: str, *, error: str) -> None:
+        """Return the intent to RETRY without burning the DEAD attempt budget."""
+        event_id: str | None = None
+        intent_kind: str | None = None
+        marked = False
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(orm.GraphResumeIntent, intent_id, with_for_update=True)
+                if row is None:
+                    return
+                current = GraphResumeIntentStatus(row.status)
+                if current in TERMINAL_GRAPH_RESUME_STATUSES:
+                    return
+                validate_graph_resume_transition(current, GraphResumeIntentStatus.RETRY)
+                row.status = GraphResumeIntentStatus.RETRY.value
+                row.revision = int(row.revision or 1) + 1
+                row.last_error = error[:2000]
+                row.claim_owner = None
+                row.claim_expires_at = None
+                row.updated_at = datetime.now(UTC)
+                event_id = row.event_id
+                intent_kind = str(row.intent_kind)
+                marked = True
+        if marked and event_id is not None and intent_kind == INTENT_KIND_NESTED_GRAPH_WAKEUP:
+            self.schedule_dispatch(
+                event_id=event_id,
+                intent_id=intent_id,
+                trigger="nested_wakeup_deferred",
+                countdown_s=self._nested_retry_backoff_s,
+            )
 
     async def _mark_failure(self, intent_id: str, *, error: str) -> None:
         async with self._session_factory() as session:
@@ -1032,6 +1485,7 @@ class ManualResolutionService:
 __all__ = [
     "ManualResolutionService",
     "RESOLUTION_SOURCE_ACTION_UNKNOWN",
+    "RESOLUTION_SOURCE_NESTED_WAKEUP",
     "RESOLUTION_SOURCE_WRITEBACK_AUTO",
     "RESOLUTION_SOURCE_WRITEBACK_MANUAL",
     "SUBJECT_KIND_ACTION",

@@ -545,3 +545,90 @@ def test_ensure_executor_job_store_replaces_pre_mounted_in_memory() -> None:
     ensure_executor_job_store(wrapped, db_store)  # type: ignore[arg-type]
     assert inner.job_store is db_store
     assert wrapped.job_store is db_store
+
+
+@pytest.mark.asyncio
+async def test_cas_miss_after_dispatch_treats_terminal_job_as_success() -> None:
+    store = InMemoryExecutionJobStore()
+    job_id = f"job-cas-term-{_sfx()}"
+    terminal = ActionExecutionJob(
+        job_id=job_id,
+        event_id=f"evt-{_sfx()}",
+        action_id=f"act-{_sfx()}",
+        provider_name="mock_tool_provider",
+        idempotency_key=f"idem-{_sfx()}",
+        status=ExecutionJobStatus.SUCCESS,
+    )
+    running = terminal.model_copy(update={"status": ExecutionJobStatus.RUNNING})
+    await store.seed_job(running)
+
+    reads = {"n": 0}
+
+    async def _get(job_id: str) -> ActionExecutionJob | None:
+        reads["n"] += 1
+        if reads["n"] == 1:
+            return running
+        return terminal
+
+    async def _cas(*_a: Any, **_k: Any) -> bool:
+        return False
+
+    store.get_job = _get  # type: ignore[method-assign]
+    store.cas_update_job = _cas  # type: ignore[method-assign]
+    executor = ToolExecutor(registry=ToolRegistry(), job_store=store)
+    await executor._cas_writeback_job(
+        job_id,
+        ToolResult(
+            call_id="call-1",
+            tool_name="block_ip",
+            provider_name="mock",
+            status=ToolResultStatus.SUCCESS,
+        ),
+        provider_name="mock",
+    )
+
+
+@pytest.mark.asyncio
+async def test_cas_miss_after_dispatch_marks_running_job_unknown() -> None:
+    store = InMemoryExecutionJobStore()
+    job_id = f"job-cas-unk-{_sfx()}"
+    running = ActionExecutionJob(
+        job_id=job_id,
+        event_id=f"evt-{_sfx()}",
+        action_id=f"act-{_sfx()}",
+        provider_name="mock_tool_provider",
+        idempotency_key=f"idem-{_sfx()}",
+        status=ExecutionJobStatus.RUNNING,
+    )
+    await store.seed_job(running)
+
+    cas_calls: list[ExecutionJobStatus] = []
+    original_cas = store.cas_update_job
+
+    async def _cas(
+        job_id: str,
+        updated: ActionExecutionJob,
+        *,
+        expected_status: ExecutionJobStatus,
+    ) -> bool:
+        cas_calls.append(updated.status)
+        if updated.status is ExecutionJobStatus.SUCCESS:
+            return False
+        return await original_cas(job_id, updated, expected_status=expected_status)
+
+    store.cas_update_job = _cas  # type: ignore[method-assign]
+    executor = ToolExecutor(registry=ToolRegistry(), job_store=store)
+    await executor._cas_writeback_job(
+        job_id,
+        ToolResult(
+            call_id="call-1",
+            tool_name="block_ip",
+            provider_name="mock",
+            status=ToolResultStatus.SUCCESS,
+        ),
+        provider_name="mock",
+    )
+    latest = await store.get_job(job_id)
+    assert latest is not None
+    assert latest.status is ExecutionJobStatus.UNKNOWN
+    assert ExecutionJobStatus.UNKNOWN in cas_calls

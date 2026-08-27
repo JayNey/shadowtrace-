@@ -12,7 +12,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Text, cast, func, or_, select
+from sqlalchemy import Text, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
@@ -40,6 +40,11 @@ _OS_INDEXED_SCOPES = frozenset({"tool-calls", "audit-logs"})
 
 # Cap for merging OpenSearch + ILIKE evidence hits in scope=all hybrid mode (P2).
 _HYBRID_FETCH_CAP = 10_000
+
+# Per-table scan cap for the ILIKE degraded path. ``total`` must equal the
+# number of rows actually fetched (and therefore paginable), not the unbounded
+# match count.
+ILIKE_SCAN_CAP = 500
 
 # Map scope → OpenSearch index suffix and ORM table info for the fallback.
 _SCOPE_CONFIG: dict[str, dict[str, Any]] = {
@@ -249,7 +254,10 @@ class SearchService:
 
         Each table is queried independently with ``ILIKE`` on text columns
         and ``::text`` casts for JSONB columns.  Results are combined, sorted
-        by timestamp descending, and paginated in memory (P2 degraded-path limit).
+        by timestamp descending, and paginated in memory (P2 degraded-path
+        limit of ``ILIKE_SCAN_CAP`` rows per table). ``total`` is the size of
+        that fetched window so later pages cannot claim hits that were never
+        loaded.
         """
         pattern = f"%{query}%"
         scopes = self._resolve_fallback_scopes(scope)
@@ -295,7 +303,6 @@ class SearchService:
                     col = getattr(model, col_name, None)
                     if col is not None:
                         select_cols.append(col)
-                select_cols.append(func.count().over().label("_total"))
 
                 stmt = (
                     select(*select_cols)
@@ -305,6 +312,7 @@ class SearchService:
                         if ts_col_attr is not None
                         else doc_id_expr.asc()
                     )
+                    .limit(ILIKE_SCAN_CAP)
                 )
 
                 result = await session.execute(stmt)
@@ -313,15 +321,19 @@ class SearchService:
                     idx = 0
                     doc_id = str(row[idx])
                     idx += 1
-                    event_id_val = (
-                        str(row[idx]) if len(row) > idx and row[idx] is not None else None
-                    )
-                    idx += 1
-                    ts_val = row[idx] if len(row) > idx and row[idx] is not None else None
-                    idx += 1
+                    event_id_val: str | None = None
+                    if event_id_col_attr is not None:
+                        event_id_val = (
+                            str(row[idx]) if row[idx] is not None else None
+                        )
+                        idx += 1
+                    ts_val: datetime | None = None
+                    if ts_col_attr is not None:
+                        ts_val = row[idx] if row[idx] is not None else None
+                        idx += 1
                     field_values: dict[str, Any] = {}
                     for col_name in summary_fields:
-                        if len(row) > idx:
+                        if idx < len(row):
                             field_values[col_name] = row[idx]
                             idx += 1
                     summary = self._build_fallback_summary(table_name, doc_id, field_values)

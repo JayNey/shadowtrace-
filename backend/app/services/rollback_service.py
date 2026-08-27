@@ -384,17 +384,19 @@ class RollbackService:
         # --- Verify rollback effect ----------------------------------------------
         effect_status = await self._verify_rollback_effect(original, executed)
 
-        if effect_status not in ("verified", "skipped") and executed.status is ActionStatus.SUCCESS:
+        # "skipped" means no independent readback tool — not a verify failure.
+        cas_ok = effect_status in {"verified", "skipped"}
+        if not cas_ok and executed.status is ActionStatus.SUCCESS:
             await self._update_action_status(rollback_action_id, ActionStatus.FAILED)
 
         # --- CAS original Action → ROLLED_BACK ----------------------------------
-        if effect_status in ("verified", "skipped"):
+        if cas_ok:
             rolled_back = await self._cas_rollback_status(action_id, original)
         else:
             rolled_back = False
 
         # --- Create compensation writebacks --------------------------------------
-        if effect_status in ("verified", "skipped"):
+        if cas_ok:
             comp_result = await self._create_compensation_writebacks(
                 original_action=original,
                 rollback_action=executed,

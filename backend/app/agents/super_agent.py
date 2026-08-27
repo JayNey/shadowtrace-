@@ -74,6 +74,7 @@ from app.models.report import InvestigationReport
 from app.models.security_event import EventSummary
 from app.models.workflow import MAX_AGENT_RETRIES, TransitionContext
 from app.orchestration.event_status_transition_retry import transition_with_bounded_retry
+from app.orchestration.graph_invocation import NestedGraphResumeError
 from app.orchestration.lease import EventLease, generate_owner_id
 from app.orchestration.workflow_graph import (
     alert_text_from_snapshot,
@@ -505,6 +506,20 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             if lifecycle_started:
                 await self._publish_agent_failed(lifecycle_input, str(exc))
             raise
+        except NestedGraphResumeError as exc:
+            # Parent graph already halted (WAITING_APPROVAL / WAITING_WRITEBACK).
+            # Nested wakeup persist failure must not burn the event FAILED.
+            logger.error(
+                "SuperAgent: nested graph wakeup persist failed event=%s "
+                "error_type=%s pending=%s",
+                event_id,
+                exc.error_type,
+                exc.pending,
+            )
+            if lifecycle_started:
+                duration_ms = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
+                await self._publish_agent_completed(lifecycle_input, duration_ms=duration_ms)
+            return
         except SoftTimeLimitExceeded as exc:
             # ISSUE-314: task/intent layer owns terminal vs bounded recovery.
             # Do not publish agent_failed — outcome may still be RECOVERED.
@@ -554,7 +569,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                 self._reset_convergence_guard(event_id)
             if acquired and self.lease is not None and not soft_limited:
                 try:
-                    await self.lease.release(event_id, resolved_owner)
+                    released = await self.lease.release(event_id, resolved_owner)
                 except SoftTimeLimitExceeded:
                     # ISSUE-314: do not swallow soft-limit into investigate success.
                     raise
@@ -565,6 +580,13 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                         resolved_owner,
                         exc_info=True,
                     )
+                else:
+                    if released:
+                        from app.orchestration.graph_invocation import (
+                            kick_nested_wakeup_after_lease_release,
+                        )
+
+                        await kick_nested_wakeup_after_lease_release(event_id)
 
     # ------------------------------------------------------------------ #
     # _run — BaseAgent template integration

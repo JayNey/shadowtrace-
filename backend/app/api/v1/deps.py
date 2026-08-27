@@ -18,6 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import get_settings
 from app.core.redis_client import RedisClient
 from app.db.session_provider import get_session_provider, reset_session_provider
+from app.orchestration.graph_invocation import (
+    NestedGraphResumeError,
+    clear_nested_resume_hooks,
+    set_investigation_lease_held_probe,
+    set_nested_resume_durability_writer,
+    set_nested_resume_failure_handler,
+    set_nested_resume_runner,
+    set_nested_wakeup_lease_release_kicker,
+)
 
 if TYPE_CHECKING:
     from app.services.execution_job_query_service import ExecutionJobQueryService
@@ -416,18 +425,104 @@ DetectionPromotionDep = Annotated[Any, Depends(get_detection_promotion_service)]
 def _get_adapter_registry() -> Any:
     global _adapter_registry
     if _adapter_registry is None:
-        from app.adapters.mock_xdr import MockXDRDispositionAdapter
         from app.adapters.registry import DispositionAdapterRegistry
+        from app.core.config import is_mock_disposition_mode
 
         settings = get_settings()
         registry = DispositionAdapterRegistry()
-        base_url = settings.disposition_base_url or "http://mock-xdr"
-        adapter = MockXDRDispositionAdapter(
-            base_url=base_url,
-            read_token="mock-read-token",
-            write_token="mock-write-token",
-        )
-        registry.register("mock_xdr", adapter)
+        if is_mock_disposition_mode(settings.disposition_mode):
+            from app.adapters.mock_xdr import MockXDRDispositionAdapter
+
+            adapter = MockXDRDispositionAdapter(
+                base_url=settings.disposition_base_url or "http://mock-xdr",
+                read_token=settings.mock_xdr_read_token,
+                write_token=settings.mock_xdr_write_token,
+            )
+            registry.register("mock_xdr", adapter)
+        else:
+            kind = (settings.disposition_adapter_kind or "generic_http_disposition").strip()
+            if not kind or kind.lower() == "mock":
+                kind = "generic_http_disposition"
+            endpoint = (settings.disposition_base_url or "").strip()
+            credential_ref = (settings.disposition_credential_ref or "").strip()
+            allow_side_effects = bool(
+                settings.allow_live_side_effects and settings.allow_xdr_writeback
+            )
+            invalid_ref = bool(
+                credential_ref
+                and (
+                    not credential_ref.replace("_", "").isalnum()
+                    or credential_ref.upper() != credential_ref
+                )
+            )
+            auth_type = str(
+                getattr(settings, "disposition_auth_type", None) or "bearer"
+            ).strip().lower()
+            if invalid_ref:
+                logger.error(
+                    "invalid disposition credential_ref=%r; not registering live adapter",
+                    credential_ref,
+                )
+            elif not credential_ref:
+                logger.error(
+                    "live disposition_mode missing DISPOSITION_CREDENTIAL_REF; "
+                    "not registering adapter kind=%s",
+                    kind,
+                )
+            elif not endpoint:
+                logger.error(
+                    "live disposition_mode without DISPOSITION_BASE_URL; "
+                    "not registering a disabled stub adapter kind=%s",
+                    kind,
+                )
+            elif auth_type not in {"bearer", "basic"}:
+                logger.error(
+                    "invalid disposition auth_type=%r; not registering live adapter kind=%s",
+                    auth_type,
+                    kind,
+                )
+            else:
+                from app.adapters.disposition.http_adapter import HttpDispositionAdapter
+                from app.tools.adapters.base import AdapterConfig
+
+                adapter = HttpDispositionAdapter(
+                    AdapterConfig(
+                        endpoint=endpoint,
+                        credential_ref=credential_ref,
+                        auth_type="basic" if auth_type == "basic" else "bearer",
+                        enabled=True,
+                    ),
+                    allow_side_effects=allow_side_effects,
+                )
+                if not adapter.validate_config():
+                    logger.error(
+                        "live disposition adapter failed validate_config; "
+                        "not registering kind=%s endpoint=%s",
+                        kind,
+                        endpoint,
+                    )
+                else:
+                    logger.info(
+                        "registering live disposition adapter kind=%s endpoint=%s "
+                        "allow_side_effects=%s",
+                        kind,
+                        endpoint,
+                        allow_side_effects,
+                    )
+                    registry.register(kind, adapter)
+                    product = str(
+                        getattr(settings, "disposition_source_product", "") or ""
+                    ).strip()
+                    if (
+                        product
+                        and product.lower() not in {"mock", "mock_xdr"}
+                        and product != kind
+                    ):
+                        logger.info(
+                            "also registering live disposition adapter as source_product=%s",
+                            product,
+                        )
+                        registry.register(product, adapter)
         _adapter_registry = registry
     return _adapter_registry
 
@@ -468,6 +563,7 @@ async def get_workflow_runtime() -> Any:
 
 async def _resume_investigation(event_id: str) -> None:
     """Resume graph orchestration after approval or writeback (ISSUE-059 / #613)."""
+    ensure_nested_resume_runner()
     settings = get_settings()
     mode = (settings.orchestration_mode or "graph").strip().lower()
     if mode != "graph":
@@ -481,6 +577,80 @@ async def _resume_investigation(event_id: str) -> None:
         get_workflow_runtime=_get_workflow_runtime,
         degraded_flags=_get_degraded_flags(),
     )
+
+
+async def _on_nested_resume_flush_failure(
+    event_id: str,
+    exc: BaseException,
+    _pending: list[str],
+) -> None:
+    """Record graph_resume_failed when nested flush fails without prior observability."""
+    from app.orchestration.graph_resume_observability import (
+        GraphResumeDeferredError,
+        GraphResumeFailedError,
+        GraphResumeFailureContext,
+        record_graph_resume_failure,
+    )
+
+    if isinstance(exc, (GraphResumeFailedError, GraphResumeDeferredError)):
+        # Runner already recorded observability, or resume is not ready yet.
+        return
+    if isinstance(exc, NestedGraphResumeError) and exc.error_type in {
+        "nested_resume_dropped",
+        "nested_resume_cancelled",
+        "nested_resume_soft_time_limit",
+    }:
+        return
+    error_type = (
+        exc.error_type
+        if isinstance(exc, NestedGraphResumeError)
+        else type(exc).__name__
+    )
+    await record_graph_resume_failure(
+        _get_session_factory(),
+        _get_degraded_flags(),
+        GraphResumeFailureContext(
+            event_id=event_id,
+            error_type=error_type,
+            message=str(exc)[:500],
+        ),
+    )
+
+
+async def _persist_nested_graph_wakeup(event_id: str, reason: str) -> None:
+    service = await get_manual_resolution_service()
+    record = await service.enqueue_nested_wakeup(event_id, reason=reason)
+    if record is None:
+        raise RuntimeError(
+            f"nested wakeup not persisted event={event_id} reason={reason}"
+        )
+
+
+async def _event_lease_is_held(event_id: str) -> bool:
+    lease = get_event_lease()
+    try:
+        return await lease.get_owner(event_id) is not None
+    except Exception:
+        logger.warning(
+            "event lease probe failed event=%s; treating as held",
+            event_id,
+            exc_info=True,
+        )
+        return True
+
+
+async def _kick_nested_wakeup_after_lease_release(event_id: str) -> None:
+    service = await get_manual_resolution_service()
+    await service.kick_nested_wakeup_dispatch(event_id)
+
+
+def ensure_nested_resume_runner() -> None:
+    """Idempotently install the production nested-resume flusher (API + workers)."""
+    set_nested_resume_runner(_resume_investigation)
+    set_nested_resume_failure_handler(_on_nested_resume_flush_failure)
+    set_nested_resume_durability_writer(_persist_nested_graph_wakeup)
+    set_investigation_lease_held_probe(_event_lease_is_held)
+    set_nested_wakeup_lease_release_kicker(_kick_nested_wakeup_after_lease_release)
 
 
 async def get_manual_resolution_service() -> Any:
@@ -1134,6 +1304,7 @@ def get_event_lease() -> Any:
 async def get_super_agent() -> Any:
     """Return SuperAgent for graph-mode orchestration (ISSUE-054)."""
     global _super_agent
+    ensure_nested_resume_runner()
     if _super_agent is None:
         from app.agents.planner_agent import PlannerAgent
         from app.agents.super_agent import SuperAgent
@@ -1311,3 +1482,4 @@ def reset_deps() -> None:
     _execution_job_query = None
     _agent_artifact_service = None
     _content_projection_service = None
+    clear_nested_resume_hooks()

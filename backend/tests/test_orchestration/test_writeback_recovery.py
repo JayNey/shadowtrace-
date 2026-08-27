@@ -37,6 +37,24 @@ from app.orchestration.writeback_recovery_handler import (
     writeback_recovery_graph_node,
 )
 
+
+@pytest.fixture(autouse=True)
+def _nested_wakeup_writer() -> Any:
+    """Unit tests do not install the production durability writer."""
+    from app.orchestration.graph_invocation import (
+        get_nested_resume_durability_writer,
+        set_nested_resume_durability_writer,
+    )
+
+    async def _writer(_event_id: str, _reason: str) -> None:
+        return None
+
+    previous = get_nested_resume_durability_writer()
+    set_nested_resume_durability_writer(_writer)
+    yield
+    set_nested_resume_durability_writer(previous)
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -415,6 +433,25 @@ class TestWritebackRecoveryGraphNode:
             verify_failed_writebacks=[],
             verify_recoverable_writeback_ids=[],
             verify_pending_writeback_action_ids=[],
+        )
+        result = await writeback_recovery_graph_node(state, handler=handler)
+        assert result["verify_need_writeback_recovery"] is False
+        assert result["verify_need_manual_resolution"] is True
+        assert result["execution_substate"] == ExecutionSubstate.MANUAL_RESOLUTION.value
+        assert result.get("error") == "writeback_recovery_invariant_no_targets"
+
+    async def test_writeback_recovery_inflight_without_outbox_ids_escalates_or_looks_up(self):
+        """In-flight flag without outbox/action ids must not empty-wait."""
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+        )
+        state = _base_state(
+            verify_need_writeback_recovery=True,
+            verify_failed_writebacks=[],
+            verify_recoverable_writeback_ids=[],
+            verify_pending_writeback_action_ids=[],
+            execution_inflight=True,
         )
         result = await writeback_recovery_graph_node(state, handler=handler)
         assert result["verify_need_writeback_recovery"] is False
@@ -1296,3 +1333,116 @@ class TestVerifyToRecoveryContract:
         assert result["halted"] is True
         assert result["verify_pending_writeback_action_ids"] == ["act-legacy-001"]
         assert result["verify_recoverable_writeback_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_writeback_lookup_exception_wait_enqueues_nested_wakeup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persist_wakeup = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.orchestration.graph_invocation.persist_nested_graph_wakeup",
+        persist_wakeup,
+    )
+    ds = FakeDispositionSync()
+    ds._lookup_raises = RuntimeError("lookup down")
+    handler = WritebackRecoveryHandler(
+        state_machine=FakeStateMachine(),
+        runtime=FakeRuntime(),
+        disposition_sync=ds,
+    )
+    state = _base_state(
+        verify_failed_writebacks=["wbk-lookup-exc"],
+        verify_recoverable_writeback_ids=["wbk-lookup-exc"],
+        verify_writeback_status="unknown",
+    )
+    result = await writeback_recovery_graph_node(state, handler=handler)
+    assert result["halted"] is True
+    assert result["verify_need_writeback_recovery"] is True
+    persist_wakeup.assert_awaited_once_with("evt-test-wb-001", "lookup_exception_wait")
+
+
+@pytest.mark.asyncio
+async def test_writeback_retry_exception_wait_enqueues_nested_wakeup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persist_wakeup = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.orchestration.graph_invocation.persist_nested_graph_wakeup",
+        persist_wakeup,
+    )
+    monkeypatch.setattr(
+        "app.orchestration.writeback_recovery_handler._backoff_with_jitter",
+        lambda _n: 0,
+    )
+    monkeypatch.setattr(
+        "app.orchestration.writeback_recovery_handler.asyncio.sleep",
+        AsyncMock(),
+    )
+    ds = FakeDispositionSync()
+    ds._retry_raises = RuntimeError("retry down")
+    handler = WritebackRecoveryHandler(
+        state_machine=FakeStateMachine(),
+        runtime=FakeRuntime(),
+        disposition_sync=ds,
+    )
+    state = _base_state(
+        verify_failed_writebacks=["wbk-retry-exc"],
+        verify_recoverable_writeback_ids=["wbk-retry-exc"],
+        verify_writeback_status="failed",
+    )
+    result = await writeback_recovery_graph_node(state, handler=handler)
+    assert result["halted"] is True
+    assert result["verify_need_writeback_recovery"] is True
+    persist_wakeup.assert_awaited_once_with("evt-test-wb-001", "retry_exception_wait")
+
+
+@pytest.mark.asyncio
+async def test_writeback_accepted_wait_enqueues_nested_wakeup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persist_wakeup = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.orchestration.graph_invocation.persist_nested_graph_wakeup",
+        persist_wakeup,
+    )
+    handler = WritebackRecoveryHandler(
+        state_machine=FakeStateMachine(),
+        runtime=FakeRuntime(),
+    )
+    state = _base_state(
+        verify_failed_writebacks=["wbk-accepted-wait"],
+        verify_recoverable_writeback_ids=["wbk-accepted-wait"],
+        verify_writeback_status="accepted",
+    )
+    result = await writeback_recovery_graph_node(state, handler=handler)
+    assert result["halted"] is True
+    assert result["verify_need_writeback_recovery"] is True
+    persist_wakeup.assert_awaited_once_with("evt-test-wb-001", "waiting_accepted")
+
+
+@pytest.mark.asyncio
+async def test_writeback_wait_persist_failure_does_not_halt_without_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persist_wakeup = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        "app.orchestration.graph_invocation.persist_nested_graph_wakeup",
+        persist_wakeup,
+    )
+    handler = WritebackRecoveryHandler(
+        state_machine=FakeStateMachine(),
+        runtime=FakeRuntime(),
+    )
+    state = _base_state(
+        verify_failed_writebacks=["wbk-accepted-wait"],
+        verify_recoverable_writeback_ids=["wbk-accepted-wait"],
+        verify_writeback_status="accepted",
+    )
+    result = await writeback_recovery_graph_node(state, handler=handler)
+    persist_wakeup.assert_awaited_once_with("evt-test-wb-001", "waiting_accepted")
+    assert result.get("halted") is not True
+    assert result["verify_need_manual_resolution"] is True
+    assert result["verify_need_writeback_recovery"] is False
+    assert result["execution_substate"] == ExecutionSubstate.MANUAL_RESOLUTION.value
+    assert result["error"] == "nested_wakeup_persist_failed"

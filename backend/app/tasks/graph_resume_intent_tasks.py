@@ -16,8 +16,9 @@ GRAPH_RESUME_QUEUE = "investigation"
 
 
 async def _get_service() -> Any:
-    from app.api.v1.deps import get_manual_resolution_service
+    from app.api.v1.deps import ensure_nested_resume_runner, get_manual_resolution_service
 
+    ensure_nested_resume_runner()
     return await get_manual_resolution_service()
 
 

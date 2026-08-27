@@ -1629,9 +1629,9 @@ async def _db_read(
 ) -> tuple[list[Any], int]:
     """Execute a paginated read query.
 
-    Returns empty results for transient DB errors (connection issues, pool
-    exhaustion).  Non-transient errors are re-raised so the API layer can
-    return HTTP 503 rather than silently reporting success with no data.
+    Transient and non-transient DB failures raise ``DependencyUnavailableError``
+    (HTTP 503). An unavailable session factory still returns empty results so
+    unit tests without Postgres can run.
     """
     from sqlalchemy import exc as sa_exc
 
@@ -1666,14 +1666,22 @@ async def _db_read(
             event_id,
         )
         return [], 0
-    except (ConnectionRefusedError, TimeoutError, socket.gaierror, sa_exc.OperationalError):
+    except (ConnectionRefusedError, TimeoutError, socket.gaierror, sa_exc.OperationalError) as exc:
         logger.warning(
             "DB read degraded (transient error) for table=%s event=%s",
             getattr(table, "__tablename__", table),
             event_id,
             exc_info=True,
         )
-        return [], 0
+        raise DependencyUnavailableError(
+            "database query failed",
+            error_code="dependency_unavailable",
+            details={
+                "table": getattr(table, "__tablename__", str(table)),
+                "event_id": event_id,
+                "transient": True,
+            },
+        ) from exc
     except Exception as exc:
         logger.error(
             "DB read failed (non-transient) for table=%s event=%s: %s",

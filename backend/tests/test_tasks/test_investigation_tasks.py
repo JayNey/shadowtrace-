@@ -566,6 +566,70 @@ async def test_duplicate_in_progress_result_marks_started_intent_retry(
         assert row.status == InvestigationIntentStatus.RETRY.value
         assert row.last_error == "investigation_in_progress"
         assert row.skip_reason is None
+        assert int(row.attempt or 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_finalize_intent_from_result_keeps_deferred_retryable(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.db import models as orm
+    from app.models.enums import EventStatus, InvestigationIntentStatus, Severity
+
+    intent_id = f"iin-deferred-finalize-{uuid4().hex[:8]}"
+    event_id = f"evt-deferred-finalize-{uuid4().hex[:8]}"
+    broker_task_id = f"task-deferred-finalize-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Deferred resume must not burn terminal intent",
+                    description="",
+                    status=EventStatus.WAITING_APPROVAL.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="http_investigate",
+                    intent_version="issue276_v1",
+                    status=InvestigationIntentStatus.STARTED.value,
+                    revision=1,
+                    attempt=0,
+                    broker_task_id=broker_task_id,
+                )
+            )
+
+    monkeypatch.setattr("app.db.session.get_session_factory", lambda: session_factory)
+    await tasks._finalize_intent_from_result(
+        intent_id,
+        {
+            "status": "deferred",
+            "event_id": event_id,
+            "reason": "waiting_approval",
+        },
+        broker_task_id=broker_task_id,
+    )
+
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.RETRY.value
+        assert row.last_error == "waiting_approval"
+        assert row.skip_reason is None
+        assert int(row.attempt or 0) == 0
 
 
 @pytest.mark.asyncio
@@ -1646,6 +1710,130 @@ async def test_execute_redelivery_resume_calls_checkpoint_resume_with_public_di(
     assert call_kwargs["get_super_agent"] is deps.get_super_agent
     assert call_kwargs["get_workflow_runtime"] is deps.get_workflow_runtime
     assert call_kwargs["degraded_flags"] is degraded_flags
+
+
+@pytest.mark.asyncio
+async def test_execute_redelivery_resume_waiting_approval_does_not_mark_intent_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.v1 import deps
+    from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.execute_graph_resume_with_retry",
+        AsyncMock(
+            side_effect=GraphResumeDeferredError(
+                "cannot resume while event is still WAITING_APPROVAL",
+                event_id="evt-redelivery-deferred",
+                error_type="waiting_approval",
+            )
+        ),
+    )
+    monkeypatch.setattr(deps, "_get_degraded_flags", lambda: object())
+
+    result = await tasks.execute_redelivery_resume(
+        "evt-redelivery-deferred",
+        owner_id="owner-redelivery",
+        event_status=EventStatus.WAITING_APPROVAL,
+    )
+
+    assert result == {
+        "status": "deferred",
+        "event_id": "evt-redelivery-deferred",
+        "reason": "waiting_approval",
+    }
+
+    intent_service = MagicMock()
+    intent_service.mark_retry = AsyncMock(return_value=True)
+    intent_service.mark_terminal = AsyncMock(return_value=True)
+    intent_service.mark_skipped = AsyncMock(return_value=True)
+    monkeypatch.setattr("app.db.session.get_session_factory", lambda: object())
+    monkeypatch.setattr(
+        "app.services.investigation_intent_service.InvestigationIntentService",
+        lambda *_a, **_k: intent_service,
+    )
+    await tasks._finalize_intent_from_result(
+        "iin-redelivery-deferred",
+        result,
+        broker_task_id="task-redelivery-deferred",
+    )
+    intent_service.mark_retry.assert_awaited_once_with(
+        "iin-redelivery-deferred",
+        error="waiting_approval",
+        broker_task_id="task-redelivery-deferred",
+        increment_attempt=False,
+    )
+    intent_service.mark_terminal.assert_not_awaited()
+    intent_service.mark_skipped.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_finalize_intent_from_result_deferred_calls_mark_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GraphResumeDeferredError must stay retryable without a live Postgres session."""
+    intent_service = MagicMock()
+    intent_service.mark_retry = AsyncMock(return_value=True)
+    intent_service.mark_terminal = AsyncMock(return_value=True)
+    intent_service.mark_skipped = AsyncMock(return_value=True)
+    monkeypatch.setattr("app.db.session.get_session_factory", lambda: object())
+    monkeypatch.setattr(
+        "app.services.investigation_intent_service.InvestigationIntentService",
+        lambda *_a, **_k: intent_service,
+    )
+
+    await tasks._finalize_intent_from_result(
+        "iin-deferred-unit",
+        {
+            "status": "deferred",
+            "event_id": "evt-deferred-unit",
+            "reason": "waiting_approval",
+        },
+        broker_task_id="task-deferred-unit",
+    )
+
+    intent_service.mark_retry.assert_awaited_once_with(
+        "iin-deferred-unit",
+        error="waiting_approval",
+        broker_task_id="task-deferred-unit",
+        increment_attempt=False,
+    )
+    intent_service.mark_terminal.assert_not_awaited()
+    intent_service.mark_skipped.assert_not_awaited()
+
+
+def test_investigation_defer_without_attempt_covers_human_wait_reasons() -> None:
+    assert "waiting_approval" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
+    assert "graph_still_bound" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
+    assert "investigation_in_progress" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
+    assert "lease_unavailable" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
+    assert "manual_resolution_hold" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
+    assert "graph_resume_deferred" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
+
+
+@pytest.mark.asyncio
+async def test_finalize_waiting_approval_deferred_does_not_increment_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intent_service = MagicMock()
+    intent_service.mark_retry = AsyncMock(return_value=True)
+    monkeypatch.setattr("app.db.session.get_session_factory", lambda: object())
+    monkeypatch.setattr(
+        "app.services.investigation_intent_service.InvestigationIntentService",
+        lambda *_a, **_k: intent_service,
+    )
+    await tasks._finalize_intent_from_result(
+        "iin-wait-no-burn",
+        {
+            "status": "deferred",
+            "event_id": "evt-wait-no-burn",
+            "reason": "waiting_approval",
+        },
+        broker_task_id="task-wait-no-burn",
+    )
+    kwargs = intent_service.mark_retry.await_args.kwargs
+    assert kwargs["increment_attempt"] is False
+    assert kwargs["error"] == "waiting_approval"
 
 
 @pytest.mark.asyncio
