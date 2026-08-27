@@ -953,7 +953,13 @@ class ApprovalEngine:
         if self._resume is not None:
             if is_in_investigation_graph(event_id=event_id):
                 defer_nested_graph_resume(event_id)
-                await persist_nested_graph_wakeup(event_id, "graph_still_bound")
+                persisted = await persist_nested_graph_wakeup(event_id, "graph_still_bound")
+                if not persisted:
+                    logger.error(
+                        "nested wakeup persist failed while graph bound event=%s; "
+                        "approval halt remains deferred (human/watchdog owns resume)",
+                        event_id,
+                    )
                 logger.debug(
                     "defer resume_investigation while graph active event=%s",
                     event_id,

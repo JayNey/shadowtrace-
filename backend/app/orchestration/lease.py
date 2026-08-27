@@ -390,7 +390,9 @@ class EventLease:
         When *ttl_s* is omitted, reuse the TTL from :meth:`acquire` for this
         event (custom acquire TTLs must not be silently reset to 600s). After
         Celery loop-rebind the in-process cache is empty; read the TTL key
-        from Redis instead of defaulting to 600s.
+        from Redis instead of defaulting to 600s. Live remaining TTL is only a
+        fallback when the TTL key is missing; remaining below the renew interval
+        is not a safe renew budget and fail-closes.
         """
         if ttl_s is None:
             renew_ttl = self._acquired_ttl.get(event_id)
@@ -398,7 +400,16 @@ class EventLease:
                 renew_ttl = await self._read_persisted_ttl(event_id)
             if renew_ttl is None:
                 renew_ttl = await self._read_live_lease_ttl(event_id)
-                if renew_ttl is not None:
+                if renew_ttl is not None and renew_ttl < RENEW_INTERVAL_S:
+                    logger.error(
+                        "EventLease.start_renewal: live remaining ttl=%s "
+                        "below renew interval=%s for event=%s; fail-closed",
+                        renew_ttl,
+                        RENEW_INTERVAL_S,
+                        event_id,
+                    )
+                    renew_ttl = None
+                elif renew_ttl is not None:
                     logger.warning(
                         "EventLease.start_renewal: TTL key missing for event=%s; "
                         "using live lease ttl=%s",

@@ -993,6 +993,86 @@ async def test_execute_graph_resume_waiting_approval_is_deferred_not_failed(
 
 
 @pytest.mark.asyncio
+async def test_execute_graph_resume_defers_when_manual_hold_active_without_ainvoke(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resume = AsyncMock()
+    persisted: list[tuple[str, str]] = []
+
+    async def _persist(event_id: str, reason: str = "nested_wakeup") -> bool:
+        persisted.append((event_id, reason))
+        return True
+
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability._manual_hold_blocks_resume",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.resume_investigation_from_checkpoint",
+        resume,
+    )
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.persist_nested_graph_wakeup",
+        _persist,
+    )
+
+    with pytest.raises(GraphResumeDeferredError) as exc_info:
+        await execute_graph_resume_with_retry(
+            "evt-hold-fence",
+            session_factory=_SessionFactory(),
+            get_super_agent=AsyncMock(side_effect=AssertionError("must not ainvoke")),
+            get_workflow_runtime=AsyncMock(side_effect=AssertionError("must not ainvoke")),
+            degraded_flags=None,
+        )
+
+    assert exc_info.value.error_type == "manual_resolution_hold"
+    resume.assert_not_awaited()
+    assert persisted == []
+
+
+@pytest.mark.asyncio
+async def test_execute_graph_resume_manual_hold_deferred_does_not_persist_wakeup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[tuple[str, str]] = []
+
+    async def _persist(event_id: str, reason: str = "nested_wakeup") -> bool:
+        persisted.append((event_id, reason))
+        return True
+
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability._manual_hold_blocks_resume",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.resume_investigation_from_checkpoint",
+        AsyncMock(
+            side_effect=GraphResumeDeferredError(
+                "cannot resume while a durable manual hold owns the event",
+                event_id="evt-hold-persist",
+                error_type="manual_resolution_hold",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.persist_nested_graph_wakeup",
+        _persist,
+    )
+
+    with pytest.raises(GraphResumeDeferredError) as exc_info:
+        await execute_graph_resume_with_retry(
+            "evt-hold-persist",
+            session_factory=_SessionFactory(),
+            get_super_agent=AsyncMock(),
+            get_workflow_runtime=AsyncMock(),
+            degraded_flags=None,
+        )
+
+    assert exc_info.value.error_type == "manual_resolution_hold"
+    assert persisted == []
+
+
+@pytest.mark.asyncio
 async def test_persist_nested_graph_wakeup_propagates_cancelled_error() -> None:
     from app.orchestration.graph_invocation import (
         get_nested_resume_durability_writer,

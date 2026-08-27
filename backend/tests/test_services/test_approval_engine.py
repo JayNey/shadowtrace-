@@ -1237,6 +1237,53 @@ async def test_evaluate_plan_defers_resume_while_graph_active(
 
 
 @pytest.mark.asyncio
+async def test_evaluate_plan_persist_false_does_not_fail_waiting_approval_event(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    state_machine: StateMachineService,
+    fake_bus: FakeEventBus,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resume = AsyncMock()
+    engine = ApprovalEngine(
+        session_factory,
+        event_bus=fake_bus,  # type: ignore[arg-type]
+        state_machine=state_machine,
+        resume_investigation=resume,
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    event_id = await _create_event(session_factory, store)
+    await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L0),
+    )
+    persist_calls: list[tuple[str, str]] = []
+
+    async def _persist_false(eid: str, reason: str = "nested_wakeup") -> bool:
+        persist_calls.append((eid, reason))
+        return False
+
+    monkeypatch.setattr(
+        "app.services.approval_engine.persist_nested_graph_wakeup",
+        _persist_false,
+    )
+    from app.orchestration.graph_invocation import bind_investigation_graph
+
+    async with bind_investigation_graph(event_id):
+        result = await engine.evaluate_plan(event_id, 1, _risk())
+    assert result.needs_wait is False
+    assert result.resume_deferred is True
+    resume.assert_not_awaited()
+    assert persist_calls == [(event_id, "graph_still_bound")]
+    async with session_factory() as session:
+        event = await session.get(orm.SecurityEvent, event_id)
+    assert event is not None
+    assert event.status != EventStatus.FAILED.value
+
+
+@pytest.mark.asyncio
 async def test_evaluate_plan_resume_hook_called_when_fully_decided(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,

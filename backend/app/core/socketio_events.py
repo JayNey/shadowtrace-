@@ -354,14 +354,6 @@ def register_handlers(
             await _emit_auth_error(sio, sid, "not authorized for global broadcasts")
             return
 
-        try:
-            rooms = sio.rooms(sid, namespace=SOCKETIO_NAMESPACE)
-        except KeyError:
-            rooms = []
-        for room in list(rooms):
-            if isinstance(room, str) and room.startswith(EVENT_ROOM_PREFIX):
-                await sio.leave_room(sid, room, namespace=SOCKETIO_NAMESPACE)
-                sessions.untrack_room(sid, room)
         await sio.enter_room(sid, GLOBAL_ROOM, namespace=SOCKETIO_NAMESPACE)
         sessions.track_room(sid, GLOBAL_ROOM)
         logger.debug(

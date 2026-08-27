@@ -19,6 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import InvalidStateTransitionError, ValidationError
 from app.db import models as orm
+from app.models.enums import ExecutionSubstate
+from app.models.graph_resume_intent import (
+    MANUAL_HOLD_JOURNAL_FIELD,
+    parse_manual_hold_snapshot,
+)
 from app.orchestration.graph_invocation import (
     defer_nested_graph_resume,
     is_in_investigation_graph,
@@ -29,6 +34,7 @@ from app.orchestration.graph_resume import (
     GetWorkflowRuntime,
     resume_investigation_from_checkpoint,
 )
+from app.services.context_service import unwrap_journal_value
 from app.services.degraded_flag_service import DegradedFlagService
 
 logger = logging.getLogger(__name__)
@@ -38,6 +44,7 @@ GRAPH_RESUME_AUDIT_OPERATOR = "GraphResumeService"
 GRAPH_RESUME_WRITER = "GraphResumeService"
 _RESUME_MAX_ATTEMPTS = 3
 _RESUME_RETRY_BASE_SECONDS = 0.05
+_RESUME_ERRORS_WITHOUT_NESTED_WAKEUP = frozenset({"manual_resolution_hold"})
 
 ResumeStatus = Literal["ok", "failed", "skipped"]
 
@@ -139,6 +146,27 @@ async def _read_execution_substate(
     return str(substate_raw) if substate_raw is not None else None
 
 
+async def _manual_hold_blocks_resume(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> bool:
+    """True when a durable MANUAL_RESOLUTION hold already owns resume."""
+    substate = await _read_execution_substate(session_factory, event_id)
+    if substate != ExecutionSubstate.MANUAL_RESOLUTION.value:
+        return False
+    async with session_factory() as session:
+        hold_raw = await session.scalar(
+            select(orm.EventContextJournal.value)
+            .where(
+                orm.EventContextJournal.event_id == event_id,
+                orm.EventContextJournal.field_name == MANUAL_HOLD_JOURNAL_FIELD,
+            )
+            .order_by(orm.EventContextJournal.version.desc())
+            .limit(1)
+        )
+    return parse_manual_hold_snapshot(unwrap_journal_value(hold_raw)) is not None
+
+
 async def record_graph_resume_failure(
     session_factory: async_sessionmaker[AsyncSession],
     degraded_flags: DegradedFlagService | None,
@@ -229,6 +257,17 @@ async def execute_graph_resume_with_retry(
             error_type="graph_still_bound",
         )
 
+    if await _manual_hold_blocks_resume(session_factory, event_id):
+        logger.warning(
+            "defer graph resume: durable manual hold owns event=%s",
+            event_id,
+        )
+        raise GraphResumeDeferredError(
+            "cannot resume while a durable manual hold owns the event",
+            event_id=event_id,
+            error_type="manual_resolution_hold",
+        )
+
     last_exc: BaseException | None = None
     for attempt in range(_RESUME_MAX_ATTEMPTS):
         try:
@@ -258,7 +297,8 @@ async def execute_graph_resume_with_retry(
 
     assert last_exc is not None
     if isinstance(last_exc, GraphResumeDeferredError):
-        await persist_nested_graph_wakeup(event_id, last_exc.error_type)
+        if last_exc.error_type not in _RESUME_ERRORS_WITHOUT_NESTED_WAKEUP:
+            await persist_nested_graph_wakeup(event_id, last_exc.error_type)
         logger.warning(
             "graph resume deferred event=%s error_type=%s",
             event_id,

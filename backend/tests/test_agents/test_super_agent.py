@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -538,6 +538,7 @@ def _build_super_agent(
     react_enabled: bool = False,
     transition_max_retries: int = 3,
     transition_retry_backoff_seconds: float = 0.0,
+    investigation_graph: Any | None = None,
 ) -> SuperAgent:
     """Build a SuperAgent with stub agents for isolated testing."""
     resolved_store = _RecordingContextStore() if context_store is ... else context_store
@@ -555,6 +556,7 @@ def _build_super_agent(
         react_enabled=react_enabled,
         transition_max_retries=transition_max_retries,
         transition_retry_backoff_seconds=transition_retry_backoff_seconds,
+        investigation_graph=investigation_graph,
     )
 
 
@@ -699,6 +701,40 @@ class TestSuperAgentGoldenPath:
 
         # Should go directly to CLOSED via close_node, not REPORTING.
         assert events[_EVENT_ID]["status"] == EventStatus.CLOSED
+
+    async def test_nested_graph_resume_error_does_not_fail_event(self) -> None:
+        """Nested wakeup persist failure after halt must not burn the event FAILED."""
+        from app.orchestration.graph_invocation import NestedGraphResumeError
+
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.WAITING_APPROVAL},
+        }
+        event_service = _MockEventService(events)
+        agent = _build_super_agent(
+            event_service=event_service,
+            investigation_graph=object(),
+        )
+        with (
+            patch(
+                "app.orchestration.workflow_graph.build_initial_investigation_state",
+                new=AsyncMock(return_value={}),
+            ),
+            patch(
+                "app.orchestration.workflow_graph.invoke_investigation_graph",
+                new=AsyncMock(
+                    side_effect=NestedGraphResumeError(
+                        "nested graph wakeup persist failed",
+                        event_id=_EVENT_ID,
+                        pending=[_EVENT_ID],
+                        error_type="nested_wakeup_persist_failed",
+                    )
+                ),
+            ),
+        ):
+            await agent.investigate(_EVENT_ID)
+
+        assert events[_EVENT_ID]["status"] is not EventStatus.FAILED
+        assert events[_EVENT_ID]["status"] == EventStatus.WAITING_APPROVAL
 
 
 class TestConcurrentTrigger:

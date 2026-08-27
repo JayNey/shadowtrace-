@@ -532,7 +532,7 @@ class TestEventHandlers:
 
     @pytest.mark.asyncio
     async def test_join_global_rejoins_after_subscribe(self, sio: socketio.AsyncServer) -> None:
-        """join_global re-enters global and leaves the prior event room."""
+        """join_global re-enters global without dropping the prior event room."""
         sid = _fake_sid()
         event_id = "evt-20260712-rejoinglobal"
 
@@ -554,7 +554,34 @@ class TestEventHandlers:
 
         ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
         assert sid in ns_rooms.get(GLOBAL_ROOM, {})
-        assert sid not in ns_rooms.get(_event_room(event_id), {})
+        assert sid in ns_rooms.get(_event_room(event_id), {})
+
+    @pytest.mark.asyncio
+    async def test_join_global_does_not_drop_other_event_rooms(
+        self, sio: socketio.AsyncServer
+    ) -> None:
+        sid = _fake_sid()
+        first = "evt-20260712-room-a"
+        second = "evt-20260712-room-b"
+
+        _connect_session(sio, sid)
+        connect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
+        assert connect_handler is not None
+        await connect_handler(sid, _auth_environ(), None)
+
+        sub_h = sio.handlers[SOCKETIO_NAMESPACE].get("subscribe")
+        assert sub_h is not None
+        await sub_h(sid, {"event_id": first})
+        await sub_h(sid, {"event_id": second})
+
+        join_h = sio.handlers[SOCKETIO_NAMESPACE].get("join_global")
+        assert join_h is not None
+        await join_h(sid, {})
+
+        ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
+        assert sid in ns_rooms.get(GLOBAL_ROOM, {})
+        assert sid in ns_rooms.get(_event_room(first), {})
+        assert sid in ns_rooms.get(_event_room(second), {})
 
     @pytest.mark.asyncio
     async def test_leave_event_drops_event_room_without_joining_global(

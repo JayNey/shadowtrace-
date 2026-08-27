@@ -465,6 +465,32 @@ async def test_start_renewal_uses_live_lease_ttl_when_ttl_key_missing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_start_renewal_fail_closes_when_remaining_ttl_below_renew_interval() -> None:
+    from app.orchestration.lease import RENEW_INTERVAL_S, _lease_key
+
+    fake_redis = _FakeRedis()
+    lease = _lease_with_fake(fake_redis)
+    await lease.acquire("evt-short-ttl", _OWNER, ttl_s=120)
+    for key in [stored for stored in list(fake_redis._store) if stored.endswith(":ttl")]:
+        fake_redis._store.pop(key)
+        fake_redis._ttls.pop(key, None)
+    fake_redis._ttls[_lease_key("evt-short-ttl")] = RENEW_INTERVAL_S - 1
+    lease._acquired_ttl.clear()
+    renewal_failed = asyncio.Event()
+    task = await lease.start_renewal(
+        "evt-short-ttl",
+        _OWNER,
+        on_renewal_failed=renewal_failed,
+    )
+    try:
+        assert renewal_failed.is_set()
+        await asyncio.sleep(0)
+        assert fake_redis.expire_calls == []
+    finally:
+        await _cancel_renew_task(task)
+
+
+@pytest.mark.asyncio
 async def test_start_renewal_fail_closes_when_lease_key_absent() -> None:
     fake_redis = _FakeRedis()
     lease = _lease_with_fake(fake_redis)
