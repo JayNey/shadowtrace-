@@ -534,26 +534,26 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             # EXECUTING may mean: (a) in progress → wait; (b) stuck/zombie → escalate.
             if action.status == ActionStatus.EXECUTING:
                 job = jobs_map.get(action.action_id)
+                accepted_wait = _action_has_accepted_writeback(action, outboxes)
                 timeout_s = (
-                    _ACCEPTED_WAIT_SECONDS
-                    if _action_has_accepted_writeback(action, outboxes)
-                    else _EXECUTING_TIMEOUT_SECONDS
+                    _ACCEPTED_WAIT_SECONDS if accepted_wait else _EXECUTING_TIMEOUT_SECONDS
                 )
                 now_utc = datetime.now(UTC)
                 anchor = _executing_timeout_anchor(action, job, outboxes)
-                if (
+                missing_accepted_clock = accepted_wait and anchor is None
+                timed_out = missing_accepted_clock or (
                     anchor is not None
                     and (now_utc - anchor).total_seconds() > timeout_s
-                ):
-                    # Zombie Action — stuck in EXECUTING past the timeout.
-                    # The execution job may have completed but the Action
-                    # status was never CAS-synced (or the runner crashed).
+                )
+                if timed_out:
+                    # Zombie Action — stuck in EXECUTING past the timeout, or
+                    # ACCEPTED with no measurable clock (fail-close: cannot wait).
                     logger.warning(
                         "Action %s stuck in EXECUTING for >%ss (anchor=%s) "
                         "event=%s — escalating to manual resolution",
                         action.action_id,
                         timeout_s,
-                        anchor.isoformat(),
+                        "none" if anchor is None else anchor.isoformat(),
                         event_id,
                     )
                     results.append(
@@ -2230,6 +2230,7 @@ def _executing_timeout_anchor(
         updated = getattr(action, "updated_at", None)
         if isinstance(updated, datetime):
             return updated
+        # No measurable ACCEPTED clock — caller fail-closes instead of waiting forever.
         return None
     if job is not None:
         return job.started_at

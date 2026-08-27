@@ -913,6 +913,17 @@ def _recovery_invariant_failure_patch(event_id: str) -> InvestigationState:
     )
 
 
+async def _persist_writeback_wait_wakeup(event_id: str, reason: str) -> None:
+    """Durable nested wakeup so WAIT halt is not a silent stall."""
+    from app.orchestration.graph_invocation import (
+        defer_nested_graph_resume,
+        persist_nested_graph_wakeup,
+    )
+
+    defer_nested_graph_resume(event_id)
+    await persist_nested_graph_wakeup(event_id, reason or "writeback_wait")
+
+
 def _pending_action_wait_patch(
     *,
     pending_actions: list[str],
@@ -984,6 +995,7 @@ async def writeback_recovery_graph_node(
                 pending_actions,
                 event_id,
             )
+            await _persist_writeback_wait_wakeup(event_id, "writeback_wait")
             return _pending_action_wait_patch(pending_actions=pending_actions)
         if need_recovery:
             logger.error(
@@ -1088,8 +1100,13 @@ async def writeback_recovery_graph_node(
 
     if result.action is WritebackRecoveryAction.WAIT:
         # WAIT is non-terminal: retain the current writeback so a receipt-triggered
-        # resume can re-evaluate the same real outbox ID.
+        # resume can re-evaluate the same real outbox ID. Nested wakeup is required
+        # because the graph node sets halted=True and ACCEPTED reclaim is skipped.
         remaining_recoverable = failed_writebacks
+        await _persist_writeback_wait_wakeup(
+            event_id,
+            result.reason or "writeback_wait",
+        )
         return cast(
             InvestigationState,
             {

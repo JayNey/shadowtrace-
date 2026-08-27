@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -24,8 +24,13 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.services.disposition_sync_service import (
+    MISSING_SOURCE_PRODUCT_ERROR_CODE,
     DispositionSyncService,
+    _is_missing_source_product_fence,
     _OperatorRetryAction,
+    _PausedLookupClaim,
+    _PausedLookupKind,
+    _PausedLookupOutcome,
 )
 
 
@@ -383,4 +388,99 @@ def test_live_outbox_source_product_mismatch_fences_without_mock_fallback(
         svc._resolve_adapter(missing_outbox)
     assert (missing_exc.value.details or {}).get("reason") == "adapter_not_registered"
     assert "mock_xdr" not in registry.list_names()
+
+
+class _PausedRows:
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[Any]:
+        return self._rows
+
+
+class _PausedSession:
+    def __init__(self, rows: list[Any] | None = None, outbox: Any | None = None) -> None:
+        self._rows = rows or []
+        self._outbox = outbox
+
+    def begin(self) -> Any:
+        return self
+
+    async def __aenter__(self) -> Any:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+    async def scalars(self, _stmt: Any) -> _PausedRows:
+        return _PausedRows(self._rows)
+
+    async def scalar(self, _stmt: Any) -> Any:
+        return self._outbox
+
+    async def get(self, _model: Any, _key: str, with_for_update: bool = False) -> Any:
+        return SimpleNamespace()
+
+
+@pytest.mark.asyncio
+async def test_paused_missing_source_product_not_reopened_by_lookup_reconcile() -> None:
+    """PAUSED + missing_source_product must not be claimed or NOT_FOUND→READY."""
+    outbox = SimpleNamespace(
+        outbox_id="obx-missing-product",
+        event_id="evt-missing-product",
+        action_id="act-1",
+        delivery_status=OutboxDeliveryStatus.PAUSED.value,
+        latest_writeback_status=WritebackStatus.UNKNOWN.value,
+        last_error_code=MISSING_SOURCE_PRODUCT_ERROR_CODE,
+        last_error_detail="product missing",
+        locked_by="tok-1",
+        locked_at=None,
+        lease_expires_at=None,
+        next_retry_at=None,
+        updated_at=None,
+        superseded_by_disposition_id=None,
+        idempotency_key="idem-1",
+        command_payload_sha256="abc",
+        command_payload=_command_payload(),
+    )
+    assert _is_missing_source_product_fence(outbox) is True
+
+    adapter = SimpleNamespace(
+        name="mock_xdr",
+        allows_safe_retry=lambda: True,
+    )
+    svc = _service(adapter)
+    svc._resolve_adapter = MagicMock(side_effect=AssertionError("must not claim missing product"))
+    svc._session_factory = lambda: _PausedSession(rows=[outbox])  # type: ignore[method-assign]
+    claims = await svc._claim_paused_outboxes(limit=1)
+    assert claims == []
+    svc._resolve_adapter.assert_not_called()
+    assert outbox.delivery_status == OutboxDeliveryStatus.PAUSED.value
+    assert outbox.last_error_code == MISSING_SOURCE_PRODUCT_ERROR_CODE
+
+    command = DispositionCommand.model_validate(_command_payload())
+    claim = _PausedLookupClaim(
+        outbox_id=outbox.outbox_id,
+        token="tok-1",
+        event_id=outbox.event_id,
+        action_id=outbox.action_id,
+        disposition_id="disp-1",
+        writeback_id="wbk-1",
+        idempotency_key=outbox.idempotency_key,
+        command_payload_sha256=outbox.command_payload_sha256,
+        command=command,
+        adapter=adapter,  # type: ignore[arg-type]
+        provider_job_id=None,
+    )
+    svc._session_factory = lambda: _PausedSession(outbox=outbox)  # type: ignore[method-assign]
+    applied, event_id, status = await svc._apply_paused_lookup_outcome(
+        claim,
+        _PausedLookupOutcome(kind=_PausedLookupKind.NOT_FOUND),
+    )
+    assert applied is False
+    assert event_id is None
+    assert status is None
+    assert outbox.delivery_status == OutboxDeliveryStatus.PAUSED.value
+    assert outbox.last_error_code == MISSING_SOURCE_PRODUCT_ERROR_CODE
+    assert outbox.latest_writeback_status == WritebackStatus.UNKNOWN.value
 

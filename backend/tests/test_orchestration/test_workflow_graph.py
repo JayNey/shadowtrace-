@@ -1790,6 +1790,13 @@ class _ResumeScalarSession:
     async def scalar(self, _stmt: Any) -> str:
         return self._status
 
+    async def scalars(self, _stmt: Any) -> Any:
+        class _Empty:
+            def all(self) -> list[Any]:
+                return []
+
+        return _Empty()
+
     async def execute(self, _stmt: Any) -> _ResumeOutboxExecuteResult:
         return _ResumeOutboxExecuteResult(self._outbox_rows)
 
@@ -3396,8 +3403,15 @@ async def test_verify_node_true_execute_failure_goes_manual() -> None:
 
 
 @pytest.mark.asyncio
-async def test_verify_node_routes_accepted_writeback_to_recovery_not_manual() -> None:
-    """ACCEPTED/EXECUTING execute must not skip writeback recovery into MANUAL."""
+async def test_verify_node_routes_accepted_writeback_to_recovery_not_manual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ACCEPTED + writeback recovery must persist wakeup so Verify can re-run."""
+    persist_wakeup = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.orchestration.workflow_graph.persist_nested_graph_wakeup",
+        persist_wakeup,
+    )
     event_id = "evt-accepted-verify-recovery"
     verify_agent = StubAgent(
         VerificationResult(
@@ -3418,11 +3432,15 @@ async def test_verify_node_routes_accepted_writeback_to_recovery_not_manual() ->
             event_id=event_id,
             event_status=EventStatus.VERIFYING.value,
             execution_ok=False,
+            execution_inflight=True,
+            execution_inflight_action_ids=["act-accepted-1"],
         )
     )
+    persist_wakeup.assert_awaited_once_with(event_id, "execution_inflight_wait")
     assert result["verify_need_writeback_recovery"] is True
     assert result["verify_need_manual_resolution"] is False
     assert result["execution_substate"] == ExecutionSubstate.WAITING_WRITEBACK.value
+    assert result.get("halted") is not True
     assert route_after_verify(result) == ROUTE_WRITEBACK
 
 
@@ -3487,6 +3505,45 @@ async def test_verify_node_real_agent_executing_not_required_does_not_go_manual(
     assert "execution_failed_unverified" not in flags
     assert route_after_verify(result) == ROUTE_HALT
     persist_wakeup.assert_awaited_once_with(event_id, "execution_inflight_wait")
+
+
+@pytest.mark.asyncio
+async def test_verify_inflight_plus_need_writeback_still_persists_wakeup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persist_wakeup = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.orchestration.workflow_graph.persist_nested_graph_wakeup",
+        persist_wakeup,
+    )
+    event_id = "evt-inflight-plus-wb"
+    verify_agent = StubAgent(
+        VerificationResult(
+            overall_status=VerificationOverallStatus.PARTIAL,
+            verification_phase=VerificationPhase.DISPOSITION,
+            need_writeback_recovery=True,
+            recoverable_writeback_ids=["wbk-inflight-1"],
+            failed_writebacks=["wbk-inflight-1"],
+        )
+    )
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    graph = build_investigation_graph(_agents_with_verify(verify_agent), _services(machine))
+    result = await graph.nodes[NODE_VERIFY].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.VERIFYING.value,
+            execution_ok=False,
+            execution_inflight=True,
+            execution_inflight_action_ids=["act-exec-1"],
+        )
+    )
+    persist_wakeup.assert_awaited_once_with(event_id, "execution_inflight_wait")
+    assert result["verify_need_writeback_recovery"] is True
+    assert result.get("halted") is not True
+    assert route_after_verify(result) == ROUTE_WRITEBACK
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,7 @@ from app.core.errors import ValidationError
 from app.db import models as orm
 from app.models.agent_io import EvidenceOutput, RiskAssessment
 from app.models.enums import (
+    ActionCategory,
     ActionStatus,
     DispositionIntentKind,
     DispositionPolicy,
@@ -369,6 +370,117 @@ async def _sync_execution_substate(
         ) from exc
 
 
+async def _load_response_actions_for_resume(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> list[Any]:
+    """Load current-revision response Actions. Empty if the session cannot scalars()."""
+    from app.services.action_mapper import action_from_orm
+
+    async with session_factory() as session:
+        scalars = getattr(session, "scalars", None)
+        if scalars is None:
+            return []
+        rows = (
+            await scalars(
+                select(orm.Action).where(
+                    orm.Action.event_id == event_id,
+                    orm.Action.action_category == ActionCategory.RESPONSE.value,
+                    orm.Action.superseded_by_revision.is_(None),
+                    orm.Action.status != ActionStatus.SUPERSEDED.value,
+                )
+            )
+        ).all()
+    actions = [action_from_orm(row) for row in rows]
+    if not actions:
+        return []
+    latest = max(int(action.plan_revision or 0) for action in actions)
+    return [action for action in actions if int(action.plan_revision or 0) == latest]
+
+
+def _plan_actions_fully_decided(actions: list[Any]) -> bool:
+    from app.services.approval_engine import _APPROVAL_TERMINAL
+
+    if not actions:
+        return False
+    return all(action.status in _APPROVAL_TERMINAL for action in actions)
+
+
+async def _get_resume_state_machine() -> Any:
+    from app.api.v1.deps import get_state_machine
+
+    return await get_state_machine()
+
+
+async def _advance_waiting_approval_if_plan_decided(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> None:
+    """CAS-advance WAITING_APPROVAL when the plan is fully decided.
+
+    Still waiting on a human decision → GraphResumeDeferredError.
+    Fully decided but the status CAS fails → GraphResumeFailedError.
+    """
+    from app.orchestration.graph_resume_observability import (
+        GraphResumeDeferredError,
+        GraphResumeFailedError,
+    )
+    from app.services.approval_engine import (
+        APPROVAL_ENGINE_OPERATOR,
+        resolve_plan_advance_target,
+    )
+
+    actions = await _load_response_actions_for_resume(session_factory, event_id)
+    if not _plan_actions_fully_decided(actions):
+        raise GraphResumeDeferredError(
+            "cannot resume while event is still WAITING_APPROVAL",
+            event_id=event_id,
+            error_type="waiting_approval",
+        )
+    target = resolve_plan_advance_target(actions)
+    if target is None:
+        raise GraphResumeFailedError(
+            "fully decided plan has no legal EventStatus advance target",
+            event_id=event_id,
+            error_type="plan_advance_failed",
+        )
+
+    machine = await _get_resume_state_machine()
+    try:
+        await machine.transition(
+            event_id,
+            target,
+            operator=APPROVAL_ENGINE_OPERATOR,
+            reason="plan_fully_decided",
+        )
+    except Exception as exc:
+        current = await _read_event_status(session_factory, event_id)
+        if current in {
+            target.value,
+            EventStatus.EXECUTING_RESPONSE.value,
+            EventStatus.REPORTING.value,
+        }:
+            logger.info(
+                "plan advance CAS raced but status already advanced event=%s status=%s",
+                event_id,
+                current,
+            )
+            return
+        raise GraphResumeFailedError(
+            f"plan advance CAS failed while WAITING_APPROVAL target={target.value}",
+            event_id=event_id,
+            error_type="plan_advance_failed",
+        ) from exc
+
+    advanced = await _read_event_status(session_factory, event_id)
+    if advanced == EventStatus.WAITING_APPROVAL.value:
+        raise GraphResumeFailedError(
+            "plan advance committed but event remained WAITING_APPROVAL",
+            event_id=event_id,
+            error_type="plan_advance_failed",
+        )
+
+
 async def prepare_graph_resume_state(
     session_factory: async_sessionmaker[AsyncSession],
     graph: Any,
@@ -386,6 +498,9 @@ async def prepare_graph_resume_state(
         return False
 
     status_value = await _read_event_status(session_factory, event_id)
+    if status_value == EventStatus.WAITING_APPROVAL.value:
+        await _advance_waiting_approval_if_plan_decided(session_factory, event_id)
+        status_value = await _read_event_status(session_factory, event_id)
     if status_value in {
         EventStatus.FAILED.value,
         EventStatus.CLOSED.value,
@@ -461,19 +576,6 @@ async def prepare_graph_resume_state(
                 as_node=NODE_APPROVAL,
             )
         return True
-
-    if status_value == EventStatus.WAITING_APPROVAL.value:
-        from app.orchestration.graph_resume_observability import GraphResumeDeferredError
-
-        logger.warning(
-            "prepare_graph_resume: still WAITING_APPROVAL event=%s; deferring resume",
-            event_id,
-        )
-        raise GraphResumeDeferredError(
-            "cannot resume while event is still WAITING_APPROVAL",
-            event_id=event_id,
-            error_type="waiting_approval",
-        )
 
     if status_value != EventStatus.EXECUTING_RESPONSE.value:
         logger.warning(
@@ -753,6 +855,9 @@ async def resume_investigation_from_checkpoint(
     agent = await get_super_agent()
     graph = getattr(agent, "_investigation_graph", None)
     status_value = await _read_event_status(session_factory, event_id)
+    if status_value == EventStatus.WAITING_APPROVAL.value:
+        await _advance_waiting_approval_if_plan_decided(session_factory, event_id)
+        status_value = await _read_event_status(session_factory, event_id)
     if status_value in _NO_FULL_GRAPH_RESTART_STATUSES:
         if status_value in {EventStatus.CLOSED.value, EventStatus.FAILED.value}:
             logger.info(
@@ -792,15 +897,6 @@ async def resume_investigation_from_checkpoint(
                 event_id,
             )
         return
-
-    if status_value == EventStatus.WAITING_APPROVAL.value:
-        from app.orchestration.graph_resume_observability import GraphResumeDeferredError
-
-        raise GraphResumeDeferredError(
-            "cannot resume while event is still WAITING_APPROVAL",
-            event_id=event_id,
-            error_type="waiting_approval",
-        )
 
     if graph is None:
         if status_value in _GRAPH_NEVER_STARTED_STATUSES:

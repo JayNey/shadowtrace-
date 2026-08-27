@@ -416,8 +416,12 @@ async def execute_redelivery_resume(
             get_workflow_runtime=get_workflow_runtime,
             degraded_flags=_get_degraded_flags(),
         )
-    except GraphResumeDeferredError:
-        return {"status": "deferred", "event_id": event_id}
+    except GraphResumeDeferredError as exc:
+        return {
+            "status": "deferred",
+            "event_id": event_id,
+            "reason": exc.error_type or "graph_resume_deferred",
+        }
     return {"status": "completed", "event_id": event_id}
 
 
@@ -505,6 +509,14 @@ async def _finalize_intent_from_result(
 
     service = InvestigationIntentService(get_session_factory())
     status = str(result.get("status") or "")
+    if status == "deferred":
+        reason = str(result.get("reason") or "graph_resume_deferred")
+        await service.mark_retry(
+            intent_id,
+            error=reason,
+            broker_task_id=broker_task_id,
+        )
+        return
     if status == "skipped":
         reason = str(result.get("reason") or "investigation_skipped")
         if reason in {"investigation_in_progress", "investigation_lease_lost"}:
@@ -521,11 +533,11 @@ async def _finalize_intent_from_result(
             reason=reason,
             broker_task_id=broker_task_id,
         )
-    else:
-        await service.mark_terminal(
-            intent_id,
-            broker_task_id=broker_task_id,
-        )
+        return
+    await service.mark_terminal(
+        intent_id,
+        broker_task_id=broker_task_id,
+    )
 
 
 async def resolve_task_state(task_id: str) -> tuple[str, str | None]:

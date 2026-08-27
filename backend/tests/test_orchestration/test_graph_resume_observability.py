@@ -39,6 +39,13 @@ class _ScalarSession:
     async def scalar(self, _stmt: Any) -> str:
         return self._status
 
+    async def scalars(self, _stmt: Any) -> Any:
+        class _Empty:
+            def all(self) -> list[Any]:
+                return []
+
+        return _Empty()
+
     def add(self, _row: Any) -> None:
         return None
 

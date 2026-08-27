@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -41,6 +42,11 @@ class _SessionFactory:
         return _SessionCtx(self._status, outbox_rows=self._outbox_rows)
 
 
+class _EmptyScalarsResult:
+    def all(self) -> list[Any]:
+        return []
+
+
 class _OutboxExecuteResult:
     def __init__(self, rows: list[OutboxRow]) -> None:
         self._rows = rows
@@ -61,6 +67,9 @@ class _ScalarSession:
 
     async def scalar(self, _stmt: Any) -> str:
         return self._status
+
+    async def scalars(self, _stmt: Any) -> _EmptyScalarsResult:
+        return _EmptyScalarsResult()
 
     async def execute(self, _stmt: Any) -> _OutboxExecuteResult:
         return _OutboxExecuteResult(self._outbox_rows)
@@ -910,3 +919,75 @@ async def test_resume_defers_when_event_lease_held() -> None:
 
     assert exc_info.value.error_type == "investigation_in_progress"
     graph.ainvoke.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_maybe_advance_plan_transition_cas_failure_still_advances_or_fail_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fully decided WAITING_APPROVAL: CAS failure fail-closes; success continues resume."""
+    from app.orchestration.graph_resume_observability import GraphResumeFailedError
+
+    approved = SimpleNamespace(
+        status=ActionStatus.APPROVED,
+        tool_name="block_ip",
+        writeback_required=False,
+        plan_revision=1,
+    )
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume._load_response_actions_for_resume",
+        AsyncMock(return_value=[approved]),
+    )
+    factory = _SessionFactory(EventStatus.WAITING_APPROVAL.value)
+    machine = MagicMock()
+    machine.transition = AsyncMock(side_effect=RuntimeError("cas conflict"))
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume._get_resume_state_machine",
+        AsyncMock(return_value=machine),
+    )
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=MagicMock(values={"halted": True}))
+    graph.aupdate_state = AsyncMock()
+    agent = MagicMock()
+    agent._investigation_graph = graph
+    agent.lease = None
+    runtime = MagicMock()
+    runtime.set_execution_substate = AsyncMock()
+
+    with pytest.raises(GraphResumeFailedError) as exc_info:
+        await resume_investigation_from_checkpoint(
+            factory,
+            "evt-cas-fail",
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=runtime),
+        )
+    assert exc_info.value.error_type == "plan_advance_failed"
+    graph.ainvoke.assert_not_called()
+
+    async def _succeed(_event_id: str, target: EventStatus, **_kwargs: Any) -> None:
+        factory._status = target.value
+
+    machine.transition = AsyncMock(side_effect=_succeed)
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "halted": True,
+                "needs_approval_wait": True,
+                "execution_substate": ExecutionSubstate.WAITING_APPROVAL.value,
+            }
+        )
+    )
+    with patch(
+        "app.orchestration.graph_resume.invoke_investigation_graph",
+        new_callable=AsyncMock,
+    ) as invoke:
+        await resume_investigation_from_checkpoint(
+            factory,
+            "evt-cas-ok",
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=runtime),
+        )
+    invoke.assert_awaited_once()
+    machine.transition.assert_awaited()
+    assert factory._status == EventStatus.EXECUTING_RESPONSE.value

@@ -1315,3 +1315,89 @@ class TestVerifyToRecoveryContract:
         assert result["halted"] is True
         assert result["verify_pending_writeback_action_ids"] == ["act-legacy-001"]
         assert result["verify_recoverable_writeback_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_writeback_lookup_exception_wait_enqueues_nested_wakeup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persist_wakeup = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.orchestration.graph_invocation.persist_nested_graph_wakeup",
+        persist_wakeup,
+    )
+    ds = FakeDispositionSync()
+    ds._lookup_raises = RuntimeError("lookup down")
+    handler = WritebackRecoveryHandler(
+        state_machine=FakeStateMachine(),
+        runtime=FakeRuntime(),
+        disposition_sync=ds,
+    )
+    state = _base_state(
+        verify_failed_writebacks=["wbk-lookup-exc"],
+        verify_recoverable_writeback_ids=["wbk-lookup-exc"],
+        verify_writeback_status="unknown",
+    )
+    result = await writeback_recovery_graph_node(state, handler=handler)
+    assert result["halted"] is True
+    assert result["verify_need_writeback_recovery"] is True
+    persist_wakeup.assert_awaited_once_with("evt-test-wb-001", "lookup_exception_wait")
+
+
+@pytest.mark.asyncio
+async def test_writeback_retry_exception_wait_enqueues_nested_wakeup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persist_wakeup = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.orchestration.graph_invocation.persist_nested_graph_wakeup",
+        persist_wakeup,
+    )
+    monkeypatch.setattr(
+        "app.orchestration.writeback_recovery_handler._backoff_with_jitter",
+        lambda _n: 0,
+    )
+    monkeypatch.setattr(
+        "app.orchestration.writeback_recovery_handler.asyncio.sleep",
+        AsyncMock(),
+    )
+    ds = FakeDispositionSync()
+    ds._retry_raises = RuntimeError("retry down")
+    handler = WritebackRecoveryHandler(
+        state_machine=FakeStateMachine(),
+        runtime=FakeRuntime(),
+        disposition_sync=ds,
+    )
+    state = _base_state(
+        verify_failed_writebacks=["wbk-retry-exc"],
+        verify_recoverable_writeback_ids=["wbk-retry-exc"],
+        verify_writeback_status="failed",
+    )
+    result = await writeback_recovery_graph_node(state, handler=handler)
+    assert result["halted"] is True
+    assert result["verify_need_writeback_recovery"] is True
+    persist_wakeup.assert_awaited_once_with("evt-test-wb-001", "retry_exception_wait")
+
+
+@pytest.mark.asyncio
+async def test_writeback_accepted_wait_enqueues_nested_wakeup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persist_wakeup = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.orchestration.graph_invocation.persist_nested_graph_wakeup",
+        persist_wakeup,
+    )
+    handler = WritebackRecoveryHandler(
+        state_machine=FakeStateMachine(),
+        runtime=FakeRuntime(),
+    )
+    state = _base_state(
+        verify_failed_writebacks=["wbk-accepted-wait"],
+        verify_recoverable_writeback_ids=["wbk-accepted-wait"],
+        verify_writeback_status="accepted",
+    )
+    result = await writeback_recovery_graph_node(state, handler=handler)
+    assert result["halted"] is True
+    assert result["verify_need_writeback_recovery"] is True
+    persist_wakeup.assert_awaited_once_with("evt-test-wb-001", "waiting_accepted")

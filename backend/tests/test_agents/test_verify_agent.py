@@ -4474,7 +4474,10 @@ class TestIssue060ReviewNewTests:
             action_id=action.action_id,
             started_at=stale_start,
         )
-        outbox = SimpleNamespace(latest_writeback_status=WritebackStatus.ACCEPTED.value)
+        outbox = SimpleNamespace(
+            latest_writeback_status=WritebackStatus.ACCEPTED.value,
+            updated_at=datetime.now(UTC) - timedelta(seconds=60),
+        )
         agent = VerifyAgent(
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
@@ -4560,6 +4563,44 @@ class TestIssue060ReviewNewTests:
             latest_writeback_status=WritebackStatus.ACCEPTED.value,
             updated_at=datetime.now(UTC) - timedelta(seconds=_ACCEPTED_WAIT_SECONDS + 5),
         )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {action.action_id: job}, {action.action_id: [outbox]})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.UNVERIFIABLE
+        assert r.detail == "execution_timeout"
+        assert result.need_manual_resolution is True
+
+    async def test_accepted_executing_without_timestamps_escalates_manual(self):
+        """ACCEPTED without a measurable clock must fail-close, not wait forever."""
+        from types import SimpleNamespace
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,
+            execution_job_id="job-accepted-no-clock",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.ACCEPTED,
+            updated_at=None,
+        )
+        job = _job(
+            job_id="job-accepted-no-clock",
+            action_id=action.action_id,
+            started_at=datetime.now(UTC),
+        )
+        outbox = SimpleNamespace(latest_writeback_status=WritebackStatus.ACCEPTED.value)
         agent = VerifyAgent(
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),

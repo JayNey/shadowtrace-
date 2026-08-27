@@ -2269,31 +2269,32 @@ def build_investigation_graph(
 
         # In-flight EXECUTING/ACCEPTED must WAIT/recovery — never collapse into
         # execution_failed_unverified (which forces MANUAL_RESOLUTION).
-        if execution_inflight and not agent_routed:
-            await runtime.set_execution_substate(
-                state["event_id"],
-                ExecutionSubstate.WAITING_WRITEBACK,
-                event_status=EventStatus.VERIFYING,
-            )
+        if execution_inflight:
             defer_nested_graph_resume(state["event_id"])
             await persist_nested_graph_wakeup(
                 state["event_id"],
                 "execution_inflight_wait",
             )
-            return _patch_state(
-                _trace(NODE_VERIFY),
-                plan_patch,
-                {
-                    **update,
-                    "execution_inflight": True,
-                    "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
-                    "halted": True,
-                    "verify_need_action_replan": False,
-                    "verify_need_writeback_recovery": True,
-                    "verify_need_manual_resolution": False,
-                    "verify_pending_writeback_action_ids": pending_inflight_ids,
-                },
-            )
+            if not agent_routed:
+                await runtime.set_execution_substate(
+                    state["event_id"],
+                    ExecutionSubstate.WAITING_WRITEBACK,
+                    event_status=EventStatus.VERIFYING,
+                )
+                return _patch_state(
+                    _trace(NODE_VERIFY),
+                    plan_patch,
+                    {
+                        **update,
+                        "execution_inflight": True,
+                        "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+                        "halted": True,
+                        "verify_need_action_replan": False,
+                        "verify_need_writeback_recovery": True,
+                        "verify_need_manual_resolution": False,
+                        "verify_pending_writeback_action_ids": pending_inflight_ids,
+                    },
+                )
 
         # True execute failure (FAILED / missing summary) with no VerifyAgent
         # routing signal — fail closed to MANUAL_RESOLUTION.

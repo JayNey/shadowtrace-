@@ -68,6 +68,28 @@ APPROVAL_ENGINE_OPERATOR = "ApprovalEngine"
 ResumeHook = Callable[[str], Awaitable[None]]
 
 _APPROVAL_TERMINAL = frozenset({ActionStatus.APPROVED, ActionStatus.REJECTED})
+
+
+def resolve_plan_advance_target(actions: list[Action]) -> EventStatus | None:
+    """Return the EventStatus to CAS after a fully decided plan, or None."""
+    approved = [a for a in actions if a.status is ActionStatus.APPROVED]
+    rejected = [a for a in actions if a.status is ActionStatus.REJECTED]
+    deferred = [a for a in actions if a.tool_name == TERMINAL_DISPOSITION_TOOL]
+    deferred_approved = any(a.status is ActionStatus.APPROVED for a in deferred)
+    deferred_rejected = any(a.status is ActionStatus.REJECTED for a in deferred)
+    required = any(a.writeback_required for a in actions)
+
+    if approved and (not required or deferred_approved):
+        return EventStatus.EXECUTING_RESPONSE
+    if rejected and not approved:
+        return EventStatus.REPORTING
+    if required and deferred_rejected:
+        return EventStatus.REPORTING
+    if approved:
+        return EventStatus.REPORTING
+    return None
+
+
 # Lifecycle statuses reachable after a human approve (not the decision itself).
 _POST_APPROVE_LIFECYCLE = frozenset(
     {
@@ -897,22 +919,7 @@ class ApprovalEngine:
         if not await self.is_plan_fully_decided(event_id, plan_revision):
             return None
         actions = await self._load_plan_response_actions(event_id, plan_revision)
-        approved = [a for a in actions if a.status is ActionStatus.APPROVED]
-        rejected = [a for a in actions if a.status is ActionStatus.REJECTED]
-        deferred = [a for a in actions if a.tool_name == TERMINAL_DISPOSITION_TOOL]
-        deferred_approved = any(a.status is ActionStatus.APPROVED for a in deferred)
-        deferred_rejected = any(a.status is ActionStatus.REJECTED for a in deferred)
-        required = any(a.writeback_required for a in actions)
-
-        target: EventStatus | None = None
-        if approved and (not required or deferred_approved):
-            target = EventStatus.EXECUTING_RESPONSE
-        elif rejected and not approved:
-            target = EventStatus.REPORTING
-        elif required and deferred_rejected:
-            target = EventStatus.REPORTING
-        elif approved:
-            target = EventStatus.REPORTING
+        target = resolve_plan_advance_target(actions)
 
         if target is not None and self._state_machine is not None:
             status = await self._event_status(event_id)

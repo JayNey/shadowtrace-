@@ -106,6 +106,12 @@ ResumeInvestigationHook = Callable[[str], Awaitable[None]]
 _DEFAULT_LEASE_SECONDS = 30
 _ERROR_DETAIL_MAX_LEN = 500
 OUTBOX_SUPERSEDED_ERROR_CODE = "superseded_by_new_head"
+MISSING_SOURCE_PRODUCT_ERROR_CODE = "missing_source_product"
+
+
+def _is_missing_source_product_fence(outbox: Any) -> bool:
+    """Locator was never submitted because source_product is missing."""
+    return getattr(outbox, "last_error_code", None) == MISSING_SOURCE_PRODUCT_ERROR_CODE
 _OPERATOR_RETRY_REPLAY_PREFIX = "operator_retry:replay"
 _OPERATOR_RETRY_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
@@ -2458,7 +2464,7 @@ class DispositionSyncService:
             self._pause_outbox_after_unknown_submission(
                 outbox,
                 now=datetime.now(UTC),
-                error_code="missing_source_product",
+                error_code=MISSING_SOURCE_PRODUCT_ERROR_CODE,
                 error_detail=str(exc),
             )
         return True
@@ -2749,6 +2755,11 @@ class DispositionSyncService:
                                 orm.DispositionOutbox.lease_expires_at.is_(None),
                                 orm.DispositionOutbox.lease_expires_at <= now,
                             ),
+                            or_(
+                                orm.DispositionOutbox.last_error_code.is_(None),
+                                orm.DispositionOutbox.last_error_code
+                                != MISSING_SOURCE_PRODUCT_ERROR_CODE,
+                            ),
                         )
                         .order_by(orm.DispositionOutbox.updated_at.asc())
                         .limit(limit)
@@ -2756,6 +2767,8 @@ class DispositionSyncService:
                     )
                 ).all()
                 for row in rows:
+                    if _is_missing_source_product_fence(row):
+                        continue
                     try:
                         command = DispositionCommand.model_validate(row.command_payload)
                         adapter = self._resolve_adapter(row)
@@ -2894,6 +2907,8 @@ class DispositionSyncService:
                     return False, outbox.event_id, WritebackStatus.UNKNOWN
 
                 if outcome.kind is _PausedLookupKind.NOT_FOUND:
+                    if _is_missing_source_product_fence(outbox):
+                        return False, None, None
                     if is_deterministic_adapter_rejection_code(
                         getattr(outbox, "last_error_code", None),
                     ):
