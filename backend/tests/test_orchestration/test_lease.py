@@ -26,11 +26,17 @@ class _FakeRedis:
     ) -> None:
         self._owner_id = owner_id
         self._renew_side_effect = renew_side_effect
+        self._store: dict[str, bytes] = {}
         self.get_calls: list[str] = []
         self.expire_calls: list[tuple[str, int]] = []
 
     async def get(self, key: str) -> bytes | None:
         self.get_calls.append(key)
+        stored = self._store.get(key)
+        if stored is not None:
+            return stored
+        if key.endswith(":ttl"):
+            return None
         return self._owner_id.encode("utf-8")
 
     async def expire(self, key: str, ttl: int) -> bool:
@@ -42,6 +48,10 @@ class _FakeRedis:
         return True
 
     async def set(self, *args: object, **kwargs: object) -> bool:
+        key = str(args[0]) if args else str(kwargs.get("name", ""))
+        value = args[1] if len(args) > 1 else kwargs.get("value", "")
+        encoded = value if isinstance(value, bytes) else str(value).encode("utf-8")
+        self._store[key] = encoded
         return True
 
     def register_script(self, script: str) -> object:
@@ -61,7 +71,12 @@ class _FakeRedis:
                     return 0
                 ttl = int(args[1]) if len(args) > 1 else 600
                 await self.expire(key, ttl)
+                if len(keys) > 1:
+                    await self.set(keys[1], str(ttl), ex=ttl)
                 return 1
+            if len(keys) > 1:
+                self._store.pop(keys[1], None)
+            self._store.pop(key, None)
             return 1
 
         return _run
@@ -368,6 +383,22 @@ async def test_start_renewal_reuses_acquire_ttl() -> None:
         try:
             await _wait_until(lambda: len(fake_redis.expire_calls) >= 1)
             assert fake_redis.expire_calls[0][1] == 120
+        finally:
+            await _cancel_renew_task(task)
+
+
+@pytest.mark.asyncio
+async def test_start_renewal_reads_persisted_ttl_after_process_rebind() -> None:
+    """Celery loop-rebind drops _acquired_ttl; Redis TTL key must still win over 600s."""
+    fake_redis = _FakeRedis()
+    lease = _lease_with_fake(fake_redis)
+    await lease.acquire("evt-rebind-ttl", _OWNER, ttl_s=90)
+    lease._acquired_ttl.clear()
+    async with _fast_renew_loop():
+        task = await lease.start_renewal("evt-rebind-ttl", _OWNER)
+        try:
+            await _wait_until(lambda: len(fake_redis.expire_calls) >= 1)
+            assert fake_redis.expire_calls[0][1] == 90
         finally:
             await _cancel_renew_task(task)
 

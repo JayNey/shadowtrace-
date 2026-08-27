@@ -2205,6 +2205,21 @@ def _action_has_accepted_writeback(
     return False
 
 
+_ACCEPTED_CLOCK_ATTRS = ("delivered_at", "observed_at", "submitted_at")
+
+
+def _accepted_wait_clock(record: Any) -> datetime | None:
+    """First accept-time stamp on an outbox or receipt. Never ORM ``updated_at``."""
+    stamps: list[datetime] = []
+    for attr in _ACCEPTED_CLOCK_ATTRS:
+        ts = getattr(record, attr, None)
+        if isinstance(ts, datetime):
+            stamps.append(ts)
+    if not stamps:
+        return None
+    return min(stamps)
+
+
 def _executing_timeout_anchor(
     action: Action,
     job: ActionExecutionJob | None,
@@ -2212,9 +2227,9 @@ def _executing_timeout_anchor(
 ) -> datetime | None:
     """Clock for EXECUTING zombie budget.
 
-    ACCEPTED work is measured from the latest ACCEPTED outbox timestamp (or
-    action.updated_at), not from original job start — otherwise a long queue
-    burns the 1800s wait before the provider has even accepted.
+    ACCEPTED work is measured from accept time (``delivered_at``, or receipt
+    ``observed_at`` / ``submitted_at``), never from auto-refreshing
+    ``updated_at`` or original job start. Missing accept clock fail-closes.
     """
     if _action_has_accepted_writeback(action, outbox_map):
         stamps: list[datetime] = []
@@ -2222,14 +2237,11 @@ def _executing_timeout_anchor(
             raw = getattr(record, "latest_writeback_status", None)
             if raw is not WritebackStatus.ACCEPTED and raw != WritebackStatus.ACCEPTED.value:
                 continue
-            ts = getattr(record, "updated_at", None) or getattr(record, "delivered_at", None)
-            if isinstance(ts, datetime):
+            ts = _accepted_wait_clock(record)
+            if ts is not None:
                 stamps.append(ts)
         if stamps:
-            return max(stamps)
-        updated = getattr(action, "updated_at", None)
-        if isinstance(updated, datetime):
-            return updated
+            return min(stamps)
         # No measurable ACCEPTED clock — caller fail-closes instead of waiting forever.
         return None
     if job is not None:

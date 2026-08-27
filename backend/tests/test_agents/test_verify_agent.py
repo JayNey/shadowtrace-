@@ -4476,7 +4476,8 @@ class TestIssue060ReviewNewTests:
         )
         outbox = SimpleNamespace(
             latest_writeback_status=WritebackStatus.ACCEPTED.value,
-            updated_at=datetime.now(UTC) - timedelta(seconds=60),
+            delivered_at=datetime.now(UTC) - timedelta(seconds=60),
+            updated_at=datetime.now(UTC),
         )
         agent = VerifyAgent(
             working_memory=FakeWorkingMemory(),
@@ -4518,7 +4519,8 @@ class TestIssue060ReviewNewTests:
         )
         outbox = SimpleNamespace(
             latest_writeback_status=WritebackStatus.ACCEPTED.value,
-            updated_at=datetime.now(UTC) - timedelta(seconds=60),
+            delivered_at=datetime.now(UTC) - timedelta(seconds=60),
+            updated_at=datetime.now(UTC),
         )
         agent = VerifyAgent(
             working_memory=FakeWorkingMemory(),
@@ -4561,7 +4563,8 @@ class TestIssue060ReviewNewTests:
         )
         outbox = SimpleNamespace(
             latest_writeback_status=WritebackStatus.ACCEPTED.value,
-            updated_at=datetime.now(UTC) - timedelta(seconds=_ACCEPTED_WAIT_SECONDS + 5),
+            delivered_at=datetime.now(UTC) - timedelta(seconds=_ACCEPTED_WAIT_SECONDS + 5),
+            updated_at=datetime.now(UTC),
         )
         agent = VerifyAgent(
             working_memory=FakeWorkingMemory(),
@@ -4601,6 +4604,50 @@ class TestIssue060ReviewNewTests:
             started_at=datetime.now(UTC),
         )
         outbox = SimpleNamespace(latest_writeback_status=WritebackStatus.ACCEPTED.value)
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {action.action_id: job}, {action.action_id: [outbox]})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.UNVERIFIABLE
+        assert r.detail == "execution_timeout"
+        assert result.need_manual_resolution is True
+
+    async def test_accepted_wait_clock_ignores_outbox_updated_at_onupdate(self):
+        """ORM onupdate updated_at must not reset the 1800s ACCEPTED wait."""
+        from datetime import timedelta
+        from types import SimpleNamespace
+
+        from app.agents.verify_agent import _ACCEPTED_WAIT_SECONDS
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,
+            execution_job_id="job-accepted-onupdate",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.ACCEPTED,
+        )
+        job = _job(
+            job_id="job-accepted-onupdate",
+            action_id=action.action_id,
+            started_at=datetime.now(UTC) - timedelta(seconds=60),
+        )
+        outbox = SimpleNamespace(
+            latest_writeback_status=WritebackStatus.ACCEPTED.value,
+            delivered_at=datetime.now(UTC) - timedelta(seconds=_ACCEPTED_WAIT_SECONDS + 5),
+            updated_at=datetime.now(UTC),
+        )
         agent = VerifyAgent(
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),

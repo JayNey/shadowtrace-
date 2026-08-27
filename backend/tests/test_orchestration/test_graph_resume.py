@@ -28,6 +28,22 @@ from app.orchestration.workflow_graph import NODE_EXECUTE
 OutboxRow = tuple[str, str | None]
 
 
+def _pending_approval_action() -> SimpleNamespace:
+    return SimpleNamespace(
+        status=ActionStatus.WAITING_APPROVAL,
+        tool_name="block_ip",
+        writeback_required=False,
+        plan_revision=1,
+    )
+
+
+def _fresh_event_lease() -> Any:
+    from app.orchestration.lease import EventLease
+    from tests.support.fake_redis import InMemoryFakeRedisClient
+
+    return EventLease(InMemoryFakeRedisClient())
+
+
 class _SessionFactory:
     def __init__(
         self,
@@ -819,6 +835,7 @@ async def test_resume_reporting_with_checkpoint_invokes_graph_not_execute() -> N
     graph.aupdate_state = AsyncMock()
     agent = MagicMock()
     agent._investigation_graph = graph
+    agent.lease = _fresh_event_lease()
 
     runtime = MagicMock()
     runtime.set_execution_substate = AsyncMock()
@@ -871,15 +888,47 @@ async def test_prepare_waiting_approval_raises_distinct_error() -> None:
 
     from app.orchestration.graph_resume_observability import GraphResumeDeferredError
 
-    with pytest.raises(GraphResumeDeferredError) as exc_info:
+    with patch(
+        "app.orchestration.graph_resume._load_response_actions_for_resume",
+        new=AsyncMock(return_value=[_pending_approval_action()]),
+    ):
+        with pytest.raises(GraphResumeDeferredError) as exc_info:
+            await prepare_graph_resume_state(
+                _SessionFactory(EventStatus.WAITING_APPROVAL.value),
+                graph,
+                "evt-waiting-approval",
+                runtime,
+            )
+
+    assert exc_info.value.error_type == "waiting_approval"
+
+
+def test_waiting_approval_empty_response_actions_matches_approval_engine() -> None:
+    from app.services.approval_engine import plan_actions_fully_decided
+
+    pending = _pending_approval_action()
+    approved = SimpleNamespace(status=ActionStatus.APPROVED)
+    assert plan_actions_fully_decided([]) is True
+    assert plan_actions_fully_decided([pending]) is False
+    assert plan_actions_fully_decided([approved]) is True
+
+
+@pytest.mark.asyncio
+async def test_waiting_approval_empty_response_actions_fail_closes() -> None:
+    """Empty WAITING_APPROVAL plan must not defer forever (matches ApprovalEngine)."""
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=MagicMock(values={"halted": True}))
+    runtime = MagicMock()
+
+    with pytest.raises(GraphResumeFailedError) as exc_info:
         await prepare_graph_resume_state(
             _SessionFactory(EventStatus.WAITING_APPROVAL.value),
             graph,
-            "evt-waiting-approval",
+            "evt-empty-plan",
             runtime,
         )
 
-    assert exc_info.value.error_type == "waiting_approval"
+    assert exc_info.value.error_type == "plan_advance_failed"
 
 
 @pytest.mark.asyncio
@@ -922,6 +971,40 @@ async def test_resume_defers_when_event_lease_held() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_without_event_lease_instance_defers_not_ainvoke() -> None:
+    from app.orchestration.graph_resume_observability import GraphResumeDeferredError
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "halted": True,
+                "event_status": EventStatus.EXECUTING_RESPONSE.value,
+            }
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+    graph.ainvoke = AsyncMock()
+    runtime = MagicMock()
+    runtime.set_execution_substate = AsyncMock()
+
+    for lease in (None, object()):
+        agent = MagicMock()
+        agent._investigation_graph = graph
+        agent.lease = lease
+        graph.ainvoke.reset_mock()
+        with pytest.raises(GraphResumeDeferredError) as exc_info:
+            await resume_investigation_from_checkpoint(
+                _SessionFactory(EventStatus.EXECUTING_RESPONSE.value),
+                "evt-lease-missing",
+                get_super_agent=AsyncMock(return_value=agent),
+                get_workflow_runtime=AsyncMock(return_value=runtime),
+            )
+        assert exc_info.value.error_type == "lease_unavailable"
+        graph.ainvoke.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_maybe_advance_plan_transition_cas_failure_still_advances_or_fail_closes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -951,7 +1034,7 @@ async def test_maybe_advance_plan_transition_cas_failure_still_advances_or_fail_
     graph.aupdate_state = AsyncMock()
     agent = MagicMock()
     agent._investigation_graph = graph
-    agent.lease = None
+    agent.lease = _fresh_event_lease()
     runtime = MagicMock()
     runtime.set_execution_substate = AsyncMock()
 

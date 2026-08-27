@@ -83,10 +83,14 @@ class InMemoryFakeRedis:
             self._purge_expired(key)
             entry = self._entries.get(key)
             if entry is None:
+                if len(keys) > 1:
+                    self._entries.pop(keys[1], None)
                 return -1
             if entry.value != owner_id:
                 return 0
             del self._entries[key]
+            if len(keys) > 1:
+                self._entries.pop(keys[1], None)
             return 1
 
         async def _renew(*, keys: list[str], args: list[str]) -> int:
@@ -102,6 +106,8 @@ class InMemoryFakeRedis:
             if entry.value != owner_id:
                 return 0
             entry.expires_at = self._clock() + ttl
+            if len(keys) > 1:
+                await self.set(keys[1], str(ttl), ex=ttl)
             return 1
 
         return _renew if kind == "renew" else _release

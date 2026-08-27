@@ -22,18 +22,22 @@ from app.core.redis_client import RedisClient
 logger = logging.getLogger(__name__)
 
 LEASE_KEY_PREFIX = "shadowtrace:lease:event:"
+LEASE_TTL_KEY_SUFFIX = ":ttl"
 DEFAULT_LEASE_TTL_S = 600
 RENEW_INTERVAL_S = 60
 
 # Lua script: atomically delete the key only when the value matches owner_id.
 # Returns: 1 = deleted, 0 = owner mismatch, -1 = key absent.
+# KEYS[2] is the persisted original-TTL key (best-effort cleanup).
 _RELEASE_SCRIPT = """
 -- shadowtrace-lease-release
 local val = redis.call("GET", KEYS[1])
 if val == false then
+    redis.call("DEL", KEYS[2])
     return -1
 end
 if val == ARGV[1] then
+    redis.call("DEL", KEYS[2])
     return redis.call("DEL", KEYS[1])
 end
 return 0
@@ -41,6 +45,8 @@ return 0
 
 # Lua script: atomically extend TTL only when the value matches owner_id.
 # Returns: 1 = renewed, 0 = owner mismatch, -1 = key absent.
+# KEYS[2] stores the original acquire TTL so a rebound EventLease can renew
+# with the same budget instead of silently falling back to 600s.
 _RENEW_SCRIPT = """
 -- shadowtrace-lease-renew
 local val = redis.call("GET", KEYS[1])
@@ -48,7 +54,9 @@ if val == false then
     return -1
 end
 if val == ARGV[1] then
-    redis.call("EXPIRE", KEYS[1], tonumber(ARGV[2]))
+    local ttl = tonumber(ARGV[2])
+    redis.call("EXPIRE", KEYS[1], ttl)
+    redis.call("SET", KEYS[2], ARGV[2], "EX", ttl)
     return 1
 end
 return 0
@@ -85,6 +93,10 @@ def _require_positive_ttl(ttl_s: int) -> int:
 
 def _lease_key(event_id: str) -> str:
     return f"{LEASE_KEY_PREFIX}{event_id}"
+
+
+def _ttl_key(event_id: str) -> str:
+    return f"{_lease_key(event_id)}{LEASE_TTL_KEY_SUFFIX}"
 
 
 def generate_owner_id() -> str:
@@ -161,6 +173,14 @@ class EventLease:
         acquired = await redis.set(key, owner_id, nx=True, ex=ttl_s)
         if acquired:
             self._acquired_ttl[event_id] = ttl_s
+            try:
+                await redis.set(_ttl_key(event_id), str(ttl_s), ex=ttl_s)
+            except Exception:
+                logger.warning(
+                    "EventLease: failed to persist acquire TTL for event=%s",
+                    event_id,
+                    exc_info=True,
+                )
             logger.info(
                 "EventLease: acquired lease for event=%s owner=%s ttl=%ds",
                 event_id,
@@ -206,7 +226,10 @@ class EventLease:
         ttl_s = _require_positive_ttl(ttl_s)
         key = _lease_key(event_id)
         script = self._script_for(redis, _RENEW_SCRIPT)
-        result: Any = await script(keys=[key], args=[owner_id, str(ttl_s)])
+        result: Any = await script(
+            keys=[key, _ttl_key(event_id)],
+            args=[owner_id, str(ttl_s)],
+        )
         code = int(result) if result is not None else -1
         if code == 1:
             logger.debug(
@@ -245,7 +268,7 @@ class EventLease:
             return False
         key = _lease_key(event_id)
         script = self._script_for(redis, _RELEASE_SCRIPT)
-        result: Any = await script(keys=[key], args=[owner_id])
+        result: Any = await script(keys=[key, _ttl_key(event_id)], args=[owner_id])
         code = int(result) if result is not None else -1
         if code == 1:
             logger.info(
@@ -283,6 +306,20 @@ class EventLease:
             return None
         return value.decode("utf-8") if isinstance(value, bytes) else value
 
+    async def _read_persisted_ttl(self, event_id: str) -> int | None:
+        """Original acquire TTL stored in Redis, if still present and valid."""
+        redis = self._raw_redis()
+        if redis is None:
+            return None
+        raw = await redis.get(_ttl_key(event_id))
+        if raw is None:
+            return None
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+        try:
+            return _require_positive_ttl(int(text))
+        except (TypeError, ValueError, ValidationError):
+            return None
+
     # ------------------------------------------------------------------ #
     # Background renewal helpers
     # ------------------------------------------------------------------ #
@@ -299,10 +336,22 @@ class EventLease:
         """Launch a background task that renews the lease every 60 s.
 
         When *ttl_s* is omitted, reuse the TTL from :meth:`acquire` for this
-        event (custom acquire TTLs must not be silently reset to 600s).
+        event (custom acquire TTLs must not be silently reset to 600s). After
+        Celery loop-rebind the in-process cache is empty; read the TTL key
+        from Redis instead of defaulting to 600s.
         """
         if ttl_s is None:
-            renew_ttl = self._acquired_ttl.get(event_id, DEFAULT_LEASE_TTL_S)
+            renew_ttl = self._acquired_ttl.get(event_id)
+            if renew_ttl is None:
+                renew_ttl = await self._read_persisted_ttl(event_id)
+            if renew_ttl is None:
+                logger.warning(
+                    "EventLease.start_renewal: no persisted TTL for event=%s; "
+                    "using default=%ds",
+                    event_id,
+                    DEFAULT_LEASE_TTL_S,
+                )
+                renew_ttl = DEFAULT_LEASE_TTL_S
         else:
             renew_ttl = ttl_s
         renew_ttl = _require_positive_ttl(renew_ttl)

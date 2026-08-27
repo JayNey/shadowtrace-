@@ -1806,6 +1806,7 @@ def test_investigation_defer_without_attempt_covers_human_wait_reasons() -> None
     assert "waiting_approval" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
     assert "graph_still_bound" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
     assert "investigation_in_progress" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
+    assert "lease_unavailable" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
     assert "manual_resolution_hold" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
     assert "graph_resume_deferred" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
 

@@ -70,6 +70,18 @@ ResumeHook = Callable[[str], Awaitable[None]]
 _APPROVAL_TERMINAL = frozenset({ActionStatus.APPROVED, ActionStatus.REJECTED})
 
 
+def plan_actions_fully_decided(actions: list[Any]) -> bool:
+    """True when no response action still needs a human approval decision.
+
+    An empty plan is fully decided (nothing left to approve). Resume and
+    ApprovalEngine must share this predicate so WAITING_APPROVAL cannot
+    defer forever on a vacant revision.
+    """
+    if not actions:
+        return True
+    return all(action.status in _APPROVAL_TERMINAL for action in actions)
+
+
 def resolve_plan_advance_target(actions: list[Action]) -> EventStatus | None:
     """Return the EventStatus to CAS after a fully decided plan, or None."""
     approved = [a for a in actions if a.status is ActionStatus.APPROVED]
@@ -582,9 +594,7 @@ class ApprovalEngine:
 
     async def is_plan_fully_decided(self, event_id: str, plan_revision: int) -> bool:
         actions = await self._load_plan_response_actions(event_id, plan_revision)
-        if not actions:
-            return True
-        return all(action.status in _APPROVAL_TERMINAL for action in actions)
+        return plan_actions_fully_decided(actions)
 
     async def _decide(
         self,

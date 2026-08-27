@@ -398,14 +398,6 @@ async def _load_response_actions_for_resume(
     return [action for action in actions if int(action.plan_revision or 0) == latest]
 
 
-def _plan_actions_fully_decided(actions: list[Any]) -> bool:
-    from app.services.approval_engine import _APPROVAL_TERMINAL
-
-    if not actions:
-        return False
-    return all(action.status in _APPROVAL_TERMINAL for action in actions)
-
-
 async def _get_resume_state_machine() -> Any:
     from app.api.v1.deps import get_state_machine
 
@@ -427,11 +419,12 @@ async def _advance_waiting_approval_if_plan_decided(
     )
     from app.services.approval_engine import (
         APPROVAL_ENGINE_OPERATOR,
+        plan_actions_fully_decided,
         resolve_plan_advance_target,
     )
 
     actions = await _load_response_actions_for_resume(session_factory, event_id)
-    if not _plan_actions_fully_decided(actions):
+    if not plan_actions_fully_decided(actions):
         raise GraphResumeDeferredError(
             "cannot resume while event is still WAITING_APPROVAL",
             event_id=event_id,
@@ -762,8 +755,11 @@ async def _invoke_investigation_graph_with_lease(
 
     lease = getattr(agent, "lease", None)
     if not isinstance(lease, EventLease):
-        await invoke_investigation_graph(graph, state, config)
-        return
+        raise GraphResumeDeferredError(
+            "event lease unavailable; not starting graph resume",
+            event_id=event_id,
+            error_type="lease_unavailable",
+        )
 
     owner_id = generate_owner_id()
     try:

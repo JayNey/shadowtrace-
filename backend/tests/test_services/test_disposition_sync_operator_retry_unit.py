@@ -315,12 +315,14 @@ def test_refuse_missing_product_live_mode_does_not_handle(
     assert outbox.delivery_status == OutboxDeliveryStatus.READY.value
 
 
-def test_live_outbox_uses_registered_kind_not_mock(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_outbox_uses_registered_source_product(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.adapters.registry import DispositionAdapterRegistry
 
-    live = SimpleNamespace(name="generic_http_disposition")
+    product = SimpleNamespace(name="crowdstrike")
+    kind = SimpleNamespace(name="generic_http_disposition")
     registry = DispositionAdapterRegistry()
-    registry.register("generic_http_disposition", live)  # type: ignore[arg-type]
+    registry.register("crowdstrike", product)  # type: ignore[arg-type]
+    registry.register("generic_http_disposition", kind)  # type: ignore[arg-type]
     monkeypatch.setattr(
         "app.services.disposition_sync_service.is_mock_disposition_mode",
         lambda _mode: False,
@@ -339,11 +341,48 @@ def test_live_outbox_uses_registered_kind_not_mock(monkeypatch: pytest.MonkeyPat
         outbound_guard=AsyncMock(),  # type: ignore[arg-type]
     )
     outbox = SimpleNamespace(
-        outbox_id="obx-live-alias",
-        writeback_id="wbk-live-alias",
+        outbox_id="obx-live-product",
+        writeback_id="wbk-live-product",
         command_payload={"source_locator": {"source_product": "crowdstrike"}},
     )
-    assert svc._resolve_adapter(outbox) is live
+    assert svc._resolve_adapter(outbox) is product
+
+
+def test_live_unregistered_source_product_is_fenced_not_kind_aliased(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.adapters.registry import DispositionAdapterRegistry
+    from app.core.errors import AdapterNotFoundError
+
+    kind = SimpleNamespace(name="generic_http_disposition")
+    registry = DispositionAdapterRegistry()
+    registry.register("generic_http_disposition", kind)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        "app.services.disposition_sync_service.is_mock_disposition_mode",
+        lambda _mode: False,
+    )
+    monkeypatch.setattr(
+        "app.services.disposition_sync_service.get_settings",
+        lambda: SimpleNamespace(
+            disposition_mode="live",
+            disposition_adapter_kind="generic_http_disposition",
+        ),
+    )
+    svc = DispositionSyncService(
+        session_factory=AsyncMock(),  # type: ignore[arg-type]
+        context_store=AsyncMock(),  # type: ignore[arg-type]
+        adapter_registry=registry,
+        outbound_guard=AsyncMock(),  # type: ignore[arg-type]
+    )
+    outbox = SimpleNamespace(
+        outbox_id="obx-live-unregistered",
+        writeback_id="wbk-live-unregistered",
+        command_payload={"source_locator": {"source_product": "crowdstrike"}},
+    )
+    with pytest.raises(AdapterNotFoundError, match="not registered") as exc_info:
+        svc._resolve_adapter(outbox)
+    assert (exc_info.value.details or {}).get("reason") == "adapter_not_registered"
+    assert "crowdstrike" not in registry.list_names()
 
 
 def test_live_outbox_source_product_mismatch_fences_without_mock_fallback(

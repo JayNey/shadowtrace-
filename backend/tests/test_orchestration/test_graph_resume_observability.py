@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.core.errors import InvalidStateTransitionError, ValidationError
-from app.models.enums import EventStatus
+from app.models.enums import ActionStatus, EventStatus
 from app.orchestration.graph_resume_observability import (
     GRAPH_RESUME_FAILED_FLAG,
     GraphResumeDeferredError,
@@ -165,8 +165,12 @@ async def test_execute_graph_resume_retries_transient_errors() -> None:
     graph.aget_state = _aget_state
     graph.aupdate_state = AsyncMock()
     graph.ainvoke = AsyncMock(return_value={"halted": False})
+    from app.orchestration.lease import EventLease
+    from tests.support.fake_redis import InMemoryFakeRedisClient
+
     agent = MagicMock()
     agent._investigation_graph = graph
+    agent.lease = EventLease(InMemoryFakeRedisClient())
 
     async def _get_super_agent() -> Any:
         return agent
@@ -798,6 +802,19 @@ async def test_execute_graph_resume_waiting_approval_is_deferred_not_failed(
         "app.orchestration.graph_resume_observability._RESUME_RETRY_BASE_SECONDS",
         0,
     )
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume._load_response_actions_for_resume",
+        AsyncMock(
+            return_value=[
+                MagicMock(
+                    status=ActionStatus.WAITING_APPROVAL,
+                    tool_name="block_ip",
+                    writeback_required=False,
+                    plan_revision=1,
+                )
+            ]
+        ),
+    )
     degraded = MagicMock()
     degraded.set_flag = AsyncMock(return_value=[])
     degraded.has_flag = AsyncMock(return_value=False)
@@ -858,4 +875,72 @@ def test_claimed_intent_deferred_path_does_not_use_mark_failure() -> None:
         )
     ]
     assert "attempt" not in deferred
+
+
+@pytest.mark.asyncio
+async def test_bind_flush_while_outer_lease_held_does_not_start_second_ainvoke() -> None:
+    from app.orchestration.graph_invocation import (
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+    from app.orchestration.graph_resume import resume_investigation_from_checkpoint
+    from app.orchestration.lease import EventLease, generate_owner_id
+    from tests.support.fake_redis import InMemoryFakeRedisClient
+
+    event_id = "evt-bind-lease"
+    lease = EventLease(InMemoryFakeRedisClient())
+    assert await lease.acquire(event_id, generate_owner_id()) is True
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "halted": True,
+                "event_status": EventStatus.EXECUTING_RESPONSE.value,
+            }
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+    graph.ainvoke = AsyncMock()
+    agent = MagicMock()
+    agent._investigation_graph = graph
+    agent.lease = lease
+    runtime = MagicMock()
+    runtime.set_execution_substate = AsyncMock()
+
+    async def _runner(resume_event_id: str) -> None:
+        await resume_investigation_from_checkpoint(
+            _SessionFactory(EventStatus.EXECUTING_RESPONSE.value),
+            resume_event_id,
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=runtime),
+        )
+
+    persisted: list[tuple[str, str]] = []
+
+    async def _writer(resume_event_id: str, reason: str) -> None:
+        persisted.append((resume_event_id, reason))
+
+    previous_runner = get_nested_resume_runner()
+    previous_handler = get_nested_resume_failure_handler()
+    previous_writer = get_nested_resume_durability_writer()
+    set_nested_resume_runner(_runner)
+    set_nested_resume_failure_handler(None)
+    set_nested_resume_durability_writer(_writer)
+    try:
+        async with bind_investigation_graph(event_id):
+            assert defer_nested_graph_resume(event_id) is True
+    finally:
+        set_nested_resume_runner(previous_runner)
+        set_nested_resume_failure_handler(previous_handler)
+        set_nested_resume_durability_writer(previous_writer)
+
+    graph.ainvoke.assert_not_called()
+    assert persisted == [(event_id, "investigation_in_progress")]
 
