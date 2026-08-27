@@ -152,6 +152,7 @@ async def test_renew_exception_triggers_on_renewal_failed_after_threshold() -> N
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
@@ -184,6 +185,7 @@ async def test_renew_exception_resets_after_successful_renew() -> None:
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
@@ -209,6 +211,7 @@ async def test_renew_owner_mismatch_still_triggers_immediately() -> None:
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
         )
         try:
@@ -240,6 +243,7 @@ async def test_renew_single_exception_below_threshold_does_not_trigger() -> None
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
@@ -272,6 +276,7 @@ async def test_renew_exception_default_threshold() -> None:
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
         )
         try:
@@ -293,6 +298,7 @@ async def test_renew_loop_exits_on_first_exception_with_threshold_zero() -> None
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
             max_renew_failures=0,
         )
@@ -321,6 +327,7 @@ async def test_renew_redis_unavailable_single_attempt_below_threshold() -> None:
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
@@ -343,6 +350,7 @@ async def test_renew_redis_unavailable_triggers_after_threshold() -> None:
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
@@ -364,6 +372,7 @@ async def test_renew_success_does_not_trigger() -> None:
         task = await lease.start_renewal(
             "evt-test",
             _OWNER,
+            ttl_s=600,
             on_renewal_failed=renewal_failed,
         )
         try:
@@ -401,6 +410,28 @@ async def test_start_renewal_reads_persisted_ttl_after_process_rebind() -> None:
             assert fake_redis.expire_calls[0][1] == 90
         finally:
             await _cancel_renew_task(task)
+
+
+@pytest.mark.asyncio
+async def test_start_renewal_fail_closes_when_persisted_ttl_missing() -> None:
+    fake_redis = _FakeRedis()
+    lease = _lease_with_fake(fake_redis)
+    await lease.acquire("evt-missing-ttl", _OWNER, ttl_s=120)
+    for key in [stored for stored in list(fake_redis._store) if stored.endswith(":ttl")]:
+        fake_redis._store.pop(key)
+    lease._acquired_ttl.clear()
+    renewal_failed = asyncio.Event()
+    task = await lease.start_renewal(
+        "evt-missing-ttl",
+        _OWNER,
+        on_renewal_failed=renewal_failed,
+    )
+    try:
+        assert renewal_failed.is_set()
+        await asyncio.sleep(0)
+        assert fake_redis.expire_calls == []
+    finally:
+        await _cancel_renew_task(task)
 
 
 def test_classify_lease_lua_script_uses_expire_vs_del() -> None:

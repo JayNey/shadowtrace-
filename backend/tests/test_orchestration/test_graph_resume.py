@@ -10,6 +10,7 @@ import pytest
 
 from app.core.errors import ValidationError
 from app.models.enums import (
+    ActionCategory,
     ActionStatus,
     DispositionIntentKind,
     DispositionPolicy,
@@ -18,7 +19,9 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.orchestration.graph_resume import (
+    _event_inflight_action_ids,
     _reconcile_verify_resume_patch,
+    _still_inflight_action_ids,
     prepare_graph_resume_state,
     resume_investigation_from_checkpoint,
 )
@@ -565,6 +568,7 @@ async def test_resume_raises_when_checkpoint_missing_mid_flight() -> None:
     agent = MagicMock()
     agent._investigation_graph = graph
     agent.investigate = AsyncMock()
+    agent.lease = _fresh_event_lease()
 
     async def _get_super_agent() -> Any:
         return agent
@@ -597,6 +601,7 @@ async def test_resume_fallback_execute_investigation_when_graph_never_started() 
     graph.aget_state = AsyncMock(return_value=MagicMock(values={}))
     agent = MagicMock()
     agent._investigation_graph = graph
+    agent.lease = _fresh_event_lease()
 
     async def _get_super_agent() -> Any:
         return agent
@@ -795,6 +800,7 @@ async def test_resume_reporting_missing_checkpoint_keeps_reporting_error() -> No
     graph.aget_state = AsyncMock(return_value=MagicMock(values={}))
     agent = MagicMock()
     agent._investigation_graph = graph
+    agent.lease = _fresh_event_lease()
 
     runtime = MagicMock()
     runtime.set_execution_substate = AsyncMock()
@@ -968,6 +974,8 @@ async def test_resume_defers_when_event_lease_held() -> None:
 
     assert exc_info.value.error_type == "investigation_in_progress"
     graph.ainvoke.assert_not_called()
+    graph.aupdate_state.assert_not_awaited()
+    graph.aget_state.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -993,6 +1001,8 @@ async def test_resume_without_event_lease_instance_defers_not_ainvoke() -> None:
         agent._investigation_graph = graph
         agent.lease = lease
         graph.ainvoke.reset_mock()
+        graph.aupdate_state.reset_mock()
+        graph.aget_state.reset_mock()
         with pytest.raises(GraphResumeDeferredError) as exc_info:
             await resume_investigation_from_checkpoint(
                 _SessionFactory(EventStatus.EXECUTING_RESPONSE.value),
@@ -1002,6 +1012,8 @@ async def test_resume_without_event_lease_instance_defers_not_ainvoke() -> None:
             )
         assert exc_info.value.error_type == "lease_unavailable"
         graph.ainvoke.assert_not_called()
+        graph.aupdate_state.assert_not_awaited()
+        graph.aget_state.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1074,3 +1086,27 @@ async def test_maybe_advance_plan_transition_cas_failure_still_advances_or_fail_
     invoke.assert_awaited_once()
     machine.transition.assert_awaited()
     assert factory._status == EventStatus.EXECUTING_RESPONSE.value
+
+
+class _ActionRowFactory:
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self._rows = rows
+
+    def __call__(self) -> _SessionCtx:
+        return _SessionCtx(EventStatus.VERIFYING.value, outbox_rows=self._rows)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_event_inflight_action_ids_ignore_superseded_revision() -> None:
+    """Superseded / non-current RESPONSE rows must not keep VERIFYING in WAIT."""
+    rows = [
+        ("act-old", ActionStatus.EXECUTING.value, ActionCategory.RESPONSE.value, 2, 1),
+        ("act-new", ActionStatus.APPROVED.value, ActionCategory.RESPONSE.value, None, 2),
+        ("act-exec", ActionStatus.EXECUTING.value, ActionCategory.RESPONSE.value, None, 2),
+        ("act-sys", ActionStatus.EXECUTING.value, ActionCategory.SYSTEM.value, None, 2),
+    ]
+    factory = _ActionRowFactory(rows)
+    assert await _event_inflight_action_ids(factory, "evt-rev") == ["act-exec"]
+    assert await _still_inflight_action_ids(
+        factory, "evt-rev", ["act-old", "act-exec", "act-sys"]
+    ) == ["act-exec"]

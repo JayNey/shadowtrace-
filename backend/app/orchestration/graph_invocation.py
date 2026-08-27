@@ -222,8 +222,7 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
         )
         for resume_event_id in pending:
             await _notify_nested_resume_failure(resume_event_id, error, [resume_event_id])
-        raise error
-    flush_error: BaseException | None = None
+        return
     for resume_event_id in pending:
         try:
             await runner(resume_event_id)
@@ -244,8 +243,6 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
             )
             await persist_nested_graph_wakeup(resume_event_id, "nested_resume_flush_failed")
             await _notify_nested_resume_failure(resume_event_id, exc, [resume_event_id])
-            if flush_error is None:
-                flush_error = exc
         except BaseException:
             remaining = pending[pending.index(resume_event_id) :]
             logger.warning(
@@ -257,8 +254,6 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
                 _persist_pending_nested_wakeups(remaining, "nested_resume_cancelled")
             )
             raise
-    if flush_error is not None:
-        raise flush_error
 
 
 @asynccontextmanager
@@ -300,11 +295,12 @@ async def bind_investigation_graph(event_id: str) -> AsyncIterator[None]:
                     await asyncio.shield(
                         _persist_pending_nested_wakeups(pending, flush_persist)
                     )
-                if yield_error is None or not isinstance(flush_error, Exception):
+                if not isinstance(flush_error, Exception):
                     raise
                 logger.exception(
-                    "nested graph resume flush failed after graph error event=%s",
+                    "nested graph resume flush failed event=%s parent_graph_error=%s",
                     event_id,
+                    yield_error is not None,
                 )
 
 

@@ -508,6 +508,19 @@ def _get_adapter_registry() -> Any:
                         allow_side_effects,
                     )
                     registry.register(kind, adapter)
+                    product = str(
+                        getattr(settings, "disposition_source_product", "") or ""
+                    ).strip()
+                    if (
+                        product
+                        and product.lower() not in {"mock", "mock_xdr"}
+                        and product != kind
+                    ):
+                        logger.info(
+                            "also registering live disposition adapter as source_product=%s",
+                            product,
+                        )
+                        registry.register(product, adapter)
         _adapter_registry = registry
     return _adapter_registry
 

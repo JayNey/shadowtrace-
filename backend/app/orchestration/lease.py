@@ -345,13 +345,17 @@ class EventLease:
             if renew_ttl is None:
                 renew_ttl = await self._read_persisted_ttl(event_id)
             if renew_ttl is None:
-                logger.warning(
-                    "EventLease.start_renewal: no persisted TTL for event=%s; "
-                    "using default=%ds",
+                logger.error(
+                    "EventLease.start_renewal: no persisted TTL for event=%s; fail-closed",
                     event_id,
-                    DEFAULT_LEASE_TTL_S,
                 )
-                renew_ttl = DEFAULT_LEASE_TTL_S
+                if on_renewal_failed is not None:
+                    on_renewal_failed.set()
+
+                async def _ttl_missing() -> None:
+                    return None
+
+                return asyncio.create_task(_ttl_missing())
         else:
             renew_ttl = ttl_s
         renew_ttl = _require_positive_ttl(renew_ttl)

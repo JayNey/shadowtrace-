@@ -111,6 +111,15 @@ class Settings(BaseSettings):
     disposition_base_url: str = Field(default="", alias="DISPOSITION_BASE_URL")
     disposition_credential_ref: str = Field(default="", alias="DISPOSITION_CREDENTIAL_REF")
     disposition_auth_type: str = Field(default="bearer", alias="DISPOSITION_AUTH_TYPE")
+    disposition_source_product: str = Field(
+        default="",
+        alias="DISPOSITION_SOURCE_PRODUCT",
+        description=(
+            "Optional live registry alias matching SourceObject.source_product. "
+            "Unregistered products stay fenced; this does not alias every product "
+            "to DISPOSITION_ADAPTER_KIND."
+        ),
+    )
 
     mock_xdr_read_token: str = Field(default="mock-read-token", alias="MOCK_XDR_READ_TOKEN")
     mock_xdr_write_token: str = Field(default="mock-write-token", alias="MOCK_XDR_WRITE_TOKEN")

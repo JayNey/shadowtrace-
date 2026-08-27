@@ -1358,6 +1358,7 @@ class DispositionSyncService:
                     adapter = self._resolve_adapter(outbox)
                 except AdapterNotFoundError as exc:
                     if self._refuse_mock_missing_source_product(outbox, exc):
+                        await self._publish_missing_source_product_fence(outbox)
                         return
                     self._block_outbox_for_writeback_fence(
                         outbox,
@@ -2452,6 +2453,29 @@ class DispositionSyncService:
                 error_detail=str(exc),
             )
         return True
+
+    async def _publish_missing_source_product_fence(self, outbox: Any) -> None:
+        """Operator-visible signal after PAUSE for missing source_product."""
+        event_id = getattr(outbox, "event_id", None)
+        if not event_id or self._bus is None:
+            return
+        try:
+            await self._bus.publish_event(
+                event_id,
+                "writeback_updated",
+                {
+                    "writeback_id": getattr(outbox, "writeback_id", None),
+                    "error_code": MISSING_SOURCE_PRODUCT_ERROR_CODE,
+                    "delivery_status": getattr(outbox, "delivery_status", None),
+                },
+            )
+        except Exception:
+            logger.warning(
+                "failed to publish missing_source_product fence event=%s outbox=%s",
+                event_id,
+                getattr(outbox, "outbox_id", None),
+                exc_info=True,
+            )
 
     async def _sync_writeback_summary(self, event_id: str) -> None:
         summary_payload: dict[str, Any] | None = None

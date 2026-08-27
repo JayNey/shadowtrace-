@@ -293,6 +293,48 @@ def test_refuse_mock_missing_product_pauses_leased(
     assert outbox.last_error_code == "missing_source_product"
 
 
+@pytest.mark.asyncio
+async def test_missing_source_product_pause_publishes_writeback_updated() -> None:
+    bus = AsyncMock()
+    svc = DispositionSyncService(
+        session_factory=AsyncMock(),  # type: ignore[arg-type]
+        context_store=AsyncMock(),  # type: ignore[arg-type]
+        adapter_registry=SimpleNamespace(get=lambda _name: None),  # type: ignore[arg-type]
+        outbound_guard=AsyncMock(),  # type: ignore[arg-type]
+        event_bus=bus,
+    )
+    outbox = SimpleNamespace(
+        event_id="evt-missing-product",
+        outbox_id="obx-missing-product",
+        writeback_id="wbk-missing-product",
+        delivery_status=OutboxDeliveryStatus.PAUSED.value,
+    )
+    await svc._publish_missing_source_product_fence(outbox)
+    bus.publish_event.assert_awaited_once_with(
+        "evt-missing-product",
+        "writeback_updated",
+        {
+            "writeback_id": "wbk-missing-product",
+            "error_code": MISSING_SOURCE_PRODUCT_ERROR_CODE,
+            "delivery_status": OutboxDeliveryStatus.PAUSED.value,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_source_product_publish_skips_without_event_id() -> None:
+    bus = AsyncMock()
+    svc = DispositionSyncService(
+        session_factory=AsyncMock(),  # type: ignore[arg-type]
+        context_store=AsyncMock(),  # type: ignore[arg-type]
+        adapter_registry=SimpleNamespace(get=lambda _name: None),  # type: ignore[arg-type]
+        outbound_guard=AsyncMock(),  # type: ignore[arg-type]
+        event_bus=bus,
+    )
+    await svc._publish_missing_source_product_fence(SimpleNamespace(writeback_id="wbk-x"))
+    bus.publish_event.assert_not_awaited()
+
+
 def test_refuse_missing_product_live_mode_does_not_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -61,8 +61,9 @@ class InvestigationState(TypedDict, total=False):
     writeback_retry_count: int
     verify_has_partial_success: bool
     # True when execute_plan finished with no FAILED actions (or had nothing
-    # to do). In-flight EXECUTING/UNKNOWN is tracked separately so Verify
-    # can WAIT instead of treating "not yet done" as execution_failed_unverified.
+    # to do). In-flight EXECUTING is tracked separately so Verify can WAIT
+    # instead of treating "not yet done" as execution_failed_unverified.
+    # UNKNOWN is submitted-unconfirmed (lookup/manual), not inflight WAIT.
     execution_ok: bool
     execution_inflight: bool
     execution_inflight_action_ids: list[str] | None

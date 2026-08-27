@@ -226,6 +226,34 @@ def test_live_disposition_registers_enabled_http_adapter_when_url_and_credential
         deps.reset_deps()
 
 
+def test_live_disposition_registers_source_product_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_fcntl_on_windows(monkeypatch)
+    deps.reset_deps()
+    monkeypatch.setenv("SHADOWTRACE_XDR_WRITE_TOKEN", "test-write-token")
+    settings = SimpleNamespace(
+        disposition_mode="live",
+        disposition_adapter_kind="generic_http_disposition",
+        disposition_source_product="crowdstrike",
+        disposition_base_url="https://xdr.example",
+        disposition_credential_ref="SHADOWTRACE_XDR_WRITE_TOKEN",
+        allow_live_side_effects=True,
+        allow_xdr_writeback=True,
+    )
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.core.config.is_mock_disposition_mode",
+        lambda _mode: False,
+    )
+    try:
+        registry = deps._get_adapter_registry()
+        assert registry.list_names() == ["crowdstrike", "generic_http_disposition"]
+        assert registry.get("crowdstrike") is registry.get("generic_http_disposition")
+    finally:
+        deps.reset_deps()
+
+
 def test_live_disposition_auth_type_basic_registers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -290,6 +318,7 @@ def test_live_env_example_lists_disposition_credential_ref() -> None:
     assert "DISPOSITION_BASE_URL=" in text
     assert "DISPOSITION_ADAPTER_KIND=" in text
     assert "DISPOSITION_AUTH_TYPE=" in text
+    assert "DISPOSITION_SOURCE_PRODUCT=" in text
 
 
 def test_live_disposition_invalid_or_missing_credential_ref_does_not_register(
