@@ -11,7 +11,7 @@
     "risk": 0.775,
     "triage": 0.865
   },
-  "risk_score": 43,
+  "risk_score": 36,
   "scenario_id": "account_anomaly_fp",
   "schema_version": 1,
   "trajectory_metrics": {
