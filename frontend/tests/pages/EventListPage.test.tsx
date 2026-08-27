@@ -318,7 +318,7 @@ describe("EventListPage", () => {
     const btn = screen.getByTestId("trigger-investigation-evt-1");
     await user.click(btn);
     expect(await screen.findByTestId("investigate-mode-modal")).toBeInTheDocument();
-    # ISSUE-204: report-generation toggle defaults ON so investigate can CLOSED.
+    // ISSUE-204: report-generation toggle defaults ON so investigate can CLOSED.
     const toggle = screen.getByTestId("investigate-generate-report");
     expect(toggle).toBeChecked();
     await user.click(screen.getByText("开始调查"));

@@ -102,7 +102,10 @@ async def build_celery_health(
 
 
 async def stamp_investigation_intent_beat_heartbeat(redis: Any) -> None:
-    """Record that a beat-scheduled intent task actually ran (not just that the API could build a celery schedule)."""
+    """Record that a beat-scheduled intent task actually ran.
+
+    Distinguishes a live Beat dispatch from merely being able to build a Celery schedule.
+    """
     try:
         client = redis.get_client()
         await client.set(INTENT_BEAT_HEARTBEAT_KEY, str(int(time.time())))
