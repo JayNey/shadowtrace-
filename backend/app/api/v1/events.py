@@ -25,6 +25,7 @@ from app.api.v1.deps import (
     get_event_lease,
     get_event_service,
     get_investigation_intent_service,
+    get_manual_resolution_service,
     get_pipeline,
     get_state_machine,
     get_super_agent,
@@ -61,11 +62,16 @@ from app.models.enums import (
     DispositionPolicy,
     EventStatus,
     EventType,
+    ExecutionSubstate,
     FinalVerdict,
     InvestigationIntentStatus,
     Severity,
     WritebackReadiness,
     WritebackStatus,
+)
+from app.models.graph_resume_intent import (
+    RESOLUTION_SOURCE_ANALYST_VERDICT,
+    SUBJECT_KIND_EVENT,
 )
 from app.models.workflow import TransitionContext
 from app.services.classification_source import derive_classification_source
@@ -133,6 +139,13 @@ def _try_get_session_factory() -> async_sessionmaker[AsyncSession] | None:
 
 def _writeback_required(policy: DispositionPolicy) -> bool:
     return policy == DispositionPolicy.REQUIRED
+
+
+def _readiness_for_required_policy(readiness: WritebackReadiness) -> WritebackReadiness:
+    """REQUIRED events cannot advertise not_required (Action / InvestigationResult invariant)."""
+    if readiness is WritebackReadiness.NOT_REQUIRED:
+        return WritebackReadiness.NOT_CONFIGURED
+    return readiness
 
 
 async def _sync_report_context_and_bus(
@@ -555,109 +568,6 @@ async def _build_writeback_info(
         readiness = envelope.aggregate_readiness
         wb_status = envelope.aggregate_status
         pending = envelope.pending_count
-        current_revision = envelope.current_revision
-
-        # #region agent log
-        try:
-            import json as _dbg_json
-            import time as _dbg_time
-
-            _act_rows = (
-                await session.execute(
-                    select(
-                        orm.Action.tool_name,
-                        orm.Action.writeback_required,
-                        orm.Action.writeback_applicable,
-                        orm.Action.writeback_readiness,
-                        orm.Action.status,
-                    ).where(
-                        orm.Action.event_id == event_id,
-                        orm.Action.plan_revision == current_revision,
-                        orm.Action.action_category.in_(("response", "rollback")),
-                        orm.Action.superseded_by_revision.is_(None),
-                        orm.Action.status.not_in(("rejected", "superseded")),
-                    )
-                )
-            ).all()
-            with open(
-                "/Users/apple/Desktop/shadowtrace副本/.cursor/debug-0da307.log",
-                "a",
-                encoding="utf-8",
-            ) as _dbg_f:
-                _dbg_f.write(
-                    _dbg_json.dumps(
-                        {
-                            "sessionId": "0da307",
-                            "runId": "post-fix",
-                            "hypothesisId": "A",
-                            "location": "events.py:_build_writeback_info",
-                            "message": "event writeback aggregation inputs",
-                            "data": {
-                                "event_id": event_id,
-                                "policy": policy.value,
-                                "total": envelope.applicable_action_count,
-                                "min_readiness_raw": readiness.value,
-                                "computed_readiness": readiness.value,
-                                "actions": [
-                                    {
-                                        "tool": r.tool_name,
-                                        "required": bool(r.writeback_required),
-                                        "applicable": bool(r.writeback_applicable),
-                                        "readiness": r.writeback_readiness,
-                                        "status": r.status,
-                                    }
-                                    for r in _act_rows
-                                ],
-                            },
-                            "timestamp": int(_dbg_time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-        except Exception:
-            pass
-        # #endregion
-
-        parsed_statuses = [
-            status
-            for status, count in envelope.writeback_counts.items()
-            for _ in range(count)
-        ]
-
-        # #region agent log
-        try:
-            import json as _dbg_json2
-            import time as _dbg_time2
-
-            with open(
-                "/Users/apple/Desktop/shadowtrace副本/.cursor/debug-0da307.log",
-                "a",
-                encoding="utf-8",
-            ) as _dbg_f2:
-                _dbg_f2.write(
-                    _dbg_json2.dumps(
-                        {
-                            "sessionId": "0da307",
-                            "runId": "post-fix",
-                            "hypothesisId": "E",
-                            "location": "events.py:_build_writeback_info:return",
-                            "message": "event writeback aggregation result",
-                            "data": {
-                                "event_id": event_id,
-                                "readiness": readiness.value,
-                                "wb_status": wb_status.value if wb_status is not None else None,
-                                "pending": pending,
-                                "outbox_statuses": [s.value for s in parsed_statuses],
-                            },
-                            "timestamp": int(_dbg_time2.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-        except Exception:
-            pass
-        # #endregion
-
         return readiness, wb_status, pending
 
 
@@ -723,40 +633,6 @@ async def _list_writeback_envelopes(
                 for event_id, (actions, outboxes, receipts) in rows_by_event.items()
                 if event_id in policy_by_id
             }
-        # #region agent log
-        try:
-            import json as _dbg_json
-            import time as _dbg_time
-
-            with open(
-                "/Users/apple/Desktop/shadowtrace副本/.cursor/debug-0da307.log",
-                "a",
-                encoding="utf-8",
-            ) as _dbg_f:
-                _dbg_f.write(
-                    _dbg_json.dumps(
-                        {
-                            "sessionId": "0da307",
-                            "runId": "post-fix",
-                            "hypothesisId": "LIST",
-                            "location": "events.py:_list_writeback_envelopes",
-                            "message": "batched list writeback projection",
-                            "data": {
-                                "page_size": len(events),
-                                "required_count": len(policy_by_id),
-                                "readiness": {
-                                    event_id: envelope.aggregate_readiness.value
-                                    for event_id, envelope in envelopes.items()
-                                },
-                            },
-                            "timestamp": int(_dbg_time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-        except Exception:
-            pass
-        # #endregion
         return envelopes
     except Exception:
         logger.warning("list writeback envelope projection failed", exc_info=True)
@@ -809,7 +685,7 @@ async def list_events(
             wb_status = None
             pending_count = 0
         else:
-            wb_readiness = envelope.aggregate_readiness
+            wb_readiness = _readiness_for_required_policy(envelope.aggregate_readiness)
             wb_status = envelope.aggregate_status
             pending_count = envelope.pending_count
         snapshot = (
@@ -961,19 +837,21 @@ async def get_event(
         raise EventNotFoundError(f"event {event_id} not found", details={"event_id": event_id})
 
     required = _writeback_required(event.disposition_policy)
-    readiness = WritebackReadiness.NOT_REQUIRED
     wb_status: WritebackStatus | None = None
     pending_count = 0
 
-    if required:
+    if not required:
+        readiness = WritebackReadiness.NOT_REQUIRED
+    else:
+        readiness = WritebackReadiness.CAPABILITY_UNKNOWN
         try:
             from app.api.v1.deps import _get_session_factory
 
             readiness, wb_status, pending_count = await _build_writeback_info(
                 event_id, event.disposition_policy, _get_session_factory()
             )
+            readiness = _readiness_for_required_policy(readiness)
         except Exception:
-            # DB unavailable: leave writeback info as defaults.
             readiness = WritebackReadiness.CAPABILITY_UNKNOWN
 
     tenant_id = (
@@ -1536,6 +1414,84 @@ async def _spawn_memory_after_http_close(event: Any) -> None:
             getattr(event, "event_id", None),
             exc_info=True,
         )
+
+
+# --------------------------------------------------------------------------- #
+# POST /events/{event_id}/final-verdict — analyst terminal verdict + optional resume
+# --------------------------------------------------------------------------- #
+
+
+@router.post(
+    "/events/{event_id}/final-verdict",
+    response_model=s.EventFinalVerdictResponse,
+    responses={
+        403: {
+            "model": s.ErrorResponse,
+            "description": "Caller lacks analyst (or admin) role.",
+        },
+        422: {
+            "model": s.ErrorResponse,
+            "description": "Verdict is not terminal, or illegal for the current status.",
+        },
+    },
+)
+async def set_event_final_verdict(
+    event_id: str,
+    body: s.EventFinalVerdictRequest,
+    principal: Annotated[Principal, require_roles(ROLE_ANALYST)],
+    event_service: EventService = Depends(get_event_service),
+    manual_resolution: Any = Depends(get_manual_resolution_service),
+) -> s.EventFinalVerdictResponse:
+    """Write a terminal final_verdict without auto-closing from VERIFYING.
+
+    When the event is held in ``manual_resolution``, optionally enqueue a graph
+    resume so Verify phase 2 can activate the deferred terminal writeback.
+    ``none`` / ``possible_false_positive`` are rejected — they cannot unblock
+    required-disposition activation.
+    """
+    event = await event_service.get_event(event_id)
+    if event is None:
+        raise EventNotFoundError(f"event {event_id} not found", details={"event_id": event_id})
+
+    event = await event_service.set_final_verdict(
+        event_id,
+        body.final_verdict,
+        operator=f"principal:{principal.subject}",
+    )
+    guidance = derive_investigation_guidance(
+        status=event.status,
+        disposition_policy=event.disposition_policy,
+        context_snapshot=event.event_context_snapshot,
+        orchestration_mode=get_settings().orchestration_mode,
+    )
+    resume_status: Literal["queued", "not_held", "skipped"] = "skipped"
+    if body.resume:
+        if guidance.execution_substate is ExecutionSubstate.MANUAL_RESOLUTION:
+            intent = await manual_resolution.create_or_replay_resume_intent(
+                event_id,
+                resolution_source=RESOLUTION_SOURCE_ANALYST_VERDICT,
+                subject_kind=SUBJECT_KIND_EVENT,
+                subject_id=event_id,
+                resolution=body.final_verdict.value,
+                principal=principal.subject,
+                comment=body.reason,
+                operation_id=body.operation_id,
+            )
+            manual_resolution.schedule_dispatch(
+                event_id=event_id,
+                intent_id=intent.intent_id,
+                trigger="analyst_final_verdict",
+            )
+            resume_status = "queued"
+        else:
+            resume_status = "not_held"
+    return s.EventFinalVerdictResponse(
+        event_id=event.event_id,
+        status=event.status,
+        final_verdict=event.final_verdict,
+        execution_substate=guidance.execution_substate.value,
+        resume_status=resume_status,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2416,6 +2372,7 @@ async def get_event_evidence(
     return s.EventEvidenceResponse(
         event_id=event_id,
         evidence_list=project_evidence_list_for_api(evidence_output.evidence_list),
+        conflicts=list(evidence_output.conflicts),
         gaps=[_gap_to_response(gap) for gap in evidence_output.gaps],
         collection_status=evidence_output.collection_status,
         success_sources=list(evidence_output.success_sources),

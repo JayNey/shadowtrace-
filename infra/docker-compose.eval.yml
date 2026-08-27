@@ -18,7 +18,7 @@ services:
     ports: !reset []
     environment:
       APPROVAL_TIMEOUT_MINUTES: ${EVAL_APPROVAL_TIMEOUT_MINUTES:-5}
-      LLM_TIMEOUT_SECONDS: ${EVAL_LLM_TIMEOUT_SECONDS:-60}
+      LLM_TIMEOUT_SECONDS: ${EVAL_LLM_TIMEOUT_SECONDS:-90}
       TASK_MODE: celery
       CHANGE_WINDOW_BASELINE_PATH: /app/data/organization/change_windows.json
 
@@ -29,5 +29,5 @@ services:
   worker:
     environment:
       APPROVAL_TIMEOUT_MINUTES: ${EVAL_APPROVAL_TIMEOUT_MINUTES:-5}
-      LLM_TIMEOUT_SECONDS: ${EVAL_LLM_TIMEOUT_SECONDS:-60}
+      LLM_TIMEOUT_SECONDS: ${EVAL_LLM_TIMEOUT_SECONDS:-90}
       CHANGE_WINDOW_BASELINE_PATH: /app/data/organization/change_windows.json

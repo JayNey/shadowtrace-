@@ -72,6 +72,10 @@ from app.services.writeback_close_gate import build_closed_gate_actions
 
 logger = logging.getLogger(__name__)
 
+# Redis EventContext keys. Side-effect convergence is a Postgres-backed
+# projection and must not sticky-set redis_context_unavailable on CLOSED.
+REDIS_CONTEXT_PROJECTION_STEPS = frozenset({"summary", "history", "snapshot", "closed_ttl"})
+
 _STATE_MACHINE_OPERATOR = "StateMachineService"
 STATE_TRANSITION_PROJECTION_DEGRADED_FLAG = "state_transition_projection_degraded"
 _PROJECTION_REPAIR_MAX_ATTEMPTS = 3
@@ -1075,7 +1079,12 @@ class StateMachineService:
                 event_id,
             )
 
-        if any(failure.mode == "returned_degraded" for failure in outcome.failures):
+        redis_context_degraded = any(
+            failure.mode == "returned_degraded"
+            and failure.step in REDIS_CONTEXT_PROJECTION_STEPS
+            for failure in outcome.failures
+        )
+        if redis_context_degraded:
             try:
                 await self._degraded.set_flag(
                     event_id,

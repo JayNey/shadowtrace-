@@ -199,15 +199,45 @@ def list_event_actions(
     status: str | None = "waiting_approval",
     page_size: int = 50,
 ) -> list[dict[str, Any]]:
-    params: dict[str, str] = {"page": "1", "page_size": str(page_size)}
-    if status:
-        params["status"] = status
-    path = f"/api/v1/events/{event_id}/actions?{urlencode(params)}"
-    payload = client.get_json(path)
-    items = payload.get("items") if isinstance(payload, dict) else None
-    if not isinstance(items, list):
-        raise DynamicEvalApiError(f"unexpected actions payload for {event_id}: {payload!r}")
-    return [item for item in items if isinstance(item, dict)]
+    """List actions for *event_id*, walking every page until *total* is reached."""
+    page = 1
+    collected: list[dict[str, Any]] = []
+    total: int | None = None
+    while page <= 50:
+        params: dict[str, str] = {"page": str(page), "page_size": str(page_size)}
+        if status:
+            params["status"] = status
+        path = f"/api/v1/events/{event_id}/actions?{urlencode(params)}"
+        payload = client.get_json(path)
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            raise DynamicEvalApiError(
+                f"unexpected actions payload for {event_id}: {payload!r}"
+            )
+        page_items = [item for item in items if isinstance(item, dict)]
+        collected.extend(page_items)
+        if total is None and isinstance(payload, dict) and payload.get("total") is not None:
+            try:
+                total = int(payload["total"])
+            except (TypeError, ValueError) as exc:
+                raise DynamicEvalApiError(
+                    f"invalid actions total for {event_id}: {payload.get('total')!r}"
+                ) from exc
+        if total is not None and len(collected) >= total:
+            return collected
+        if total is None and len(page_items) < page_size:
+            return collected
+        if not page_items:
+            if total is not None and len(collected) < total:
+                raise DynamicEvalApiError(
+                    f"actions pagination truncated for {event_id}: "
+                    f"collected={len(collected)} total={total} empty page={page}"
+                )
+            return collected
+        page += 1
+    raise DynamicEvalApiError(
+        f"actions pagination exceeded 50 pages for {event_id}"
+    )
 
 
 def decide_action(

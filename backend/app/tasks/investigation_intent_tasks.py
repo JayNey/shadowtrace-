@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from app.core.celery_app import celery_app
+from app.core.celery_health import stamp_investigation_intent_beat_heartbeat
 from app.core.redis_client import RedisClient
 from app.db.session import get_session_factory
 from app.services.auto_investigate_policy import AutoInvestigatePolicyService
@@ -33,6 +34,7 @@ async def _dispatch_once_async() -> dict[str, Any]:
             degraded_flags=degraded,
         )
         published = await service.claim_and_publish_batch(limit=10)
+        await stamp_investigation_intent_beat_heartbeat(redis)
         return {"published": published}
     finally:
         await redis.aclose()
@@ -50,6 +52,7 @@ async def _reconcile_once_async() -> dict[str, Any]:
             degraded_flags=degraded,
         )
         reconciled = await service.reconcile_stale(limit=20)
+        await stamp_investigation_intent_beat_heartbeat(redis)
         return {"reconciled": reconciled}
     finally:
         await redis.aclose()

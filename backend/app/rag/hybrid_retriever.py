@@ -8,6 +8,7 @@ import logging
 from app.core.embedding.service import EmbeddingService
 from app.models.knowledge import RetrievedChunk
 from app.rag.context import RetrievalContext
+from app.rag.keyword_aliases import keyword_queries_for_kb
 from app.services.knowledge_store import KnowledgeStore
 
 logger = logging.getLogger(__name__)
@@ -32,10 +33,10 @@ class HybridRetriever:
         *,
         context: RetrievalContext,
     ) -> list[list[RetrievedChunk]]:
-        """Return one result list per (query, kb, method) combination.
+        """Return one result list per (query, kb, method[, keyword variant]).
 
-        Order: for each query, for each kb, vector then keyword.
-        Total lists = len(queries) * len(kb_names) * 2.
+        Order: for each query, for each kb, vector then each keyword variant.
+        Empty keyword reductions are skipped (no ``plainto_tsquery``).
         """
         fetch_k = top_k * 2
         if context.query_plan is not None:
@@ -49,22 +50,24 @@ class HybridRetriever:
             len(queries),
         )
 
-        async def _search(query: str, kb: str, method: str) -> list[RetrievedChunk]:
+        async def _vector_search(query: str, kb: str) -> list[RetrievedChunk]:
             release_id, embedding_release_id, typed_filters = context.storage_filters_for_kb(kb)
-            if method == "vector":
-                vec = await self._embed.embed_query(query)
-                return await self._store.vector_search(
-                    kb,
-                    vec,
-                    top_k=fetch_k,
-                    tenant_id=tenant_id,
-                    release_id=release_id,
-                    embedding_release_id=embedding_release_id,
-                    typed_filters=typed_filters,
-                )
+            vec = await self._embed.embed_query(query)
+            return await self._store.vector_search(
+                kb,
+                vec,
+                top_k=fetch_k,
+                tenant_id=tenant_id,
+                release_id=release_id,
+                embedding_release_id=embedding_release_id,
+                typed_filters=typed_filters,
+            )
+
+        async def _keyword_search(keyword_query: str, kb: str) -> list[RetrievedChunk]:
+            release_id, embedding_release_id, typed_filters = context.storage_filters_for_kb(kb)
             return await self._store.keyword_search(
                 kb,
-                query,
+                keyword_query,
                 top_k=fetch_k,
                 tenant_id=tenant_id,
                 release_id=release_id,
@@ -75,8 +78,9 @@ class HybridRetriever:
         tasks: list[asyncio.Task[list[RetrievedChunk]]] = []
         for query in queries:
             for kb in kb_names:
-                for method in ("vector", "keyword"):
-                    tasks.append(asyncio.create_task(_search(query, kb, method)))
+                tasks.append(asyncio.create_task(_vector_search(query, kb)))
+                for keyword_query in keyword_queries_for_kb(kb, query, limit=2):
+                    tasks.append(asyncio.create_task(_keyword_search(keyword_query, kb)))
 
         results: list[list[RetrievedChunk]] = []
         for task in tasks:

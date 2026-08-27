@@ -53,6 +53,8 @@ async def resolve_active_knowledge_query_plan(
     *,
     corpus_id: str = ATTACK_CORPUS_ID,
     trace_id: str,
+    tenant_id: str = "",
+    principal: str = "",
 ) -> KnowledgeQueryPlan | None:
     """Pin the currently active knowledge + embedding releases for one request."""
     active = await service.get_active_release(corpus_id)
@@ -69,6 +71,8 @@ async def resolve_active_knowledge_query_plan(
         embedding_release_id=embedding_release_id,
         trace_id=trace_id,
         kb_name=corpus_to_kb_name(corpus_id) or ATTACK_KB_NAME,
+        tenant_id=tenant_id,
+        principal=principal,
     )
 
 

@@ -51,6 +51,10 @@ _SEQUENCE_KEY_PREFIX = "shadowtrace:socketio:seq:"
 _SCHEMA_PATH = (
     Path(__file__).resolve().parents[2].parent / "contracts" / "socketio" / "events.schema.json"
 )
+_IMPACT_ASSESSMENT_URI = "https://shadowtrace.local/schemas/ImpactAssessment.json"
+_IMPACT_ASSESSMENT_PATH = (
+    Path(__file__).resolve().parents[2].parent / "contracts" / "schemas" / "ImpactAssessment.json"
+)
 _RECONNECT_DELAY_S = 2.0
 _RECOVERY_DELAY_S = 30.0
 _SESSION_VALIDATION_INTERVAL_S = 30.0
@@ -67,6 +71,37 @@ def _sequence_key(event_id: str) -> str:
 def _events_schema() -> dict[str, Any]:
     """Load the Socket.IO envelope JSON Schema once per process."""
     return cast(dict[str, Any], json.loads(_SCHEMA_PATH.read_text(encoding="utf-8")))
+
+
+@lru_cache(maxsize=1)
+def _events_schema_registry() -> Any:
+    """Offline $ref resolver for ImpactAssessment (no HTTP to shadowtrace.local)."""
+    from referencing import Registry, Resource
+    from referencing.jsonschema import DRAFT202012
+
+    contents = json.loads(_IMPACT_ASSESSMENT_PATH.read_text(encoding="utf-8"))
+    resource = Resource.from_contents(contents, default_specification=DRAFT202012)
+    return Registry().with_resource(_IMPACT_ASSESSMENT_URI, resource)
+
+
+def _schema_ref_errors() -> tuple[type[BaseException], ...]:
+    errors: list[type[BaseException]] = []
+    for module_name, attr in (
+        ("jsonschema.exceptions", "_RefResolutionError"),
+        ("jsonschema.exceptions", "_WrappedReferencingError"),
+        ("referencing.exceptions", "Unresolvable"),
+    ):
+        try:
+            module = __import__(module_name, fromlist=[attr])
+            err_type = getattr(module, attr)
+        except (ImportError, AttributeError):
+            continue
+        if isinstance(err_type, type) and issubclass(err_type, BaseException):
+            errors.append(err_type)
+    return tuple(errors)
+
+
+_SCHEMA_REF_ERRORS = _schema_ref_errors()
 
 
 # ---------------------------------------------------------------------------
@@ -421,10 +456,21 @@ class SocketIOManager:
         }
 
         try:
-            jsonschema.validate(instance=socket_envelope, schema=_events_schema())
+            jsonschema.validate(
+                instance=socket_envelope,
+                schema=_events_schema(),
+                registry=_events_schema_registry(),
+            )
         except jsonschema.ValidationError:
             logger.warning(
                 "SocketIOManager envelope failed schema validation event_id=%s type=%s — dropped",
+                event_id,
+                message_type,
+            )
+            return
+        except _SCHEMA_REF_ERRORS:
+            logger.warning(
+                "SocketIOManager envelope $ref resolution failed event_id=%s type=%s — dropped",
                 event_id,
                 message_type,
             )
@@ -455,8 +501,10 @@ class SocketIOManager:
             ),
             return_exceptions=True,
         )
+        emit_ok = True
         for i, result in enumerate(results):
             if isinstance(result, Exception):
+                emit_ok = False
                 target = "event_room" if i == 0 else "global"
                 logger.warning(
                     "SocketIOManager emit failed event_id=%s target=%s type=%s",
@@ -465,6 +513,8 @@ class SocketIOManager:
                     message_type,
                     exc_info=result,
                 )
+        if emit_ok:
+            self._last_success_at = datetime.now(UTC).isoformat()
 
 
 _active_manager: SocketIOManager | None = None

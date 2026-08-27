@@ -62,7 +62,10 @@ from dynamic_eval_profiles import (  # noqa: E402
 from strict_closed_acceptance import (  # noqa: E402
     STRICT_ASSERT_POLL_S as _STRICT_ASSERT_POLL_S,
 )
-from strict_closed_acceptance import assert_strict_closed_acceptance  # noqa: E402
+from strict_closed_acceptance import (  # noqa: E402
+    assert_strict_closed_acceptance,
+    list_all_event_actions,  # noqa: F401  # re-export for gold-path tests
+)
 from strict_closed_acceptance import (  # noqa: E402
     strict_assert_budget as _strict_assert_budget,
 )
@@ -274,6 +277,54 @@ def unwrap_event_detail(payload: dict[str, Any]) -> dict[str, Any]:
 def get_event(client: DynamicEvalClient, event_id: str) -> dict[str, Any]:
     payload = client.get_json(f"/api/v1/events/{event_id}")
     return unwrap_event_detail_payload(payload, expected_event_id=event_id)
+
+
+_TERMINAL_ANALYST_VERDICTS = frozenset({"false_positive", "confirmed_threat"})
+
+
+def map_gold_final_verdict(*, decision: str) -> str:
+    """Map scripted approve/reject to a terminal analyst verdict.
+
+    Approved L2/L3 containment means the gold path treated the case as a
+    confirmed threat. Never map to ``none`` — that cannot activate deferred
+    terminal writeback.
+    """
+    return "confirmed_threat" if decision == "approve" else "false_positive"
+
+
+def maybe_submit_analyst_final_verdict(
+    client: DynamicEvalClient,
+    event_id: str,
+    *,
+    require_closed: bool,
+    decision: str,
+    submitted: set[str],
+) -> bool:
+    """Unblock VERIFYING + manual_resolution holds that need a terminal verdict."""
+    if not require_closed or event_id in submitted:
+        return False
+    payload = client.get_json(f"/api/v1/events/{event_id}")
+    if not isinstance(payload, dict):
+        return False
+    event = unwrap_event_detail_payload(payload, expected_event_id=event_id)
+    status = str(event.get("status") or "")
+    substate = str(payload.get("execution_substate") or "")
+    verdict = str(payload.get("final_verdict") or event.get("final_verdict") or "")
+    if status != "verifying" or substate != "manual_resolution":
+        return False
+    if verdict in _TERMINAL_ANALYST_VERDICTS:
+        return False
+    mapped = map_gold_final_verdict(decision=decision)
+    client.post_json(
+        f"/api/v1/events/{event_id}/final-verdict",
+        {
+            "final_verdict": mapped,
+            "reason": "gold_eval_analyst_terminal_verdict",
+            "resume": True,
+        },
+    )
+    submitted.add(event_id)
+    return True
 
 
 def list_events(client: DynamicEvalClient, *, page_size: int = 50) -> list[dict[str, Any]]:
@@ -770,6 +821,7 @@ def run_gold_loop(
 
     decisions: dict[str, list[dict[str, Any]]] = {eid: [] for eid in event_ids}
     decided_ids: set[str] = set()
+    verdict_submitted: set[str] = set()
     finals: dict[str, str] = {}
     evidence_statuses: dict[str, str] = {}
     waiting_stall: dict[str, int] = {eid: 0 for eid in event_ids}
@@ -857,6 +909,19 @@ def run_gold_loop(
                         f"[dynamic-eval] scripted {decision} on {event_id}: "
                         f"{len(outcomes)} action(s)"
                     )
+
+            if maybe_submit_analyst_final_verdict(
+                client,
+                event_id,
+                require_closed=require_closed,
+                decision=decision,
+                submitted=verdict_submitted,
+            ):
+                all_done = False
+                _progress(
+                    f"[dynamic-eval] scripted final-verdict on {event_id} "
+                    f"({map_gold_final_verdict(decision=decision)})"
+                )
 
             if _terminal_enough(status, require_closed=require_closed) and not pending:
                 continue

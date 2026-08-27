@@ -6,7 +6,8 @@ checkpoint and never re-enters that epilogue, so ``close_node`` (and HTTP
 close) must own the same best-effort pass.
 
 Callers must spawn, not await, so MemoryAgent LLM work cannot consume the
-parent Celery / request time budget.
+parent request time budget. Celery ``asyncio.run`` wrappers drain spawned
+tasks before the loop tears down; HTTP keeps the long-lived event loop.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from app.models.enums import EventStatus
 logger = logging.getLogger(__name__)
 
 _MEMORY_TASKS: set[asyncio.Task[None]] = set()
+_MEMORY_DRAIN_TIMEOUT_S = 180.0
 
 
 def _event_status(context: Any) -> EventStatus | None:
@@ -131,3 +133,13 @@ def spawn_memory_after_close(
     _MEMORY_TASKS.add(task)
     task.add_done_callback(_MEMORY_TASKS.discard)
     return task
+
+
+async def drain_memory_after_close_tasks(*, timeout_s: float = _MEMORY_DRAIN_TIMEOUT_S) -> None:
+    """Finish spawned consolidations before a short-lived asyncio.run() tears down."""
+    pending = [task for task in tuple(_MEMORY_TASKS) if not task.done()]
+    if not pending:
+        return
+    _done, still = await asyncio.wait(pending, timeout=timeout_s)
+    for task in still:
+        logger.warning("memory_after_close drain timed out task=%s", task.get_name())

@@ -3258,3 +3258,115 @@ async def test_stl_fallback_unexpected_publish_keeps_retry_and_redacts_last_erro
         assert "amqp://" not in (row.last_error or "")
     assert "secret" not in caplog.text
     assert "amqp://" not in caplog.text
+
+
+async def _seed_pending_intent(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    event_id: str,
+    intent_id: str,
+    severity: Severity,
+    created_at: datetime,
+) -> None:
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="cμ claim fixture",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=severity.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.PENDING.value,
+                    revision=1,
+                    attempt=0,
+                    include_response_execution=False,
+                    generate_report=False,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+
+
+@pytest.mark.asyncio
+async def test_claim_batch_same_timestamp_high_before_low(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = InvestigationIntentService(
+        session_factory,
+        settings=Settings(TASK_MODE="celery"),
+    )
+    stamp = datetime.now(UTC)
+    sfx = uuid4().hex[:8]
+    high_intent = f"iin-cmu-high-{sfx}"
+    low_intent = f"iin-cmu-low-{sfx}"
+    await _seed_pending_intent(
+        session_factory,
+        event_id=f"evt-cmu-high-{sfx}",
+        intent_id=high_intent,
+        severity=Severity.HIGH,
+        created_at=stamp,
+    )
+    await _seed_pending_intent(
+        session_factory,
+        event_id=f"evt-cmu-low-{sfx}",
+        intent_id=low_intent,
+        severity=Severity.LOW,
+        created_at=stamp,
+    )
+    first = await service._claim_batch(limit=1)
+    rest = await service._claim_batch(limit=200)
+    claimed = first + rest
+    assert high_intent in claimed
+    assert low_intent in claimed
+    assert claimed.index(high_intent) < claimed.index(low_intent)
+    if first and first[0] in {high_intent, low_intent}:
+        assert first == [high_intent]
+
+
+@pytest.mark.asyncio
+async def test_claim_batch_same_severity_keeps_fifo(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = InvestigationIntentService(
+        session_factory,
+        settings=Settings(TASK_MODE="celery"),
+    )
+    now = datetime.now(UTC)
+    sfx = uuid4().hex[:8]
+    older_intent = f"iin-cmu-old-{sfx}"
+    newer_intent = f"iin-cmu-new-{sfx}"
+    await _seed_pending_intent(
+        session_factory,
+        event_id=f"evt-cmu-old-{sfx}",
+        intent_id=older_intent,
+        severity=Severity.HIGH,
+        created_at=now - timedelta(minutes=3),
+    )
+    await _seed_pending_intent(
+        session_factory,
+        event_id=f"evt-cmu-new-{sfx}",
+        intent_id=newer_intent,
+        severity=Severity.HIGH,
+        created_at=now - timedelta(seconds=5),
+    )
+    claimed = await service._claim_batch(limit=200)
+    assert older_intent in claimed
+    assert newer_intent in claimed
+    assert claimed.index(older_intent) < claimed.index(newer_intent)

@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import re
+
 from app.core.config import Settings, get_settings
 from app.models.knowledge import RetrievedChunk
+
+_EN_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,}")
+_CJK_RUN = re.compile(r"[\u4e00-\u9fff]{2,}")
 
 
 class Reranker:
@@ -34,21 +39,36 @@ class Reranker:
         return self._mode
 
 
-def _mock_rerank(query: str, chunks: list[RetrievedChunk], top_k: int) -> list[RetrievedChunk]:
-    """Deterministic re-rank: weighted combination of original score and query overlap."""
-    query_terms = set(query.lower().split())
+def _tokenize(text: str) -> set[str]:
+    lowered = text.lower()
+    tokens = {match.group(0).lower() for match in _EN_TOKEN.finditer(lowered)}
+    tokens.update(match.group(0) for match in _CJK_RUN.finditer(text))
+    return tokens
 
-    def _overlap(content: str) -> float:
-        content_lower = content.lower()
+
+def _mock_rerank(query: str, chunks: list[RetrievedChunk], top_k: int) -> list[RetrievedChunk]:
+    """Deterministic re-rank: original score plus token-boundary overlap.
+
+    Keyword hits are not given a blanket boost; substring matches on short
+    tokens (``in``, ``id``) do not count.
+    """
+    query_terms = _tokenize(query.replace(":", " ").replace(";", " "))
+
+    def _overlap(chunk: RetrievedChunk) -> float:
+        meta_bits = " ".join(
+            str(chunk.metadata.get(key) or "")
+            for key in ("technique_id", "technique_name", "case_id", "event_type", "aliases")
+        )
+        haystack_terms = _tokenize(f"{chunk.content} {meta_bits}")
         if not query_terms:
             return 0.0
-        hits = sum(1 for t in query_terms if t in content_lower)
+        hits = sum(1 for term in query_terms if term in haystack_terms)
         return hits / len(query_terms)
 
     scored: list[tuple[float, RetrievedChunk]] = []
     for chunk in chunks:
-        overlap = _overlap(chunk.content)
-        new_score = 0.6 * chunk.score + 0.4 * overlap
+        overlap = _overlap(chunk)
+        new_score = 0.65 * chunk.score + 0.35 * overlap
         scored.append((new_score, chunk))
 
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -57,7 +77,6 @@ def _mock_rerank(query: str, chunks: list[RetrievedChunk], top_k: int) -> list[R
     if not top:
         return []
 
-    # Re-normalize scores to 0-1
     max_score = top[0][0]
     min_score = top[-1][0]
     score_range = max_score - min_score if max_score != min_score else 1.0

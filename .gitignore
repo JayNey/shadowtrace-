@@ -9,6 +9,9 @@ build/
 .venv/
 venv/
 .env
+.env.live
+.env.llm.audit
+infra/docker-compose.llm-audit.yml
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/

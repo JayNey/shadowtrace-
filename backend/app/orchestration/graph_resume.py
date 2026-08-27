@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
 from celery.exceptions import SoftTimeLimitExceeded
 from langchain_core.runnables import RunnableConfig
@@ -28,11 +28,13 @@ from app.models.enums import (
     DispositionPolicy,
     EventStatus,
     ExecutionSubstate,
+    FinalVerdict,
     WritebackStatus,
 )
 from app.orchestration.workflow_graph import (
     NODE_APPROVAL,
     NODE_EXECUTE,
+    NODE_REPORT,
     NODE_VERIFY,
     invoke_investigation_graph,
 )
@@ -45,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 GetSuperAgent = Callable[[], Awaitable[Any]]
 GetWorkflowRuntime = Callable[[], Awaitable[Any]]
+GraphResumeOutcome = Literal["ok", "deferred"]
 
 # Resume may delegate to Celery only when the event never entered the graph.
 _GRAPH_NEVER_STARTED_STATUSES = frozenset(
@@ -146,6 +149,29 @@ def _has_active_terminal_outbox(rows: list[tuple[str, str | None]]) -> bool:
     )
 
 
+def _can_reverify_after_analyst_terminal_verdict(
+    *,
+    final_verdict: str | None,
+    failed_writebacks: list[str],
+    degraded_flags: list[Any],
+) -> bool:
+    """Re-enter Verify after an analyst posts a terminal final_verdict.
+
+    Verdict-gated holds have no terminal outbox yet. Clearing the stale
+    ``need_manual`` flag (then scheduling from NODE_EXECUTE) is what lets
+    EventDispositionService activate the deferred writeback. Effect failures
+    and legitimate degraded holds stay blocked.
+    """
+    if failed_writebacks:
+        return False
+    if _has_legitimate_manual_hold(degraded_flags):
+        return False
+    return final_verdict in {
+        FinalVerdict.FALSE_POSITIVE.value,
+        FinalVerdict.CONFIRMED_THREAT.value,
+    }
+
+
 def _can_clear_manual_resolution(
     *,
     degraded_flags: list[Any],
@@ -210,6 +236,7 @@ async def _reconcile_verify_resume_patch(
         not recoverable_writebacks and not pending_actions and _all_writebacks_resolved(wb_statuses)
     )
     disposition_policy = values.get("disposition_policy")
+    final_verdict = await _read_event_final_verdict(session_factory, event_id)
 
     if need_writeback and writebacks_resolved:
         patch["verify_need_writeback_recovery"] = False
@@ -218,14 +245,17 @@ async def _reconcile_verify_resume_patch(
         patch["verify_pending_writeback_action_ids"] = []
         patch["execution_substate"] = ExecutionSubstate.NONE.value
 
-    if (
-        need_manual
-        and not legitimate_manual
-        and _can_clear_manual_resolution(
+    if need_manual and not legitimate_manual and (
+        _can_clear_manual_resolution(
             degraded_flags=degraded_flags,
             rows=outbox_rows,
             failed_writebacks=recoverable_writebacks,
             disposition_policy=disposition_policy,
+        )
+        or _can_reverify_after_analyst_terminal_verdict(
+            final_verdict=final_verdict,
+            failed_writebacks=recoverable_writebacks,
+            degraded_flags=degraded_flags,
         )
     ):
         patch["verify_need_manual_resolution"] = False
@@ -246,6 +276,17 @@ async def _read_event_status(
             select(orm.SecurityEvent.status).where(orm.SecurityEvent.event_id == event_id)
         )
     return str(event_status or "")
+
+
+async def _read_event_final_verdict(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> str:
+    async with session_factory() as session:
+        raw = await session.scalar(
+            select(orm.SecurityEvent.final_verdict).where(orm.SecurityEvent.event_id == event_id)
+        )
+    return str(raw or "")
 
 
 async def _read_event_status_enum(
@@ -386,6 +427,7 @@ async def prepare_graph_resume_state(
             or values.get("execution_substate") == ExecutionSubstate.WAITING_APPROVAL.value
         )
         if needs_patch:
+            as_node = NODE_REPORT
             await graph.aupdate_state(
                 config,
                 {
@@ -394,8 +436,21 @@ async def prepare_graph_resume_state(
                     "execution_substate": ExecutionSubstate.NONE.value,
                     "event_status": EventStatus.REPORTING.value,
                 },
-                as_node=NODE_APPROVAL,
+                as_node=as_node,
             )
+        return True
+
+    if status_value == EventStatus.WAITING_APPROVAL.value:
+        logger.info(
+            "prepare_graph_resume: still waiting_approval event=%s; leave halt in place",
+            event_id,
+        )
+        return True
+
+    if status_value in {
+        EventStatus.PLANNING_RESPONSE.value,
+        EventStatus.REPLANNING.value,
+    }:
         return True
 
     if status_value != EventStatus.EXECUTING_RESPONSE.value:
@@ -587,13 +642,55 @@ async def _delegate_execute_investigation(
     )
 
 
+async def maybe_catchup_approval_resume_same_lease(
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    event_id: str,
+    graph: Any,
+    *,
+    get_super_agent: GetSuperAgent,
+    get_workflow_runtime: GetWorkflowRuntime,
+) -> None:
+    """Continue from approval_wait while the investigation worker still holds the lease.
+
+    HTTP approve can advance DB to ``EXECUTING_RESPONSE`` / ``REPORTING`` while the
+    worker is still inside ``investigate()``. After the graph returns halted, resume
+    on the same lease so execute is not lost when the HTTP resume skipped acquire.
+    """
+    if graph is None or session_factory is None:
+        return
+    status_value = await _read_event_status(session_factory, event_id)
+    if status_value not in {
+        EventStatus.EXECUTING_RESPONSE.value,
+        EventStatus.REPORTING.value,
+    }:
+        return
+    snapshot = await graph.aget_state({"configurable": {"thread_id": event_id}})
+    values = getattr(snapshot, "values", None)
+    if not isinstance(values, dict) or not values:
+        return
+    if not (
+        values.get("halted")
+        or values.get("needs_approval_wait")
+        or values.get("execution_substate") == ExecutionSubstate.WAITING_APPROVAL.value
+    ):
+        return
+    await resume_investigation_from_checkpoint(
+        session_factory,
+        event_id,
+        get_super_agent=get_super_agent,
+        get_workflow_runtime=get_workflow_runtime,
+        lease_acquired=True,
+    )
+
+
 async def resume_investigation_from_checkpoint(
     session_factory: async_sessionmaker[AsyncSession],
     event_id: str,
     *,
     get_super_agent: GetSuperAgent,
     get_workflow_runtime: GetWorkflowRuntime,
-) -> None:
+    lease_acquired: bool = False,
+) -> GraphResumeOutcome:
     """Resume LangGraph from checkpoint after approval or writeback.
 
     ISSUE-247: ``REPORTING`` / ``CLOSED`` / ``FAILED`` never fall back to a
@@ -602,11 +699,58 @@ async def resume_investigation_from_checkpoint(
     wired. Missing checkpoint on ``REPORTING`` raises ``checkpoint_missing``
     while leaving the event at ``REPORTING`` (caller records degraded flags).
     """
+    from app.api.v1.deps import get_event_lease
+    from app.orchestration.lease import generate_owner_id
+
+    lease = None
+    owner_id: str | None = None
+    owns_lease = False
+    if not lease_acquired:
+        lease = get_event_lease()
+        owner_id = generate_owner_id()
+        acquired = await lease.acquire(event_id, owner_id)
+        if not acquired:
+            logger.info("graph resume deferred event=%s — lease already held", event_id)
+            return "deferred"
+        owns_lease = True
+    try:
+        await _resume_investigation_from_checkpoint_body(
+            session_factory,
+            event_id,
+            get_super_agent=get_super_agent,
+            get_workflow_runtime=get_workflow_runtime,
+        )
+        return "ok"
+    finally:
+        if owns_lease and lease is not None and owner_id is not None:
+            try:
+                await lease.release(event_id, owner_id)
+            except Exception:
+                logger.debug(
+                    "graph resume lease release failed event=%s",
+                    event_id,
+                    exc_info=True,
+                )
+
+
+async def _resume_investigation_from_checkpoint_body(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    *,
+    get_super_agent: GetSuperAgent,
+    get_workflow_runtime: GetWorkflowRuntime,
+) -> None:
     from app.orchestration.graph_resume_observability import GraphResumeFailedError
 
     agent = await get_super_agent()
     graph = getattr(agent, "_investigation_graph", None)
     status_value = await _read_event_status(session_factory, event_id)
+    if status_value == EventStatus.WAITING_APPROVAL.value:
+        logger.info(
+            "graph resume skipped event=%s — still waiting_approval",
+            event_id,
+        )
+        return
     if status_value in _NO_FULL_GRAPH_RESTART_STATUSES:
         if status_value in {EventStatus.CLOSED.value, EventStatus.FAILED.value}:
             logger.info(
@@ -670,6 +814,7 @@ async def resume_investigation_from_checkpoint(
 
 
 __all__ = [
+    "maybe_catchup_approval_resume_same_lease",
     "prepare_graph_resume_state",
     "resume_investigation_from_checkpoint",
 ]

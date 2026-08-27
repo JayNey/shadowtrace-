@@ -47,6 +47,18 @@ def test_compose_workers_do_not_seed_playbook() -> None:
         )
 
 
+def test_scheduler_beat_healthcheck_does_not_require_pgrep() -> None:
+    """python:slim images omit procps; PID 1 cmdline is the celery beat process."""
+    data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+    beat = (data.get("services") or {}).get("scheduler-beat") or {}
+    healthcheck = beat.get("healthcheck") or {}
+    test = healthcheck.get("test") or []
+    joined = " ".join(str(item) for item in test)
+    assert "pgrep" not in joined
+    assert "/proc/1/cmdline" in joined
+    assert "beat" in joined
+
+
 def test_compose_workers_skip_db_migrate_and_wait_for_backend() -> None:
     """ISSUE-238 regression: workers must not race backend alembic on cold boot."""
     data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
@@ -82,7 +94,7 @@ def test_bootstrap_always_loads_playbook_release() -> None:
     assert "playbook_resources" in text
     assert "ensuring playbook release is active" in text
     # Optional LOAD_KB path must not be the only playbook loader.
-    assert "for loader in load_attack_kb load_case_kb; do" in text
+    assert "for loader in load_attack_kb load_case_kb load_org_context_kb; do" in text
     assert "load_playbook_kb" not in text
 
 

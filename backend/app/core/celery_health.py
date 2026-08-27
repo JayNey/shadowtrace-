@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from redis.asyncio import Redis
@@ -16,6 +17,8 @@ from redis.asyncio import Redis
 logger = logging.getLogger(__name__)
 
 DEFAULT_INSPECT_TIMEOUT_SECONDS = 2.0
+INTENT_BEAT_HEARTBEAT_KEY = "shadowtrace:celery:investigation-intent-beat:last_ok"
+_HEARTBEAT_STALE_FACTOR = 3
 
 
 async def check_celery_broker(broker_url: str) -> str:
@@ -98,27 +101,91 @@ async def build_celery_health(
     }
 
 
+async def stamp_investigation_intent_beat_heartbeat(redis: Any) -> None:
+    """Record that a beat-scheduled intent task actually ran (not just that the API could build a celery schedule)."""
+    try:
+        client = redis.get_client()
+        await client.set(INTENT_BEAT_HEARTBEAT_KEY, str(int(time.time())))
+    except Exception:  # noqa: BLE001 — health stamp must never break dispatch
+        logger.debug("investigation intent beat heartbeat stamp failed", exc_info=True)
+
+
+def _intent_beat_heartbeat_age_s() -> float | None:
+    """Age of the last dispatch/reconcile heartbeat, or None when missing/unreadable."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    url = (settings.celery_broker_url or settings.redis_url or "").strip()
+    if not url:
+        return None
+    from redis import Redis as SyncRedis
+
+    client = SyncRedis.from_url(
+        url,
+        decode_responses=True,
+        socket_connect_timeout=0.5,
+        socket_timeout=0.5,
+    )
+    try:
+        raw = client.get(INTENT_BEAT_HEARTBEAT_KEY)
+        if raw is None:
+            return None
+        return max(0.0, time.time() - float(raw))
+    except Exception:  # noqa: BLE001 — health must never raise
+        logger.debug("investigation intent beat heartbeat read failed", exc_info=True)
+        return None
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
 def check_investigation_intent_beat_schedule(*, task_mode: str) -> dict[str, Any]:
-    """Verify durable intent recovery tasks are registered in the beat schedule."""
+    """Verify intent recovery is both registered for celery mode and actually ticking.
+
+    Building a celery schedule in the API process is not proof that scheduler-beat
+    ran with TASK_MODE=celery. Dispatch/reconcile stamp a Redis heartbeat when they run.
+    """
     mode = (task_mode or "background").strip().lower()
     if mode != "celery":
         return {
             "status": "not_applicable",
             "dispatch_scheduled": False,
             "reconcile_scheduled": False,
+            "beat_heartbeat_age_s": None,
         }
 
     from app.core.celery_app import _build_beat_schedule
-    from app.core.config import TaskMode
+    from app.core.config import TaskMode, get_settings
 
-    schedule = _build_beat_schedule(task_mode=TaskMode.CELERY)
+    schedule = _build_beat_schedule(task_mode=TaskMode(mode))
     dispatch_key = "shadowtrace-dispatch-investigation-intents"
     reconcile_key = "shadowtrace-reconcile-investigation-intents"
     dispatch_scheduled = dispatch_key in schedule
     reconcile_scheduled = reconcile_key in schedule
-    status = "ok" if dispatch_scheduled and reconcile_scheduled else "degraded"
-    return {
+    heartbeat_age_s = _intent_beat_heartbeat_age_s()
+    settings = get_settings()
+    stale_after_s = _HEARTBEAT_STALE_FACTOR * max(
+        int(settings.auto_investigate_dispatch_interval_s),
+        int(settings.auto_investigate_reconcile_interval_s),
+    )
+    heartbeat_ok = heartbeat_age_s is not None and heartbeat_age_s <= stale_after_s
+    if dispatch_scheduled and reconcile_scheduled and heartbeat_ok:
+        status = "ok"
+        reason = None
+    elif not (dispatch_scheduled and reconcile_scheduled):
+        status = "degraded"
+        reason = "schedule_incomplete"
+    else:
+        status = "degraded"
+        reason = "beat_heartbeat_stale" if heartbeat_age_s is not None else "beat_heartbeat_missing"
+    payload: dict[str, Any] = {
         "status": status,
         "dispatch_scheduled": dispatch_scheduled,
         "reconcile_scheduled": reconcile_scheduled,
+        "beat_heartbeat_age_s": heartbeat_age_s,
     }
+    if reason is not None:
+        payload["reason"] = reason
+    return payload

@@ -363,11 +363,14 @@ export default function EntityGraph({
   }
 
   if (!graph || graph.nodes.length === 0) {
+    const degradedReason = graph?.degraded
+      ? graph.degraded_reason?.trim() || "图谱降级，暂无节点"
+      : "图谱未生成";
     return (
       <div data-testid="entity-graph-empty">
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="图谱未生成"
+          description={degradedReason}
         />
       </div>
     );

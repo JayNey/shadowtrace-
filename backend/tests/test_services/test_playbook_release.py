@@ -29,6 +29,7 @@ from app.services.playbook_approval_binding import (
 from app.services.playbook_kb_service import PlaybookKBService
 from app.services.playbook_release_resolver import compute_playbook_object_hash
 from app.services.playbook_release_service import PlaybookReleaseService
+from tests.helpers.knowledge_isolation import PRESERVE_ORG_CONTEXT_DELETE
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 REPO_ROOT = BACKEND_DIR.parent
@@ -127,7 +128,7 @@ def release_service(
 
 async def _clean(session_factory: async_sessionmaker[AsyncSession]) -> None:
     async with session_factory() as session:
-        await session.execute(text("DELETE FROM knowledge_chunk"))
+        await session.execute(PRESERVE_ORG_CONTEXT_DELETE)
         await session.execute(text("DELETE FROM playbook_release_object"))
         await session.execute(text("DELETE FROM knowledge_release"))
         await session.commit()

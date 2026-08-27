@@ -287,6 +287,7 @@ function ActionsPanel({
 
   return (
     <Tabs
+      defaultActiveKey="security"
       items={[
         {
           key: "system",
@@ -908,6 +909,7 @@ export default function EventDetailPage() {
         <StorylineTimeline
           eventId={eventId}
           evidence={evidenceOutput?.evidence_list ?? []}
+          conflicts={evidenceOutput?.conflicts ?? []}
           refreshToken={event.event.updated_at}
         />
       ),

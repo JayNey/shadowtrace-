@@ -6,8 +6,10 @@
       "technique_id": "T1078",
       "technique_name": "Valid Accounts",
       "tactics": ["Defense Evasion", "Persistence", "Privilege Escalation", "Initial Access"],
+      "keywords": ["valid accounts", "insider", "account anomaly", "compromised credentials"],
+      "aliases": ["内鬼", "账号异常", "合法账号"],
       "description": "Adversaries may obtain and abuse credentials of existing accounts as a means of gaining Initial Access, Persistence, Privilege Escalation, or Defense Evasion. Compromised credentials may be used to bypass access controls placed on various resources on systems within the network and may even be used for persistent access to remote systems and externally available services.",
-      "detection": "Monitor for unusual account authentication patterns (impossible travel, off-hours activity, atypical source IPs). Audit logon events (Event ID 4624/4625 on Windows) and cloud access logs. Correlate with known compromised credential lists and look for multiple failed logins followed by success."
+      "detection": "Monitor for unusual account authentication patterns (impossible travel, off-hours activity, atypical source IPs). Audit logon events (Event ID 4624/4625 on Windows) and cloud access logs. Correlate with known compromised credential lists and look for multiple failed logins followed by success. Insider misuse of valid finance or ops accounts (for example zhangsan on PC-FIN-023) is still Valid Accounts."
     },
     {
       "technique_id": "T1005",
@@ -20,17 +22,28 @@
       "technique_id": "T1560",
       "technique_name": "Archive Collected Data",
       "tactics": ["Collection"],
+      "keywords": ["archive", "7z", "zip", "collection"],
+      "aliases": ["打包压缩", "压缩归档"],
       "description": "Adversaries may compress and/or encrypt data collected prior to exfiltration. Common archiving utilities include zip, rar, 7z, tar, and gzip. Encryption may use standard algorithms (AES, RC4) or custom schemes. Archives may also be split into chunks or password-protected to evade detection.",
       "detection": "Monitor for execution of common archiving tools (zip, 7z, WinRAR, tar, gzip) especially when followed by network connections. Watch for processes creating .zip/.7z/.rar/.tar.gz files in temporary or user-writable directories. Alert on archiving of large numbers of files or unusual directories."
+    },
+    {
+      "technique_id": "T1560.001",
+      "technique_name": "Archive via Utility",
+      "tactics": ["Collection"],
+      "keywords": ["archive", "7z", "7z.exe", "finance_report.zip"],
+      "aliases": ["打包压缩", "7z打包"],
+      "description": "Adversaries may use utilities such as 7-Zip, WinRAR, or tar to compress collected files before exfiltration. On finance endpoints this often appears as 7z.exe creating a zip of report files.",
+      "detection": "Alert on 7z.exe or similar archivers packing sensitive directories, especially commands like 7z.exe a finance_report.zip on hosts such as PC-FIN-023, followed by outbound transfers."
     },
     {
       "technique_id": "T1567",
       "technique_name": "Exfiltration Over Web Service",
       "tactics": ["Exfiltration"],
-      "keywords": ["exfiltration", "data exfiltration", "web exfiltration"],
+      "keywords": ["exfiltration", "data exfiltration", "web exfiltration", "unknown-upload-example.com"],
       "aliases": ["数据外泄", "数据外传", "外泄数据"],
       "description": "Adversaries may exfiltrate data to a cloud storage service, web service, or file sharing platform rather than over their primary C2 channel. Popular targets include Dropbox, Google Drive, Mega, Pastebin, Discord, and Telegram. This blends in with legitimate web traffic and can bypass egress filtering.",
-      "detection": "Monitor network connections to known cloud storage and file sharing domains. Look for large outbound data transfers to newly-registered or rarely-contacted domains. Inspect TLS SNI and HTTP Host headers for cloud storage API endpoints. Analyze netflow for disproportionate upload-to-download ratios."
+      "detection": "Monitor network connections to known cloud storage and file sharing domains. Look for large outbound data transfers to newly-registered or rarely-contacted domains such as unknown-upload-example.com. Inspect TLS SNI and HTTP Host headers for cloud storage API endpoints. Analyze netflow for disproportionate upload-to-download ratios."
     },
     {
       "technique_id": "T1071",
@@ -61,15 +74,19 @@
       "technique_id": "T1110",
       "technique_name": "Brute Force",
       "tactics": ["Credential Access"],
+      "keywords": ["brute force", "password spray", "bulk login"],
+      "aliases": ["暴力破解", "账号异常"],
       "description": "Adversaries may use brute force techniques to gain access to accounts when passwords are unknown or when password hashes are obtained. This includes password spraying (few passwords against many accounts), credential stuffing, and dictionary attacks. Commonly targeted services include SSH, RDP, SMB, and web applications.",
-      "detection": "Monitor authentication logs for multiple failed login attempts from the same source IP or against the same account. Alert on password spraying patterns (one password, many accounts, minimal failures per account). Track failed authentication rate per source IP and trigger above baseline thresholds."
+      "detection": "Monitor authentication logs for multiple failed login attempts from the same source IP or against the same account. Distinguish authorized bulk login by ops-change-bot during a change window from password spraying. Alert on password spraying patterns (one password, many accounts, minimal failures per account)."
     },
     {
       "technique_id": "T1566",
       "technique_name": "Phishing",
       "tactics": ["Initial Access"],
+      "keywords": ["phishing", "suspicious domain", "newly registered"],
+      "aliases": ["可疑域名", "钓鱼"],
       "description": "Adversaries may send phishing messages to gain access to victim systems. This includes spearphishing attachments (malicious files), spearphishing links (malicious URLs), and spearphishing via third-party services. Phishing is frequently used as the initial infection vector in targeted intrusions.",
-      "detection": "Monitor email gateway logs for messages with suspicious attachments (.exe, .js, .vbs, .docm, .xlsm), known-malicious URLs, or domain spoofing. Implement DMARC/DKIM/SPF verification checks. Track users clicking on links in quarantined emails. Analyze email headers for sender anomalies."
+      "detection": "Monitor email gateway logs for messages with suspicious attachments (.exe, .js, .vbs, .docm, .xlsm), known-malicious URLs, or domain spoofing. Newly registered domains contacted by office hosts (for example brand-new-cdn-example.net) may be phishing infrastructure. Implement DMARC/DKIM/SPF verification checks."
     },
     {
       "technique_id": "T1059",

@@ -23,6 +23,7 @@ from app.models.enums import (
     GraphResumeIntentStatus,
     Severity,
 )
+from app.models.graph_resume_intent import INTENT_KIND_APPROVAL_PLAN_RESUME
 from app.services.action_execution_service import ActionExecutionService
 from app.services.context_service import unwrap_journal_value
 from app.services.manual_resolution_service import (
@@ -284,6 +285,77 @@ async def test_create_resume_intent_requires_manual_hold(
             resolution="mark_success",
             principal="analyst-1",
         )
+
+
+@pytest.mark.asyncio
+async def test_enqueue_approval_plan_resume_without_manual_hold(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(
+        session_factory,
+        status=EventStatus.EXECUTING_RESPONSE,
+    )
+    service = ManualResolutionService(session_factory)
+    first = await service.enqueue_approval_plan_resume_intent(event_id)
+    replay = await service.enqueue_approval_plan_resume_intent(event_id)
+    assert first.intent_id == replay.intent_id
+    assert first.intent_kind == INTENT_KIND_APPROVAL_PLAN_RESUME
+    assert first.status is GraphResumeIntentStatus.PENDING
+    async with session_factory() as session:
+        row = await session.get(orm.GraphResumeIntent, first.intent_id)
+        assert row is not None
+        assert row.status == GraphResumeIntentStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_approval_plan_resume_skips_hold_fence_and_runs(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(
+        session_factory,
+        status=EventStatus.EXECUTING_RESPONSE,
+    )
+    resumed: list[str] = []
+
+    async def _runner(eid: str) -> str:
+        resumed.append(eid)
+        return "ok"
+
+    service = ManualResolutionService(session_factory, resume_runner=_runner)
+    intent = await service.enqueue_approval_plan_resume_intent(event_id)
+    claimed = await service._claim_batch(limit=100)
+    assert intent.intent_id in claimed
+    ok = await service._run_claimed_intent(intent.intent_id)
+    assert ok is True
+    assert resumed == [event_id]
+    async with session_factory() as session:
+        row = await session.get(orm.GraphResumeIntent, intent.intent_id)
+        assert row is not None
+        assert row.status == GraphResumeIntentStatus.TERMINAL.value
+
+
+@pytest.mark.asyncio
+async def test_approval_plan_resume_deferred_requeues(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(
+        session_factory,
+        status=EventStatus.EXECUTING_RESPONSE,
+    )
+
+    async def _runner(_eid: str) -> str:
+        return "deferred"
+
+    service = ManualResolutionService(session_factory, resume_runner=_runner)
+    intent = await service.enqueue_approval_plan_resume_intent(event_id)
+    claimed = await service._claim_batch(limit=100)
+    assert intent.intent_id in claimed
+    ok = await service._run_claimed_intent(intent.intent_id)
+    assert ok is False
+    async with session_factory() as session:
+        row = await session.get(orm.GraphResumeIntent, intent.intent_id)
+        assert row is not None
+        assert row.status == GraphResumeIntentStatus.RETRY.value
 
 
 @pytest.mark.asyncio

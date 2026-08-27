@@ -28,8 +28,8 @@
     "event_id": null,
     "event_type": "host_compromise",
     "case_label": "true_positive",
-    "summary": "员工工作站被植入远控木马：恶意宏文档下载 Emotet 加载器，建立 C2 通道后释放勒索模块",
-    "key_entities": "host=PC-FIN-023; account=zhangsan; src_ip=45.153.12.88; malicious_hash=e4d9f3a1; c2_domain=evil-c2.example",
+    "summary": "市场部工作站被植入远控木马：恶意宏文档下载 Emotet 加载器，建立 C2 通道后释放勒索模块",
+    "key_entities": "host=PC-MKT-088; account=lisi; src_ip=198.51.100.44; malicious_hash=e4d9f3a1; c2_domain=evil-c2.example",
     "final_verdict": "confirmed_threat",
     "risk_score": 92,
     "resolution": "隔离受感染主机，阻断 C2 域名，全网扫描 IOC，推送 EDR 策略更新，通知员工参加安全意识培训",
@@ -190,5 +190,53 @@
     "risk_score": 50,
     "resolution": "调取监控录像后发现持卡人因手指受伤导致指纹识别失败后使用备用 PIN 码进入，符合门禁流程，但通知安保团队优化异常刷卡告警阈值",
     "closed_at": "2024-08-22T23:30:00Z"
+  },
+  {
+    "case_id": "case-10000017",
+    "event_id": null,
+    "event_type": "data_exfiltration",
+    "case_label": "true_positive",
+    "summary": "财务终端 zhangsan 在 PC-FIN-023 用 7z.exe 打包 finance_report.zip 后外发至未批准域名 unknown-upload-example.com",
+    "key_entities": "account=zhangsan; host=PC-FIN-023; process=7z.exe; file=finance_report.zip; domain=unknown-upload-example.com; dst_ip=203.0.113.88",
+    "final_verdict": "confirmed_threat",
+    "risk_score": 90,
+    "resolution": "隔离主机并阻断外发域名，冻结账号，确认压缩包未进入批准的 files.corp.internal 通道",
+    "closed_at": "2024-06-15T18:00:00Z"
+  },
+  {
+    "case_id": "case-10000018",
+    "event_id": null,
+    "event_type": "data_exfiltration",
+    "case_label": "false_positive",
+    "summary": "财务岗位向集团批准文件服务器 files.corp.internal 同步报表被误判为外泄，未出现 7z 外发或 unknown-upload-example.com",
+    "key_entities": "account=finance-ops; host=PC-FIN-011; domain=files.corp.internal; file_pattern=*.xlsx",
+    "final_verdict": "false_positive",
+    "risk_score": 22,
+    "resolution": "确认目标为批准内部文件服务器，更新 DLP 例外，与内鬼 7z 外发路径区分",
+    "closed_at": "2024-06-08T11:00:00Z"
+  },
+  {
+    "case_id": "case-10000019",
+    "event_id": null,
+    "event_type": "suspicious_domain",
+    "case_label": "true_positive",
+    "summary": "办公主机 PC-OFFICE-014 上 office-user-014 访问新注册域名 brand-new-cdn-example.net，无批准 CDN 记录",
+    "key_entities": "account=office-user-014; host=PC-OFFICE-014; domain=brand-new-cdn-example.net",
+    "final_verdict": "confirmed_threat",
+    "risk_score": 68,
+    "resolution": "阻断该域名并排查主机，确认非内部 CDN 白名单",
+    "closed_at": "2024-06-15T16:00:00Z"
+  },
+  {
+    "case_id": "case-10000020",
+    "event_id": null,
+    "event_type": "account_anomaly",
+    "case_label": "true_positive",
+    "summary": "域账号在非变更窗口从异常跳板外主机批量失败登录后成功，模式不同于 ops-change-bot 已审批改密",
+    "key_entities": "account=finance_admin; host=PC-FIN-009; src_ip=203.0.113.50; behavior=password_spray",
+    "final_verdict": "confirmed_threat",
+    "risk_score": 84,
+    "resolution": "重置凭据并禁用账号，与变更窗口内 ops-change-bot 合规批量登录区分",
+    "closed_at": "2024-05-02T03:20:00Z"
   }
 ]

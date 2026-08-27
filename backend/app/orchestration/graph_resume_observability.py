@@ -35,7 +35,7 @@ GRAPH_RESUME_WRITER = "GraphResumeService"
 _RESUME_MAX_ATTEMPTS = 3
 _RESUME_RETRY_BASE_SECONDS = 0.05
 
-ResumeStatus = Literal["ok", "failed", "skipped"]
+ResumeStatus = Literal["ok", "failed", "skipped", "deferred"]
 
 
 class GraphResumeFailedError(Exception):
@@ -195,26 +195,30 @@ async def execute_graph_resume_with_retry(
     get_super_agent: GetSuperAgent,
     get_workflow_runtime: GetWorkflowRuntime,
     degraded_flags: DegradedFlagService | None,
-) -> None:
+    lease_acquired: bool = False,
+) -> ResumeStatus:
     """Resume with limited retries; record degraded + audit before raising."""
     if is_in_investigation_graph(event_id=event_id):
         logger.warning(
             "skip nested graph resume while graph active event=%s",
             event_id,
         )
-        return
+        return "deferred"
 
     last_exc: BaseException | None = None
     for attempt in range(_RESUME_MAX_ATTEMPTS):
         try:
-            await resume_investigation_from_checkpoint(
+            outcome = await resume_investigation_from_checkpoint(
                 session_factory,
                 event_id,
                 get_super_agent=get_super_agent,
                 get_workflow_runtime=get_workflow_runtime,
+                lease_acquired=lease_acquired,
             )
+            if outcome == "deferred":
+                return "deferred"
             await clear_graph_resume_failure(degraded_flags, event_id)
-            return
+            return "ok"
         except SoftTimeLimitExceeded:
             # ISSUE-314: task/intent layer owns soft-limit; never wrap as resume failure.
             raise
@@ -260,7 +264,7 @@ async def execute_graph_resume_with_retry(
     ) from last_exc
 
 
-ResumeHook = Callable[[str], Awaitable[None]]
+ResumeHook = Callable[[str], Awaitable[ResumeStatus | None]]
 
 
 __all__ = [

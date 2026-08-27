@@ -70,6 +70,7 @@ class DispositionActivationResult(BaseModel):
             "not_approved",
             "capability_blocked",
             "terminal_not_in_approved_set",
+            "verdict_not_terminal",
             "concurrent_head_conflict",
         ]
         | None
@@ -189,7 +190,10 @@ class EventDispositionService:
         if resolve.skipped_reason == "capability_blocked" or resolve.need_manual_resolution:
             raise ValidationError(
                 "terminal disposition cannot be derived safely",
-                details={"event_id": event_id},
+                details={
+                    "event_id": event_id,
+                    "skipped_reason": resolve.skipped_reason,
+                },
             )
         if resolve.disposition is None:
             raise ValidationError(
@@ -243,6 +247,12 @@ class EventDispositionService:
                 action_id=deferred.action_id,
                 activated=False,
                 skipped_reason="capability_blocked",
+            )
+        if resolve.skipped_reason == "verdict_not_terminal":
+            return DispositionActivationResult(
+                action_id=deferred.action_id,
+                activated=False,
+                skipped_reason="verdict_not_terminal",
             )
         if resolve.need_manual_resolution or resolve.disposition is None:
             return DispositionActivationResult(

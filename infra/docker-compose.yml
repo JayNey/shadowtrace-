@@ -299,6 +299,7 @@ services:
       BEHAVIOR_OBSERVATION_RETRY_ENABLED: "true"
       BEHAVIOR_OBSERVATION_RETRY_INTERVAL_S: ${BEHAVIOR_OBSERVATION_RETRY_INTERVAL_S:-120}
       CELERY_BROKER_URL: redis://redis:6379/0
+      TASK_MODE: celery
       # Backend owns migrate + playbook seed (ISSUE-245).
       SEED_PLAYBOOK_RELEASE: "false"
       OTEL_ENABLED: ${OTEL_ENABLED:-false}
@@ -312,7 +313,9 @@ services:
         "--loglevel", "info",
       ]
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'celery.*beat' >/dev/null || exit 1"]
+      test:
+        - CMD-SHELL
+        - python -c "import pathlib; raise SystemExit(0 if b'beat' in pathlib.Path('/proc/1/cmdline').read_bytes() else 1)"
       interval: 15s
       timeout: 5s
       retries: 5

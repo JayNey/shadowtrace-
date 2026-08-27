@@ -26,6 +26,7 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.evidence import Evidence, EvidenceConflict, EvidenceGap
+from app.models.knowledge import RetrievalMetrics
 from app.models.playbook_release import PlaybookRef
 
 # --------------------------------------------------------------------------- #
@@ -359,6 +360,31 @@ class AttackTechniqueMatch(BaseModel):
     citation_id: str
 
 
+OrgContextKind = Literal[
+    "allowed_destination",
+    "allowed_source",
+    "time_window",
+    "account_role",
+    "person_status",
+    "data_handling",
+    "security_product",
+]
+
+
+class OrgContextMatch(BaseModel):
+    """Exact org-context hit. Evidence only — never auto-closes or sets verdict."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: OrgContextKind
+    matched_value: str
+    explanation: str
+    citation_id: str
+    chunk_id: str
+    match_type: str = "exact"
+    match_confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+
+
 class FpSimilarity(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -400,11 +426,13 @@ class RAGOutput(BaseModel):
     fp_similarity: FpSimilarity = Field(default_factory=FpSimilarity)
     similar_cases: list[SimilarCaseSummary] = Field(default_factory=list)
     playbook_refs: list[PlaybookRef] = Field(default_factory=list)
+    org_context_matches: list[OrgContextMatch] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
     knowledge_query_plan: dict[str, Any] | None = Field(
         default=None,
         description="Release-pinned query plans keyed by kb_name (attack_kb, playbook_kb)",
     )
+    retrieval_metrics: RetrievalMetrics | None = None
     degraded: bool = False
 
 
@@ -792,6 +820,7 @@ class RAGAgentInput(AgentInput):
     tenant_id: str | None = None
     principal: str | None = None
     trace_id: str | None = None
+    occurred_at: datetime | None = None
 
 
 class RiskAgentInput(AgentInput):

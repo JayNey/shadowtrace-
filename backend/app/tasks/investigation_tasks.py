@@ -386,6 +386,13 @@ async def execute_redelivery_resume(
     )
     from app.orchestration.graph_resume_observability import execute_graph_resume_with_retry
 
+    if event_status is EventStatus.WAITING_APPROVAL:
+        return {
+            "status": "skipped",
+            "event_id": event_id,
+            "reason": "waiting_approval",
+        }
+
     if analysis_only or event_status not in REDELIVERY_RESUME_STATUSES:
         if analysis_only:
             return await execute_analysis_only_investigation(
@@ -406,6 +413,7 @@ async def execute_redelivery_resume(
         get_super_agent=get_super_agent,
         get_workflow_runtime=get_workflow_runtime,
         degraded_flags=_get_degraded_flags(),
+        lease_acquired=lease_acquired,
     )
     return {"status": "completed", "event_id": event_id}
 
@@ -496,7 +504,11 @@ async def _finalize_intent_from_result(
     status = str(result.get("status") or "")
     if status == "skipped":
         reason = str(result.get("reason") or "investigation_skipped")
-        if reason in {"investigation_in_progress", "investigation_lease_lost"}:
+        if reason in {
+            "investigation_in_progress",
+            "investigation_lease_lost",
+            "waiting_approval",
+        }:
             # Lease contention / loss before this delivery owns execution — keep
             # the durable intent recoverable instead of a terminal SKIPPED hole.
             await service.mark_retry(
@@ -550,23 +562,28 @@ async def _run_investigation_body(
     lease_acquired: bool = False,
     request_headers: dict[str, object] | None = None,
 ) -> dict[str, str]:
-    if redelivered:
-        redelivery_result = await _handle_redelivered_investigation(
+    from app.services.memory_after_close import drain_memory_after_close_tasks
+
+    try:
+        if redelivered:
+            redelivery_result = await _handle_redelivered_investigation(
+                event_id,
+                task_id=task_id,
+                owner_id=owner_id,
+                request_headers=request_headers,
+                lease_acquired=lease_acquired,
+            )
+            if redelivery_result is not None:
+                return redelivery_result
+        return await execute_investigation(
             event_id,
-            task_id=task_id,
+            include_response_execution=include_response_execution,
+            generate_report=generate_report,
             owner_id=owner_id,
-            request_headers=request_headers,
             lease_acquired=lease_acquired,
         )
-        if redelivery_result is not None:
-            return redelivery_result
-    return await execute_investigation(
-        event_id,
-        include_response_execution=include_response_execution,
-        generate_report=generate_report,
-        owner_id=owner_id,
-        lease_acquired=lease_acquired,
-    )
+    finally:
+        await drain_memory_after_close_tasks()
 
 
 async def _handle_soft_time_limit_exceeded(
@@ -767,24 +784,29 @@ async def _run_analysis_only_body(
     lease_acquired: bool = False,
     request_headers: dict[str, object] | None = None,
 ) -> dict[str, str]:
-    if redelivered:
-        redelivery_result = await _handle_redelivered_investigation(
+    from app.services.memory_after_close import drain_memory_after_close_tasks
+
+    try:
+        if redelivered:
+            redelivery_result = await _handle_redelivered_investigation(
+                event_id,
+                task_id=task_id,
+                owner_id=owner_id,
+                request_headers=request_headers,
+                lease_acquired=lease_acquired,
+                analysis_only=True,
+                generate_report=generate_report,
+            )
+            if redelivery_result is not None:
+                return redelivery_result
+        return await execute_analysis_only_investigation(
             event_id,
-            task_id=task_id,
-            owner_id=owner_id,
-            request_headers=request_headers,
-            lease_acquired=lease_acquired,
-            analysis_only=True,
             generate_report=generate_report,
+            owner_id=owner_id,
+            lease_acquired=lease_acquired,
         )
-        if redelivery_result is not None:
-            return redelivery_result
-    return await execute_analysis_only_investigation(
-        event_id,
-        generate_report=generate_report,
-        owner_id=owner_id,
-        lease_acquired=lease_acquired,
-    )
+    finally:
+        await drain_memory_after_close_tasks()
 
 
 async def execute_analysis_only_investigation(

@@ -106,5 +106,23 @@
     "fp_reason": "业务峰值 HPA 触发从 5→20 副本扩容，每个 Pod 启动时的 init container 与 sidecar 注入导致的瞬时进程创建",
     "confirmed_by": "platform_engineer",
     "confirmed_at": "2024-07-15T12:30:00Z"
+  },
+  {
+    "case_id": "case-0000000d",
+    "pattern_summary": "财务主机向批准的内部文件服务器 files.corp.internal 同步报表，无 7z 外发",
+    "alert_signature": "Large volume of file reads and exports from finance shared drive to files.corp.internal",
+    "entity_pattern": "account=finance-* type=employee; host=PC-FIN-*; domain=files.corp.internal; behavior=approved_fileshare_sync",
+    "fp_reason": "目标为集团批准内部文件服务器，不是 unknown-upload-example.com，也没有 7z.exe 打包外发",
+    "confirmed_by": "finance_director",
+    "confirmed_at": "2024-06-10T09:00:00Z"
+  },
+  {
+    "case_id": "case-0000000e",
+    "pattern_summary": "办公终端访问已登记内部 CDN cdn.corp.internal，不是新注册外域 brand-new-cdn-example.net",
+    "alert_signature": "Office host accessed newly seen CDN hostname during content refresh",
+    "entity_pattern": "account=office-user-* type=employee; host=PC-OFFICE-*; domain=cdn.corp.internal; role=approved_cdn",
+    "fp_reason": "cdn.corp.internal 是已登记内容分发对端；brand-new-cdn-example.net 不在白名单",
+    "confirmed_by": "it_support",
+    "confirmed_at": "2024-06-12T13:00:00Z"
   }
 ]

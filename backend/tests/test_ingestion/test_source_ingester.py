@@ -165,7 +165,7 @@ async def test_incremental_pagination_and_next_poll_uses_committed_time(
     assert summary.watermark_before is None
     assert summary.watermark_after == {
         "cursor": None,
-        "updated_after": (base + timedelta(minutes=3)).isoformat(),
+        "updated_after": (base + timedelta(minutes=1)).isoformat(),
     }
     assert [call[1] for call in adapter.calls] == [None, "c1"]
 
@@ -186,7 +186,7 @@ async def test_incremental_pagination_and_next_poll_uses_committed_time(
         batch_size=10,
     )
     assert second_summary.accepted == 0
-    assert empty.calls[0][2] == base + timedelta(minutes=3)
+    assert empty.calls[0][2] == base + timedelta(minutes=1)
 
     async with session_factory() as session:
         checkpoint = await session.get(

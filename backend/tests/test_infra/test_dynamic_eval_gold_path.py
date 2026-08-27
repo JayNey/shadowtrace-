@@ -124,6 +124,74 @@ def test_event_outcome_ok_rejects_failed(full_loop_mod) -> None:
     assert full_loop_mod.event_outcome_ok("closed", require_closed=True) is True
 
 
+def test_map_gold_final_verdict_never_none(full_loop_mod) -> None:
+    assert full_loop_mod.map_gold_final_verdict(decision="approve") == "confirmed_threat"
+    assert full_loop_mod.map_gold_final_verdict(decision="reject") == "false_positive"
+
+
+def test_maybe_submit_analyst_final_verdict_posts_on_verifying_hold(full_loop_mod) -> None:
+    posted: list[tuple[str, dict[str, Any]]] = []
+
+    class _Client:
+        def get_json(self, path: str) -> dict[str, Any]:
+            return {
+                "event": {
+                    "event_id": "evt-hold",
+                    "status": "verifying",
+                    "final_verdict": "possible_false_positive",
+                },
+                "execution_substate": "manual_resolution",
+                "final_verdict": "possible_false_positive",
+            }
+
+        def post_json(self, path: str, body: dict[str, Any] | None = None) -> None:
+            posted.append((path, body or {}))
+
+    submitted: set[str] = set()
+    assert (
+        full_loop_mod.maybe_submit_analyst_final_verdict(
+            _Client(),
+            "evt-hold",
+            require_closed=True,
+            decision="approve",
+            submitted=submitted,
+        )
+        is True
+    )
+    assert submitted == {"evt-hold"}
+    assert posted[0][0] == "/api/v1/events/evt-hold/final-verdict"
+    assert posted[0][1]["final_verdict"] == "confirmed_threat"
+    assert posted[0][1]["resume"] is True
+
+
+def test_maybe_submit_analyst_final_verdict_skips_when_already_terminal(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str) -> dict[str, Any]:
+            return {
+                "event": {
+                    "event_id": "evt-hold",
+                    "status": "verifying",
+                    "final_verdict": "confirmed_threat",
+                },
+                "execution_substate": "manual_resolution",
+                "final_verdict": "confirmed_threat",
+            }
+
+        def post_json(self, path: str, body: dict[str, Any] | None = None) -> None:
+            raise AssertionError("must not post")
+
+    assert (
+        full_loop_mod.maybe_submit_analyst_final_verdict(
+            _Client(),
+            "evt-hold",
+            require_closed=True,
+            decision="approve",
+            submitted=set(),
+        )
+        is False
+    )
+
+
 def test_unwrap_event_detail_supports_envelope(full_loop_mod) -> None:
     flat = {"event_id": "evt-flat", "status": "new"}
     assert full_loop_mod.unwrap_event_detail(flat)["event_id"] == "evt-flat"

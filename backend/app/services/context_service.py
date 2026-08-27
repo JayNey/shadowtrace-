@@ -1027,56 +1027,6 @@ class EventContextStore:
         actions, outboxes, receipts_by_wb = await load_writeback_rows(session, se.event_id)
         envelope = project_writeback_envelope(policy, actions, outboxes, receipts_by_wb)
 
-        # #region agent log
-        try:
-            import json as _dbg_json
-            import time as _dbg_time
-
-            with open(
-                "/Users/apple/Desktop/shadowtrace副本/.cursor/debug-0da307.log",
-                "a",
-                encoding="utf-8",
-            ) as _dbg_f:
-                _dbg_f.write(
-                    _dbg_json.dumps(
-                        {
-                            "sessionId": "0da307",
-                            "runId": "post-fix",
-                            "hypothesisId": "B",
-                            "location": "context_service.py:_merge_writeback_summary",
-                            "message": "writeback summary membership before envelope filter",
-                            "data": {
-                                "event_id": se.event_id,
-                                "required_count": envelope.required_action_count,
-                                "applicable_count": envelope.applicable_action_count,
-                                "applicable_ids": list(envelope.envelope_action_ids),
-                                "outbox_count": len(outboxes),
-                                "outboxes": [
-                                    {
-                                        "action_id": o.action_id,
-                                        "intent": o.intent_kind,
-                                        "status": o.latest_writeback_status,
-                                        "superseded": o.superseded_by_disposition_id,
-                                    }
-                                    for o in outboxes
-                                ],
-                                "envelope_status": (
-                                    envelope.aggregate_status.value
-                                    if envelope.aggregate_status is not None
-                                    else None
-                                ),
-                                "envelope_readiness": envelope.aggregate_readiness.value,
-                                "envelope_pending": envelope.pending_count,
-                            },
-                            "timestamp": int(_dbg_time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-        except Exception:
-            pass
-        # #endregion
-
         return WritebackSummary(
             event_id=se.event_id,
             closure_cycle=envelope.closure_cycle,

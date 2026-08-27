@@ -153,6 +153,21 @@ def _bullet(lines: list[str], empty: str) -> str:
     return "\n".join(f"- {line}" for line in cleaned)
 
 
+def _org_context_report_lines(rag_output: dict[str, Any] | None) -> list[str]:
+    if not isinstance(rag_output, dict):
+        return []
+    lines: list[str] = []
+    for match in rag_output.get("org_context_matches") or []:
+        if not isinstance(match, dict):
+            continue
+        kind = str(match.get("kind") or "").strip()
+        value = str(match.get("matched_value") or "").strip()
+        if not kind and not value:
+            continue
+        lines.append(f"org_context: {kind} {value}".strip())
+    return lines
+
+
 def _source_summary_lines(source_snapshot: dict[str, Any] | None) -> list[str]:
     if not isinstance(source_snapshot, dict):
         return []
@@ -351,6 +366,7 @@ class ReportSectionBuilder:
             evidence_output=evidence_output,
             false_positive_match=false_positive_match,
             fp_adjudication=fp_adjudication,
+            rag_output=rag_output,
             escalated=escalated,
             replan_count=replan_count,
             source_snapshot=source_snapshot,
@@ -637,6 +653,7 @@ class ReportSectionBuilder:
         evidence_output: EvidenceOutput,
         false_positive_match: dict[str, Any] | None = None,
         fp_adjudication: dict[str, Any] | None = None,
+        rag_output: dict[str, Any] | None = None,
         escalated: bool = False,
         replan_count: int = 0,
         source_snapshot: dict[str, Any] | None = None,
@@ -730,6 +747,7 @@ class ReportSectionBuilder:
             self._fp_basis_lines(
                 false_positive_match=false_positive_match,
                 fp_adjudication=fp_adjudication,
+                rag_output=rag_output,
             )
         )
         if escalated:
@@ -773,12 +791,14 @@ class ReportSectionBuilder:
         *,
         false_positive_match: dict[str, Any] | None = None,
         fp_adjudication: dict[str, Any] | None = None,
+        rag_output: dict[str, Any] | None = None,
     ) -> list[str]:
+        lines: list[str] = []
         if (
             isinstance(fp_adjudication, dict)
             and fp_adjudication.get("recommendation") == "close_as_fp"
         ):
-            lines: list[str] = ["fp_decision: post_evidence_close_as_fp"]
+            lines.append("fp_decision: post_evidence_close_as_fp")
             window_id = fp_adjudication.get("matched_window_id")
             if window_id:
                 lines.append(f"fp_matched_window_id: {window_id}")
@@ -791,25 +811,22 @@ class ReportSectionBuilder:
             score = fp_adjudication.get("max_score")
             if score is not None:
                 lines.append(f"fp_adjudication_score: {score}")
-            return lines
-
-        if not isinstance(false_positive_match, dict):
-            return []
-        lines = []
-        case_id = false_positive_match.get("matched_case_id")
-        if case_id:
-            lines.append(f"fp_matched_case_id: {case_id}")
-        pattern = false_positive_match.get("matched_pattern") or false_positive_match.get(
-            "matched_rule"
-        )
-        if pattern:
-            lines.append(f"fp_matched_pattern: {pattern}")
-        source = false_positive_match.get("source")
-        if source:
-            lines.append(f"fp_match_source: {source}")
-        score = false_positive_match.get("max_score")
-        if score is not None:
-            lines.append(f"fp_max_score: {score}")
+        elif isinstance(false_positive_match, dict):
+            case_id = false_positive_match.get("matched_case_id")
+            if case_id:
+                lines.append(f"fp_matched_case_id: {case_id}")
+            pattern = false_positive_match.get("matched_pattern") or false_positive_match.get(
+                "matched_rule"
+            )
+            if pattern:
+                lines.append(f"fp_matched_pattern: {pattern}")
+            source = false_positive_match.get("source")
+            if source:
+                lines.append(f"fp_match_source: {source}")
+            score = false_positive_match.get("max_score")
+            if score is not None:
+                lines.append(f"fp_max_score: {score}")
+        lines.extend(_org_context_report_lines(rag_output))
         return lines
 
     def _risk_scoring(
@@ -1005,9 +1022,15 @@ class ReportSectionBuilder:
                     name = match.get("technique_name") or ""
                     techniques.append(f"{match['technique_id']} {name}".strip())
         techniques = list(dict.fromkeys(techniques))
-        if not techniques:
-            return "暂无 ATT&CK 技术映射"
-        return _bullet(techniques, "暂无 ATT&CK 技术映射")
+        mapping = (
+            _bullet(techniques, "暂无 ATT&CK 技术映射")
+            if techniques
+            else "暂无 ATT&CK 技术映射"
+        )
+        org_lines = _org_context_report_lines(rag_output)
+        if not org_lines:
+            return mapping
+        return mapping + "\n" + "\n".join(org_lines)
 
     def _response_actions(self, response_plan: ResponsePlan | None) -> list[Action]:
         if response_plan is None:

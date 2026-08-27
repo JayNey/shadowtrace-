@@ -30,15 +30,11 @@ from app.models.enums import (
 )
 from app.models.knowledge import KnowledgeChunk, RetrievedChunk
 from app.models.workflow import derive_case_label
+from app.rag.keyword_aliases import expand_keyword_query, keyword_query_for_kb
 from app.services.knowledge_store import KnowledgeStore
 
 FP_KB_NAME = "fp_case_kb"
 HISTORY_KB_NAME = "history_case_kb"
-
-# Mock-stage keyword expansions for fp_case_kb (attack_kb semantic path: issue #522).
-_FP_KEYWORD_ALIASES: dict[str, str] = {
-    "ops-change-bot": "ops-change-bot PC-OPS-JUMP-01 bulk login change window jump host",
-}
 
 
 class CaseKBService:
@@ -91,9 +87,11 @@ class CaseKBService:
     ) -> list[RetrievedChunk]:
         """Hybrid-search ``history_case_kb``, optionally filtered by *event_type* in metadata."""
         fetch_k = top_k if event_type is None else top_k * 3
+        keyword_query = keyword_query_for_kb(HISTORY_KB_NAME, query_text)
         results = await self._kb.hybrid_search(
             HISTORY_KB_NAME,
             query_text,
+            keyword_query=keyword_query,
             top_k=fetch_k,
             tenant_id=tenant_id,
         )
@@ -288,10 +286,12 @@ def _response_succeeded(
 
 def _fp_keyword_query(alert_text: str) -> str:
     """Expand distinctive FP markers for keyword search under mock embeddings."""
+    expanded = expand_keyword_query(alert_text)
+    if expanded != alert_text.strip():
+        return expanded
     lowered = alert_text.lower()
-    for needle, expansion in _FP_KEYWORD_ALIASES.items():
-        if needle in lowered:
-            return expansion
+    if "ops-change-bot" in lowered:
+        return "ops-change-bot"
     return alert_text.strip()
 
 

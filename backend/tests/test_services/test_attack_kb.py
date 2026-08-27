@@ -10,7 +10,6 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -24,6 +23,7 @@ from app.services.attack_kb_service import (
     _format_content,
 )
 from app.services.knowledge_store import KnowledgeStore
+from tests.helpers.knowledge_isolation import PRESERVE_ORG_CONTEXT_DELETE
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 REPO_ROOT = BACKEND_DIR.parent
@@ -89,7 +89,7 @@ def service(
 
 async def _clean(session_factory: async_sessionmaker[AsyncSession]) -> None:
     async with session_factory() as session:
-        await session.execute(text("DELETE FROM knowledge_chunk"))
+        await session.execute(PRESERVE_ORG_CONTEXT_DELETE)
         await session.commit()
 
 
@@ -199,6 +199,36 @@ class TestSearchTechniques:
         assert len(results) >= 1
         assert any("Exfiltration" in (r.metadata.get("tactics") or []) for r in results)
         assert any(r.retrieval_method in {"keyword", "hybrid"} for r in results)
+
+    @pytest.mark.asyncio
+    async def test_search_内鬼_hits_valid_accounts_via_hybrid(
+        self,
+        service: AttackKBService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _clean(session_factory)
+        await service.load_from_file(DATA_FILE)
+
+        results = await service.search_techniques("内鬼", top_k=8)
+        hit_ids = {row.metadata.get("technique_id") for row in results}
+        assert "T1078" in hit_ids
+
+    @pytest.mark.asyncio
+    async def test_gold_path_techniques_have_bilingual_aliases(
+        self,
+        service: AttackKBService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _clean(session_factory)
+        await service.load_from_file(DATA_FILE)
+
+        t1078 = await service.get_technique("T1078")
+        assert t1078 is not None
+        assert "内鬼" in (t1078.get("aliases") or [])
+
+        t1560_001 = await service.get_technique("T1560.001")
+        assert t1560_001 is not None
+        assert "7z" in " ".join(t1560_001.get("keywords") or []).lower()
 
     @pytest.mark.asyncio
     async def test_exfiltration_metadata_includes_bilingual_fields(

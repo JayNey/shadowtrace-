@@ -3879,6 +3879,42 @@ class TestIssue060ReviewFixes:
         # (ISSUE-060 review SF-3)
         assert "act-terminal-00001" in result.blocked_writebacks
 
+    async def test_verdict_not_terminal_holds_without_blocked_writebacks(self):
+        """Analyst-gated skip must hold, but must not freeze the deferred action."""
+        deferred = _action(
+            tool_name=TERMINAL_DISPOSITION_TOOL,
+            action_name="terminal",
+            execution_phase=ActionExecutionPhase.POST_VERIFY,
+            status=ActionStatus.APPROVED,
+            execution_owner=ExecutionOwner.XDR_MANAGED,
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+        )
+        ed_svc = FakeEventDispositionService(
+            activated=False,
+            skipped_reason="verdict_not_terminal",
+            writeback_id=None,
+        )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_disposition_service=ed_svc,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([deferred], {}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=deferred.event_id, actions=[deferred]))
+
+        assert result.need_manual_resolution is True
+        assert result.overall_status == VerificationOverallStatus.MANUAL_RESOLUTION
+        assert "act-terminal-00001" not in result.blocked_writebacks
+        assert deferred.action_id not in result.blocked_writebacks
+
     # ── Terminal receipt non-CONFIRMED → recovery ─────────────────────────
 
     async def test_terminal_writeback_pending_routes_to_recovery(self):

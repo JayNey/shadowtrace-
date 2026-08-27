@@ -380,16 +380,23 @@ def route_after_report(state: InvestigationState) -> str:
     of disposition policy.
     """
     if not state.get("generate_report", True):
-        return ROUTE_HALT
-    policy = DispositionPolicy(
-        state.get("disposition_policy", DispositionPolicy.NOT_REQUIRED.value)
-    )
-    if (
-        policy is DispositionPolicy.REQUIRED
-        and state.get("verify_overall_status") != VerificationOverallStatus.SUCCESS.value
-    ):
-        return ROUTE_HALT
-    return ROUTE_CLOSE
+        result = ROUTE_HALT
+    elif state.get("escalated"):
+        # ISSUE-062: escalate already parked CONTAINED/FAILED; close_node
+        # walks REPORTING → CLOSED. Do not re-halt REQUIRED on verify≠success.
+        result = ROUTE_CLOSE
+    else:
+        policy = DispositionPolicy(
+            state.get("disposition_policy", DispositionPolicy.NOT_REQUIRED.value)
+        )
+        if (
+            policy is DispositionPolicy.REQUIRED
+            and state.get("verify_overall_status") != VerificationOverallStatus.SUCCESS.value
+        ):
+            result = ROUTE_HALT
+        else:
+            result = ROUTE_CLOSE
+    return result
 
 
 def route_after_approval(state: InvestigationState) -> str:
@@ -668,6 +675,38 @@ async def _transition_status(
     return cast(InvestigationState, {"event_status": target.value})
 
 
+async def _read_db_event_status(
+    services: dict[str, Any],
+    event_id: str,
+) -> EventStatus | None:
+    """Authoritative EventStatus from DB; None when no session or unreadable."""
+    session_factory = services.get("session_factory")
+    if session_factory is None:
+        return None
+    try:
+        from sqlalchemy import select
+
+        from app.db import models as orm
+
+        async with session_factory() as session:
+            raw = await session.scalar(
+                select(orm.SecurityEvent.status).where(orm.SecurityEvent.event_id == event_id)
+            )
+    except Exception:
+        logger.debug(
+            "approval_wait: failed to read event status event=%s",
+            event_id,
+            exc_info=True,
+        )
+        return None
+    if not raw:
+        return None
+    try:
+        return EventStatus(str(raw))
+    except ValueError:
+        return None
+
+
 async def build_initial_investigation_state(
     event_id: str,
     *,
@@ -873,10 +912,14 @@ def _verification_result_state_update(
 
 
 def _plan_revision_from_state(state: InvestigationState) -> int:
+    """Action.plan_revision is 1-based; ExecutionPlan.revision is 0-based.
+
+    ResponseAgent persists actions at ``execution_plan.revision + 1``. Approval,
+    execute, activate, and the response ledger key must use that same number.
+    """
     execution_plan = state.get("execution_plan") or {}
-    revision = execution_plan.get("revision")
-    if revision is not None and int(revision) > 0:
-        return int(revision)
+    if isinstance(execution_plan, dict) and execution_plan.get("revision") is not None:
+        return int(execution_plan["revision"]) + 1
     if state.get("plan_revision") is not None:
         return int(state["plan_revision"])
     return 1
@@ -1462,9 +1505,10 @@ def build_investigation_graph(
             event_id=state["event_id"],
             evidence_output=evidence,
             triage_result=triage,
-            source_snapshot=state.get("source_snapshot"),
+            source_snapshot=state.get("source_snapshot") or context.source_snapshot,
             occurred_at=occurred_at,
             working_memory=fp_wm,
+            knowledge_store=services.get("knowledge_store"),
         )
         return _patch_state(
             _trace(NODE_FP_ADJUDICATION),
@@ -1597,41 +1641,6 @@ def build_investigation_graph(
         }
         if routing_state.get("final_verdict") is not None:
             update["final_verdict"] = routing_state["final_verdict"]
-        # #region agent log
-        try:
-            import json as _dbg_json
-            import time as _dbg_time
-
-            with open(
-                "/Users/apple/Desktop/shadowtrace副本/.cursor/debug-0da307.log",
-                "a",
-                encoding="utf-8",
-            ) as _dbg_f:
-                _dbg_f.write(
-                    _dbg_json.dumps(
-                        {
-                            "sessionId": "0da307",
-                            "runId": "post-fix",
-                            "hypothesisId": "FP",
-                            "location": "workflow_graph.py:risk_node",
-                            "message": "risk routing after scoring",
-                            "data": {
-                                "event_id": state.get("event_id"),
-                                "defer_response": bool(state.get("defer_response_execution")),
-                                "disposition_only": bool(state.get("disposition_only_intent")),
-                                "policy": routing_state.get("disposition_policy"),
-                                "verdict": routing_state.get("final_verdict"),
-                                "deferred": entity_response_deferred_after_risk(routing_state),
-                                "next_status": risk_status.value,
-                            },
-                            "timestamp": int(_dbg_time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-        except Exception:
-            pass
-        # #endregion
         await _hydrate_context(services, state["event_id"], update)
         update["event_status"] = risk_status.value
         return _patch_state(
@@ -1936,14 +1945,44 @@ def build_investigation_graph(
         # Persist WAITING_APPROVAL substate and pause graph execution.
         # The graph halts here; resume_investigation() is called after
         # approve/reject API endpoints complete their decision cycle.
+        # If HTTP approve already advanced the host status, WAITING_APPROVAL
+        # is illegal under EXECUTING_RESPONSE — persist NONE and still halt
+        # so same-lease catchup / approval_plan_resume can continue.
+        event_id = state["event_id"]
+        db_status = await _read_db_event_status(services, event_id)
+        already_advanced = db_status in {
+            EventStatus.EXECUTING_RESPONSE,
+            EventStatus.REPORTING,
+        }
+        if already_advanced:
+            assert db_status is not None
+            await runtime.set_execution_substate(
+                event_id,
+                ExecutionSubstate.NONE,
+                event_status=db_status,
+            )
+            logger.info(
+                "approval_wait: event=%s already %s; halt for catchup",
+                event_id,
+                db_status.value,
+            )
+            return _patch_state(
+                _trace(NODE_APPROVAL_WAIT),
+                {
+                    "halted": True,
+                    "execution_substate": ExecutionSubstate.NONE.value,
+                    "needs_approval_wait": False,
+                    "event_status": db_status.value,
+                },
+            )
         await runtime.set_execution_substate(
-            state["event_id"],
+            event_id,
             ExecutionSubstate.WAITING_APPROVAL,
             event_status=EventStatus.WAITING_APPROVAL,
         )
         logger.info(
             "approval_wait: event=%s paused for human approval",
-            state["event_id"],
+            event_id,
         )
         return _patch_state(
             _trace(NODE_APPROVAL_WAIT),
@@ -2741,6 +2780,7 @@ async def rag_node(
     Failures degrade to ``None`` so RiskAgent can continue without enhancement.
     """
     event_id = event_context.event.event_id if event_context.event else "unknown"
+    occurred_at = event_context.event.occurred_at if event_context.event else None
     output, _degraded = await run_rag_stage(
         rag_agent,
         event_id=event_id,
@@ -2748,6 +2788,7 @@ async def rag_node(
         evidence_output=evidence_output,
         source_snapshot=event_context.source_snapshot,
         principal="investigation:workflow_graph",
+        occurred_at=occurred_at,
     )
     return output
 

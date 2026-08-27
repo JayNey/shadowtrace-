@@ -42,6 +42,7 @@ COMPOSE_DEMO := COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
 	PLAYBOOK_REQUIRED="$(DEMO_PLAYBOOK_REQUIRED)" \
 	SEED_PLAYBOOK_RELEASE=true \
 	TASK_MODE=celery \
+	OBSERVABILITY_CONFIG_DIR="$(CURDIR)/infra/observability" \
 	docker compose --project-name "$(COMPOSE_PROJECT_NAME)" \
 	-f "$(COMPOSE_FILE)" -f "$(OBS_COMPOSE_FILE)" \
 	--profile demo
@@ -222,6 +223,7 @@ up-observability:
 	OTEL_HTTP_PORT="$(OTEL_HTTP_PORT)" OTEL_GRPC_PORT="$(OTEL_GRPC_PORT)" \
 	OTEL_PROMETHEUS_PORT="$(OTEL_PROMETHEUS_PORT)" PROMETHEUS_PORT="$(PROMETHEUS_PORT)" \
 	GRAFANA_PORT="$(GRAFANA_PORT)" \
+	OBSERVABILITY_CONFIG_DIR="$(CURDIR)/infra/observability" \
 	docker compose --project-name "$(COMPOSE_PROJECT_NAME)" \
 	-f "$(OBS_COMPOSE_FILE)" up -d
 
@@ -246,6 +248,7 @@ migrate-down:
 load-kb:
 	cd backend && $(PYTHON) -m scripts.load_attack_kb
 	cd backend && $(PYTHON) -m scripts.load_case_kb
+	cd backend && $(PYTHON) -m scripts.load_org_context_kb
 	cd backend && $(PYTHON) -m scripts.load_playbook_release
 
 test:

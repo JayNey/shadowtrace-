@@ -762,6 +762,114 @@ async def test_list_events_returns_paginated(
 
 
 @pytest.mark.asyncio
+async def test_list_events_skips_malformed_source_ref(
+    client: TestClient,
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """One incomplete creation_source_ref must not 500 the whole list."""
+    good_id = await _create_test_event(event_service, title="Listable event")
+    bad_id = f"evt-badref-{datetime.now(UTC).strftime('%H%M%S%f')}"
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=bad_id,
+                    event_type=EventType.INSIDER_THREAT.value,
+                    title="Unlistable source ref",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.MEDIUM.value,
+                    final_verdict=FinalVerdict.NONE.value,
+                    risk_score=0,
+                    confidence=0.0,
+                    entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
+                    source_type="manual",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+    resp = client.get("/api/v1/events?page_size=200", headers=_hdr())
+    assert resp.status_code == 200, resp.text
+    ids = {item["event_id"] for item in resp.json()["items"]}
+    assert good_id in ids
+    assert bad_id not in ids
+
+
+@pytest.mark.asyncio
+async def test_get_event_malformed_source_ref_is_422(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bad_id = f"evt-badget-{datetime.now(UTC).strftime('%H%M%S%f')}"
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=bad_id,
+                    event_type=EventType.INSIDER_THREAT.value,
+                    title="Unreadable source ref",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.MEDIUM.value,
+                    final_verdict=FinalVerdict.NONE.value,
+                    risk_score=0,
+                    confidence=0.0,
+                    entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
+                    source_type="manual",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+    resp = client.get(f"/api/v1/events/{bad_id}", headers=_hdr())
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_final_verdict_rejects_non_terminal(
+    client: TestClient,
+    event_service: EventService,
+) -> None:
+    event_id = await _create_test_event(event_service, title="Verdict gate")
+    resp = client.post(
+        f"/api/v1/events/{event_id}/final-verdict",
+        headers=_hdr(),
+        json={"final_verdict": "none", "reason": "must reject"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_final_verdict_sets_confirmed_threat_without_hold(
+    client: TestClient,
+    event_service: EventService,
+) -> None:
+    event_id = await _create_test_event(event_service, title="Analyst terminal verdict")
+    resp = client.post(
+        f"/api/v1/events/{event_id}/final-verdict",
+        headers=_hdr(),
+        json={
+            "final_verdict": "confirmed_threat",
+            "reason": "analyst confirmation",
+            "resume": True,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["event_id"] == event_id
+    assert body["final_verdict"] == "confirmed_threat"
+    assert body["resume_status"] == "not_held"
+
+
+@pytest.mark.asyncio
 async def test_list_events_filters_by_status(
     client: TestClient,
     event_service: EventService,

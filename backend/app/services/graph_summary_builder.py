@@ -4,21 +4,15 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from app.graph.path_rank import PathRankSignals, kapr_score_hint, relation_stage
 from app.models.agent_io import GraphOutput, GraphRelationType, GraphSummary, GraphSummaryFeature
 
-_RELATION_STAGE_HINT: dict[str, float] = {
-    GraphRelationType.EXECUTED.value: 55.0,
-    GraphRelationType.ACCESSED.value: 50.0,
-    GraphRelationType.CONNECTED_TO.value: 70.0,
-    GraphRelationType.RESOLVED.value: 45.0,
-    GraphRelationType.LOGGED_IN_FROM.value: 40.0,
-    GraphRelationType.LOGGED_IN_TO.value: 40.0,
-    GraphRelationType.REQUESTED.value: 35.0,
-    GraphRelationType.UPLOADED_TO.value: 60.0,
-}
 
-
-def build_graph_summary(output: GraphOutput) -> GraphSummary:
+def build_graph_summary(
+    output: GraphOutput,
+    *,
+    signals: PathRankSignals | None = None,
+) -> GraphSummary:
     """Derive deterministic, evidence-referenced features for pre-risk scoring."""
     features: list[GraphSummaryFeature] = []
 
@@ -31,7 +25,7 @@ def build_graph_summary(output: GraphOutput) -> GraphSummary:
             GraphSummaryFeature(
                 feature_id=f"attack_path_{index}",
                 feature_kind="attack_path",
-                score_hint=min(100.0, 35.0 + 12.0 * max(len(path), 1)),
+                score_hint=kapr_score_hint(path, output.edges, signals),
                 evidence_ids=evidence_ids,
                 provenance="graph_path",
             )
@@ -63,7 +57,7 @@ def build_graph_summary(output: GraphOutput) -> GraphSummary:
 
     for relation, evidence_ids in by_relation.items():
         deduped = list(dict.fromkeys(evidence_ids))
-        hint = _RELATION_STAGE_HINT.get(relation, 50.0)
+        hint = relation_stage(relation)
         features.append(
             GraphSummaryFeature(
                 feature_id=f"relation_{relation}",

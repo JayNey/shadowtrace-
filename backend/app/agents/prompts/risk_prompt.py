@@ -1,4 +1,8 @@
-"""Risk scoring prompt builders (ISSUE-035 / ISSUE-251)."""
+"""Risk scoring prompt builders (ISSUE-035 / ISSUE-251).
+
+LLM selects a per-dimension rubric band; numeric scores are server-landed.
+Legacy ``score`` fields still parse and map onto the nearest band.
+"""
 
 from __future__ import annotations
 
@@ -12,24 +16,19 @@ from app.agents.prompts.prompt_blocks import (
     bounded_triage_reasoning,
     evidence_prompt_block,
 )
+from app.agents.risk_rubric import FACTOR_NAMES, rubric_catalog_for_prompt
 from app.core.llm.base import LLMMessage
 from app.models.agent_io import EvidenceOutput, TriageResult
 
-FACTOR_NAMES: tuple[str, ...] = (
-    "asset_impact",
-    "behavior_anomaly",
-    "evidence_confidence",
-    "attack_stage",
-    "data_sensitivity",
-    "threat_intel",
-)
-
 
 class RiskFactorLLM(BaseModel):
-    """One dimension score from risk_score structured output."""
+    """One dimension choice from risk_score structured output."""
 
     model_config = ConfigDict(extra="ignore")
 
+    rubric_id: str | None = None
+    lean: str | None = None
+    secondary_rubric_id: str | None = None
     score: float | None = None
     reason: str = ""
 
@@ -42,6 +41,14 @@ class RiskFactorLLM(BaseModel):
         if not data.get("reason") and data.get("reasoning") is not None:
             data["reason"] = data.get("reasoning")
         return data
+
+    @field_validator("rubric_id", "secondary_rubric_id", "lean", mode="before")
+    @classmethod
+    def _blank_to_none(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
     @field_validator("score", mode="before")
     @classmethod
@@ -57,6 +64,9 @@ class RiskFactorLLM(BaseModel):
     @classmethod
     def _coerce_reason(cls, value: Any) -> str:
         return "" if value is None else str(value)
+
+    def has_choice(self) -> bool:
+        return bool(self.rubric_id) or self.score is not None
 
 
 class RiskScoreLLMResponse(BaseModel):
@@ -81,7 +91,7 @@ class RiskScoreLLMResponse(BaseModel):
                 parsed = RiskFactorLLM.model_validate(entry)
             except Exception:
                 continue
-            if parsed.score is None:
+            if not parsed.has_choice():
                 continue
             out[str(key)] = parsed
         return out
@@ -119,22 +129,24 @@ def build_risk_messages(
     graph_summary: dict[str, Any] | None = None,
     source_snapshot: dict[str, Any] | None = None,
 ) -> list[LLMMessage]:
-    """Build JSON-mode messages that request per-dimension scores only (no CoT)."""
+    """Build JSON-mode messages that request per-dimension rubric bands (no CoT)."""
     system = (
-        "You are ShadowTrace RiskAgent. Score residual cyber risk for one security "
-        "event across six fixed dimensions. Return a single JSON object only "
+        "You are ShadowTrace RiskAgent. Classify residual cyber risk for one "
+        "security event across six fixed dimensions. Do not invent a 0-100 score. "
+        "For each dimension pick one rubric_id from the provided catalog, optional "
+        "lean (low|mid|high), and optional secondary_rubric_id only when the case "
+        "sits between two adjacent bands. Return a single JSON object only "
         "(no markdown fences, no commentary) with shape:\n"
-        '{"factors":{"asset_impact":{"score":0,"reason":"..."},'
-        '"behavior_anomaly":{"score":0,"reason":"..."},'
-        '"evidence_confidence":{"score":0,"reason":"..."},'
-        '"attack_stage":{"score":0,"reason":"..."},'
-        '"data_sensitivity":{"score":0,"reason":"..."},'
-        '"threat_intel":{"score":0,"reason":"..."}},'
+        '{"factors":{"asset_impact":{"rubric_id":"...","lean":"mid","reason":"..."},'
+        '"behavior_anomaly":{"rubric_id":"...","lean":"mid","reason":"..."},'
+        '"evidence_confidence":{"rubric_id":"...","lean":"mid","reason":"..."},'
+        '"attack_stage":{"rubric_id":"...","lean":"mid","reason":"..."},'
+        '"data_sensitivity":{"rubric_id":"...","lean":"mid","reason":"..."},'
+        '"threat_intel":{"rubric_id":"...","lean":"mid","reason":"..."}},'
         '"raw_confidence":0.0,"evidence_limited":false}\n'
-        "Each score is 0-100 with a one-sentence evidence-based reason. "
-        "Do not include chain-of-thought. Missing or failed evidence collection "
-        "does NOT mean low threat — preserve source alert severity when evidence "
-        "is sparse and set evidence_limited=true."
+        "Each reason is one evidence-based sentence. Do not include chain-of-thought. "
+        "Missing or failed evidence collection does NOT mean low threat — preserve "
+        "source alert severity when evidence is sparse and set evidence_limited=true."
     )
     source_context: dict[str, Any] = {}
     if isinstance(source_snapshot, dict):
@@ -156,9 +168,11 @@ def build_risk_messages(
         "rag": rag_summary or {},
         "graph_summary": graph_summary or {},
         "required_factors": list(FACTOR_NAMES),
+        "rubrics": rubric_catalog_for_prompt(),
+        "lean_values": ["low", "mid", "high"],
     }
     user = (
-        "Score the event and respond with JSON only.\n"
+        "Pick a rubric band per dimension and respond with JSON only.\n"
         f"Context:\n{json.dumps(payload, ensure_ascii=False)}"
     )
     return [

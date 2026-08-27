@@ -106,10 +106,8 @@ export default function EventListPage() {
     null,
   );
   const [includeResponseExecution, setIncludeResponseExecution] = useState(false);
-  // ISSUE-204: report generation toggle — default OFF (product default). When
-  // checked, triggerInvestigation sends generate_report=true so the backend
-  // actually generates a report during the investigation.
-  const [generateReport, setGenerateReport] = useState(false);
+  // Default ON so investigate can leave REPORTING and reach CLOSED (API default).
+  const [generateReport, setGenerateReport] = useState(true);
 
   const celeryPollingEnabled =
     isCeleryTaskMode(investigationHealth?.task_mode) ||
@@ -423,7 +421,7 @@ export default function EventListPage() {
     (eventId: string) => {
       setPendingInvestigateEventId(eventId);
       setIncludeResponseExecution(false);
-      setGenerateReport(false);
+      setGenerateReport(true);
       setInvestigateModalOpen(true);
     },
     [],
@@ -546,7 +544,8 @@ export default function EventListPage() {
         data-testid="investigate-mode-modal"
       >
         <Typography.Paragraph type="secondary">
-          默认「仅分析」不自动生成报告（可在下方勾选或稍后在报告 Tab 生成），也不会产生待审批动作；「分析并生成处置方案」
+          默认「仅分析」会生成报告并在分析完成后尝试 CLOSED（可取消勾选「同时生成分析报告」，关闭后调查停在
+          REPORTING），也不会产生待审批动作；「分析并生成处置方案」
           会继续进入 ResponseAgent 与审批流程（L2+ 或策略要求审批的处置动作会进入待审批）。
         </Typography.Paragraph>
         <Radio.Group
@@ -575,7 +574,7 @@ export default function EventListPage() {
         >
           同时生成分析报告
           <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
-            （默认关闭，节省 LLM 开销）
+            （默认开启；关闭则调查停在 REPORTING，不会 CLOSED）
           </Typography.Text>
         </Checkbox>
         {investigationHealth?.approval_policy_version ? (

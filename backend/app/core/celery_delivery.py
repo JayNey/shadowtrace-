@@ -47,6 +47,7 @@ REDELIVERY_RESUME_STATUSES: frozenset[EventStatus] = frozenset(
         EventStatus.COLLECTING_EVIDENCE,
         EventStatus.ANALYZING,
         EventStatus.SCORING,
+        EventStatus.PLANNING_RESPONSE,
         EventStatus.WAITING_APPROVAL,
         EventStatus.EXECUTING_RESPONSE,
         EventStatus.VERIFYING,

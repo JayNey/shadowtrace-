@@ -179,7 +179,7 @@ def project_writeback_envelope(
     envelope_actions = [action for action in actions if is_envelope_action(action, revision)]
     envelope_ids = {action.action_id for action in envelope_actions}
 
-    if policy is DispositionPolicy.NOT_REQUIRED:
+    if policy == DispositionPolicy.NOT_REQUIRED:
         aggregate_readiness = WritebackReadiness.NOT_REQUIRED
     elif envelope_actions:
         readiness_present = {
@@ -260,50 +260,6 @@ def project_writeback_envelope(
         terminal_event_confirmed=terminal_event_confirmed,
         closure_cycle=closure_cycle,
     )
-    # #region agent log
-    try:
-        import json as _dbg_json
-        import time as _dbg_time
-
-        with open(
-            "/Users/apple/Desktop/shadowtrace副本/.cursor/debug-0da307.log",
-            "a",
-            encoding="utf-8",
-        ) as _dbg_f:
-            _dbg_f.write(
-                _dbg_json.dumps(
-                    {
-                        "sessionId": "0da307",
-                        "runId": "post-fix",
-                        "hypothesisId": "F",
-                        "location": "writeback_event_projection.py:project_writeback_envelope",
-                        "message": "shared writeback envelope",
-                        "data": {
-                            "policy": policy.value,
-                            "revision": revision,
-                            "required_count": envelope.required_action_count,
-                            "applicable_count": envelope.applicable_action_count,
-                            "envelope_action_ids": list(envelope.envelope_action_ids),
-                            "readiness": envelope.aggregate_readiness.value,
-                            "status": (
-                                envelope.aggregate_status.value
-                                if envelope.aggregate_status is not None
-                                else None
-                            ),
-                            "pending": envelope.pending_count,
-                            "writeback_counts": {
-                                status.value: count
-                                for status, count in envelope.writeback_counts.items()
-                            },
-                        },
-                        "timestamp": int(_dbg_time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except Exception:
-        pass
-    # #endregion
     return envelope
 
 

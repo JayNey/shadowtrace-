@@ -10,7 +10,6 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -18,6 +17,7 @@ from app.core.config import Settings
 from app.core.embedding.service import EmbeddingService
 from app.models.knowledge import KnowledgeChunk
 from app.services.knowledge_store import KnowledgeStore
+from tests.helpers.knowledge_isolation import TEST_OWNED_CHUNK_DELETE
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.environ.get(
@@ -32,6 +32,15 @@ def _alembic_config() -> Config:
     return cfg
 
 
+def _run_migrations() -> None:
+    """Alembic env.py reads get_settings().database_url — sync test URL first."""
+    os.environ["DATABASE_URL"] = DATABASE_URL
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    command.upgrade(_alembic_config(), "head")
+
+
 # ---------------------------------------------------------------------------
 # Database fixtures
 # ---------------------------------------------------------------------------
@@ -39,7 +48,7 @@ def _alembic_config() -> Config:
 
 @pytest.fixture(scope="module")
 def migrated() -> None:
-    command.upgrade(_alembic_config(), "head")
+    _run_migrations()
 
 
 @pytest_asyncio.fixture
@@ -56,7 +65,7 @@ async def session_factory(
 async def clean_knowledge(session_factory: async_sessionmaker[AsyncSession]) -> None:
     """Truncate knowledge_chunk before each test for isolation."""
     async with session_factory() as session:
-        await session.execute(text("DELETE FROM knowledge_chunk"))
+        await session.execute(TEST_OWNED_CHUNK_DELETE)
         await session.commit()
 
 
@@ -123,6 +132,31 @@ class TestUpsertChunks:
     async def test_empty_chunks_noop(self, store: KnowledgeStore, clean_knowledge: None) -> None:
         await store.upsert_chunks("attack_kb", [])
         assert await store.count("attack_kb") == 0
+
+    @pytest.mark.asyncio
+    async def test_upsert_chunks_batches_above_embed_limit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        clean_knowledge: None,
+    ) -> None:
+        embed = EmbeddingService(Settings(embedding_mode="mock", embedding_max_batch_size=2))
+        store = KnowledgeStore(session_factory, embed)
+        batches: list[int] = []
+        original = embed.embed_texts
+
+        async def _spy(texts: list[str]) -> list[list[float]]:
+            batches.append(len(texts))
+            return await original(texts)
+
+        embed.embed_texts = _spy  # type: ignore[method-assign]
+        chunks = [
+            _chunk("chk-000000a1", "attack_kb", "batch chunk one"),
+            _chunk("chk-000000a2", "attack_kb", "batch chunk two"),
+            _chunk("chk-000000a3", "attack_kb", "batch chunk three"),
+        ]
+        await store.upsert_chunks("attack_kb", chunks)
+        assert await store.count("attack_kb") == 3
+        assert batches == [2, 1]
 
 
 class TestVectorSearch:

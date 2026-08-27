@@ -90,7 +90,7 @@ export function triggerInvestigation(
     `/events/${eventId}/investigate`,
     {
       include_response_execution: options?.includeResponseExecution ?? false,
-      generate_report: options?.generateReport ?? false,
+      generate_report: options?.generateReport ?? true,
     },
     { skipGlobalErrorToast: true },
   );

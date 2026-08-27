@@ -795,6 +795,15 @@ def test_remaining_route_truth_tables() -> None:
         route_after_report(
             _base_state(
                 disposition_policy=DispositionPolicy.REQUIRED.value,
+                escalated=True,
+            )
+        )
+        == ROUTE_CLOSE
+    )
+    assert (
+        route_after_report(
+            _base_state(
+                disposition_policy=DispositionPolicy.REQUIRED.value,
                 verify_overall_status=VerificationOverallStatus.SUCCESS.value,
             )
         )
@@ -1821,6 +1830,69 @@ async def test_approval_halts_at_wait_node_not_before() -> None:
     assert final["execution_substate"] == ExecutionSubstate.WAITING_APPROVAL.value
     # approval_node should have run and set needs_approval_wait
     assert NODE_APPROVAL in final["node_trace"]
+
+
+class _ScalarStatusSession:
+    def __init__(self, status: str) -> None:
+        self._status = status
+
+    async def scalar(self, _stmt: Any) -> str:
+        return self._status
+
+    async def __aenter__(self) -> _ScalarStatusSession:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+
+class _ScalarStatusSessionFactory:
+    def __init__(self, status: str) -> None:
+        self._status = status
+
+    def __call__(self) -> _ScalarStatusSession:
+        return _ScalarStatusSession(self._status)
+
+
+@pytest.mark.asyncio
+async def test_approval_wait_node_skips_waiting_substate_when_already_executing() -> None:
+    """B-1′: HTTP approve already moved DB to executing_response before halt."""
+    from app.models.workflow import validate_execution_substate
+
+    class _HostAwareRuntime(FakeRuntime):
+        async def set_execution_substate(
+            self,
+            event_id: str,
+            substate: ExecutionSubstate,
+            *,
+            event_status: EventStatus,
+        ) -> None:
+            validate_execution_substate(
+                EventStatus.EXECUTING_RESPONSE,
+                ExecutionSubstate.NONE,
+                substate,
+            )
+            await super().set_execution_substate(
+                event_id,
+                substate,
+                event_status=event_status,
+            )
+
+    runtime = _HostAwareRuntime()
+    services = _services(runtime=runtime)
+    services["session_factory"] = _ScalarStatusSessionFactory(
+        EventStatus.EXECUTING_RESPONSE.value
+    )
+    graph = build_investigation_graph(_agents(), services)
+    node = graph.nodes[NODE_APPROVAL_WAIT]
+    result = await node.ainvoke(_base_state(event_id="evt-wait-already-exec"))
+    state = result if isinstance(result, dict) else getattr(result, "values", result)
+    assert state["halted"] is True
+    assert state["execution_substate"] == ExecutionSubstate.NONE.value
+    assert state["needs_approval_wait"] is False
+    assert ExecutionSubstate.WAITING_APPROVAL not in runtime.substates
+    assert ExecutionSubstate.NONE in runtime.substates
+
 
 
 @pytest.mark.asyncio

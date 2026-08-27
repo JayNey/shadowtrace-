@@ -35,6 +35,8 @@ SNAPSHOT_SUMMARY_KEYS = frozenset(
         "triage_severity",
         "classification_override",
         "execution_substate",
+        "org_context_matches",
+        "fp_adjudication",
     }
 )
 
@@ -65,6 +67,8 @@ _MAX_STORYLINE_SUMMARY_BYTES = 4_096
 _MAX_EVIDENCE_SUMMARY_BYTES = 4_096
 _MAX_RISK_ASSESSMENT_BYTES = 8_192
 _MAX_SNAPSHOT_BYTES = 65_536
+_MAX_ORG_CONTEXT_MATCHES = 8
+_MAX_MATCHED_VALUE_CHARS = 160
 
 
 def _strip_forbidden(value: Any) -> Any:
@@ -235,6 +239,55 @@ def _bound_risk_assessment(risk: dict[str, Any]) -> dict[str, Any]:
     return _fit_bytes(cleaned, max_bytes=_MAX_RISK_ASSESSMENT_BYTES)
 
 
+def _bound_org_context_matches(raw: Any) -> list[dict[str, str]]:
+    """API-facing org matches: kind + value only, no explanations/citations."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in raw[:_MAX_ORG_CONTEXT_MATCHES]:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "")[:64]
+        value = str(item.get("matched_value") or "")[:_MAX_MATCHED_VALUE_CHARS]
+        if not kind and not value:
+            continue
+        out.append({"kind": kind, "matched_value": value})
+    return out
+
+
+def _bound_fp_adjudication(raw: Any) -> dict[str, str] | None:
+    """API-facing FP adjudication: recommendation, window, qualification."""
+    if not isinstance(raw, dict):
+        return None
+    recommendation = str(raw.get("recommendation") or "").strip()[:64]
+    window = raw.get("matched_window_id")
+    window_s = str(window).strip()[:128] if window not in (None, "") else ""
+    level_s = ""
+    level_raw = raw.get("qualification_level")
+    if level_raw not in (None, ""):
+        try:
+            level_n = int(level_raw)
+        except (TypeError, ValueError):
+            level_n = -1
+        if 0 <= level_n <= 4:
+            level_s = str(level_n)
+    arbitration = str(raw.get("arbitration") or "").strip()[:64]
+    if arbitration not in {"no_contradiction", "malicious_overrides_allowance"}:
+        arbitration = ""
+    if not recommendation and not window_s and not level_s and not arbitration:
+        return None
+    bounded: dict[str, str] = {}
+    if recommendation:
+        bounded["recommendation"] = recommendation
+    if window_s:
+        bounded["matched_window_id"] = window_s
+    if level_s:
+        bounded["qualification_level"] = level_s
+    if arbitration:
+        bounded["arbitration"] = arbitration
+    return bounded
+
+
 _ALLOWED_TRIAGE_SEVERITY = frozenset({"low", "medium", "high", "critical"})
 
 
@@ -385,6 +438,19 @@ def project_snapshot_for_api(snapshot: dict[str, Any] | None) -> dict[str, Any] 
     if snapshot.get("execution_substate") is not None:
         raw_sub = snapshot.get("execution_substate")
         projected["execution_substate"] = _enum_value_or_text(raw_sub)[:64]
+
+    matches_raw = snapshot.get("org_context_matches")
+    if not isinstance(matches_raw, list):
+        rag = snapshot.get("rag_output")
+        if isinstance(rag, dict):
+            matches_raw = rag.get("org_context_matches")
+    matches = _bound_org_context_matches(matches_raw)
+    if matches:
+        projected["org_context_matches"] = matches
+
+    fp = _bound_fp_adjudication(snapshot.get("fp_adjudication"))
+    if fp is not None:
+        projected["fp_adjudication"] = fp
 
     return _hard_project_api_snapshot(projected)
 

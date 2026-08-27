@@ -23,6 +23,7 @@ from app.agents.graph_builder import GraphBuilder
 from app.core.config import get_settings
 from app.core.errors import ShadowTraceError
 from app.db.orm.graph import GraphEdgeORM, GraphNodeORM
+from app.graph.path_rank import PathRankSignals, signals_from_evidence
 from app.models.agent_io import GraphAgentInput, GraphOutput
 from app.models.evidence import Evidence
 from app.services.graph_projection import (
@@ -52,8 +53,9 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
 
     Persists nodes and edges to PostgreSQL (graph_node / graph_edge tables),
     computes degree-based centrality (top 3), and discovers time-monotonic
-    attack path candidates.  Graph construction failure records a degraded
-    flag but does not block the investigation pipeline (降级策略).
+    attack path candidates ranked by kill-chain aligned path ranking (KAPR).
+    Graph construction failure records a degraded flag but does not block
+    the investigation pipeline (降级策略).
     """
 
     agent_name: str = "graph_agent"
@@ -114,8 +116,9 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
         # 2. Compute centrality (top 3 entities by degree)
         central_entities = _compute_central_entities(nodes, edges)
 
-        # 3. Compute attack-path candidates (time-monotonic, depth ≤ 6, max 3)
-        attack_path_candidates = _find_attack_paths(nodes, edges)
+        # 3. Time-monotonic DFS, then KAPR rank (depth ≤ 6, max 3)
+        signals = signals_from_evidence(evidence_list)
+        attack_path_candidates = _find_attack_paths(nodes, edges, signals=signals)
 
         # 4. Build output
         output = GraphOutput(
@@ -131,12 +134,13 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
             output = self._finalize_output(
                 output,
                 reason=f"graph_persist_failed: {self.last_persist_error}",
+                signals=signals,
             )
             await self._mark_degraded(
                 event_id, reason=output.degraded_reason or "graph_persist_failed"
             )
         else:
-            output = self._finalize_output(output)
+            output = self._finalize_output(output, signals=signals)
 
         # 5b. Neo4j mirror sync + typed availability reason (ISSUE-082 / ISSUE-116).
         if self._graph_sync_service is not None and self.last_persist_ok:
@@ -292,7 +296,7 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
         if _evidence_fingerprint(evidence_list) != _graph_evidence_fingerprint(cached):
             return None
         if cached.summary is None:
-            return self._finalize_output(cached)
+            return self._finalize_output(cached, signals=signals_from_evidence(evidence_list))
         return cached
 
     def _finalize_output(
@@ -300,6 +304,7 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
         output: GraphOutput,
         *,
         reason: str | None = None,
+        signals: PathRankSignals | None = None,
     ) -> GraphOutput:
         if reason:
             self.last_degraded_reason = reason
@@ -309,7 +314,7 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
                     "degraded_reason": reason,
                 }
             )
-        summary = build_graph_summary(output)
+        summary = build_graph_summary(output, signals=signals)
         return output.model_copy(update={"summary": summary})
 
     @staticmethod

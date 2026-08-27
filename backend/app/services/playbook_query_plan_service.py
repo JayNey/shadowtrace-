@@ -19,6 +19,8 @@ async def resolve_active_playbook_query_plan(
     settings: Settings,
     *,
     trace_id: str,
+    tenant_id: str = "",
+    principal: str = "",
 ) -> KnowledgeQueryPlan | None:
     active = await service.get_active_release()
     if active is None:
@@ -33,6 +35,8 @@ async def resolve_active_playbook_query_plan(
         embedding_release_id=embedding_release_id,
         trace_id=trace_id,
         kb_name=PLAYBOOK_KB_NAME,
+        tenant_id=tenant_id,
+        principal=principal,
     )
 
 

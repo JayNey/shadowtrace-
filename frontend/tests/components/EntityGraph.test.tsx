@@ -259,4 +259,21 @@ describe("EntityGraph", () => {
 
     expect(screen.getByText("图谱未生成")).toBeInTheDocument();
   });
+
+  it("shows the graph degraded reason when the empty graph is degraded", () => {
+    render(
+      <EntityGraph
+        graph={{
+          nodes: [],
+          edges: [],
+          central_entities: [],
+          attack_path_candidates: [],
+          degraded: true,
+          degraded_reason: "neo4j_unavailable",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("neo4j_unavailable")).toBeInTheDocument();
+  });
 });

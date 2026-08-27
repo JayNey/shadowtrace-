@@ -145,7 +145,7 @@ class Settings(BaseSettings):
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")
     llm_primary_model: str = Field(default="mock-model", alias="LLM_PRIMARY_MODEL")
     llm_fallback_models: str = Field(default="", alias="LLM_FALLBACK_MODELS")
-    llm_timeout_seconds: int = Field(default=30, alias="LLM_TIMEOUT_SECONDS")
+    llm_timeout_seconds: int = Field(default=90, alias="LLM_TIMEOUT_SECONDS")
     structured_prompt_fast_fail: bool = Field(
         default=False,
         alias="STRUCTURED_PROMPT_FAST_FAIL",
@@ -258,6 +258,14 @@ class Settings(BaseSettings):
             "Demo/ops health gate: when true, /health returns 503 if "
             "playbook_resources.status != ready. Does not refuse investigations "
             "(investigation stack stays fail-soft)."
+        ),
+    )
+    org_context_seed_path: str = Field(
+        default="",
+        alias="ORG_CONTEXT_SEED_PATH",
+        description=(
+            "Optional JSON file of tenant org_context records. Production default "
+            "seed stays empty; set this to load customer allowlists/windows."
         ),
     )
     change_window_baseline_path: str = Field(

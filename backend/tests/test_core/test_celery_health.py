@@ -111,6 +111,10 @@ async def test_build_celery_health_probes_workers_in_celery_mode() -> None:
             new_callable=AsyncMock,
             return_value={"status": "degraded", "workers": 0, "worker_ids": []},
         ) as worker_mock,
+        patch(
+            "app.core.celery_health._intent_beat_heartbeat_age_s",
+            return_value=1.0,
+        ),
     ):
         result = await build_celery_health(
             task_mode="celery",
@@ -133,8 +137,30 @@ def test_investigation_intent_beat_schedule_ok_in_celery_mode(
 
     monkeypatch.setenv("TASK_MODE", "celery")
     get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.core.celery_health._intent_beat_heartbeat_age_s",
+        lambda: 1.0,
+    )
     result = check_investigation_intent_beat_schedule(task_mode="celery")
     assert result["status"] == "ok"
     assert result["dispatch_scheduled"] is True
     assert result["reconcile_scheduled"] is True
+    get_settings.cache_clear()
+
+
+def test_investigation_intent_beat_schedule_degraded_without_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("TASK_MODE", "celery")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.core.celery_health._intent_beat_heartbeat_age_s",
+        lambda: None,
+    )
+    result = check_investigation_intent_beat_schedule(task_mode="celery")
+    assert result["status"] == "degraded"
+    assert result["reason"] == "beat_heartbeat_missing"
+    assert result["dispatch_scheduled"] is True
     get_settings.cache_clear()

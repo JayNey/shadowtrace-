@@ -49,6 +49,18 @@ def test_risk_payload_includes_decision_summary_when_reasoning_empty() -> None:
     assert sample["source"] == EvidenceSource.NETWORK_FLOW.value
     assert sample["evidence_type"] == "flow"
     assert sample["confidence"] == 0.92
+    assert "rubrics" in payload
+    assert set(payload["rubrics"]) == {
+        "asset_impact",
+        "behavior_anomaly",
+        "evidence_confidence",
+        "attack_stage",
+        "data_sensitivity",
+        "threat_intel",
+    }
+    assert len(payload["rubrics"]["attack_stage"]) == 5
+    assert "rubric_id" in messages[0].content
+    assert "Do not invent a 0-100 score" in messages[0].content
 
 
 def test_risk_decision_summary_truncated_to_512_chars() -> None:

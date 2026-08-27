@@ -511,6 +511,8 @@ export interface GraphOutput {
   central_entities: string[];
   attack_path_candidates: string[][];
   cross_event_paths?: CrossEventPath[];
+  degraded?: boolean;
+  degraded_reason?: string | null;
 }
 
 export interface CrossEventPath {
@@ -563,6 +565,8 @@ export interface EventContextSnapshot {
   risk_assessment?: RiskAssessment | null;
   /** ISSUE-330: bounded triage severity for explicit dual-source disclosure. */
   triage_severity?: Severity | null;
+  org_context_matches?: Array<{ kind?: string; matched_value?: string }> | null;
+  fp_adjudication?: { recommendation?: string; matched_window_id?: string } | null;
   execution_jobs?: ExecutionJobResponse[];
   execution_summary?: {
     jobs?: ExecutionJobResponse[];

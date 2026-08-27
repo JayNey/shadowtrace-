@@ -81,7 +81,16 @@ def _client(
 def _evidence_output() -> dict[str, Any]:
     return {
         "evidence_list": [],
-        "conflicts": [],
+        "conflicts": [
+            {
+                "conflict_id": "cfl-api-101",
+                "event_id": "evt-api-101",
+                "description": "identity vs endpoint disagree",
+                "evidence_ids": ["evd-1", "evd-2"],
+                "sources": [EvidenceSource.IDENTITY.value, EvidenceSource.ENDPOINT.value],
+                "detail": {},
+            }
+        ],
         "gaps": [
             {
                 "event_id": "evt-api-101",
@@ -109,6 +118,8 @@ def test_get_event_evidence_returns_gaps_and_collection_status() -> None:
     assert payload["collection_status"] == CollectionStatus.FAILED.value
     assert payload["gaps"][0]["reason"] == "source_skipped"
     assert payload["gaps"][0]["missing_source"] == EvidenceSource.ENDPOINT.value
+    assert payload["conflicts"][0]["conflict_id"] == "cfl-api-101"
+    assert payload["conflicts"][0]["description"] == "identity vs endpoint disagree"
     assert payload["query_summary"] == []
 
 
