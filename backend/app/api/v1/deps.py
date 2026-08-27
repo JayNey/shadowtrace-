@@ -21,9 +21,11 @@ from app.db.session_provider import get_session_provider, reset_session_provider
 from app.orchestration.graph_invocation import (
     NestedGraphResumeError,
     clear_nested_resume_hooks,
+    set_investigation_lease_held_probe,
     set_nested_resume_durability_writer,
     set_nested_resume_failure_handler,
     set_nested_resume_runner,
+    set_nested_wakeup_lease_release_kicker,
 )
 
 if TYPE_CHECKING:
@@ -620,11 +622,31 @@ async def _persist_nested_graph_wakeup(event_id: str, reason: str) -> None:
     await service.enqueue_nested_wakeup(event_id, reason=reason)
 
 
+async def _event_lease_is_held(event_id: str) -> bool:
+    lease = get_event_lease()
+    try:
+        return await lease.get_owner(event_id) is not None
+    except Exception:
+        logger.warning(
+            "event lease probe failed event=%s; treating as held",
+            event_id,
+            exc_info=True,
+        )
+        return True
+
+
+async def _kick_nested_wakeup_after_lease_release(event_id: str) -> None:
+    service = await get_manual_resolution_service()
+    await service.kick_nested_wakeup_dispatch(event_id)
+
+
 def ensure_nested_resume_runner() -> None:
     """Idempotently install the production nested-resume flusher (API + workers)."""
     set_nested_resume_runner(_resume_investigation)
     set_nested_resume_failure_handler(_on_nested_resume_flush_failure)
     set_nested_resume_durability_writer(_persist_nested_graph_wakeup)
+    set_investigation_lease_held_probe(_event_lease_is_held)
+    set_nested_wakeup_lease_release_kicker(_kick_nested_wakeup_after_lease_release)
 
 
 async def get_manual_resolution_service() -> Any:

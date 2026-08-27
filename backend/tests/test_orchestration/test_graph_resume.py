@@ -225,7 +225,11 @@ async def test_waiting_writeback_resume_reruns_verify_and_escalates_after_accept
 
 @pytest.mark.asyncio
 async def test_unknown_action_after_cas_miss_does_not_stay_inflight_wait() -> None:
-    """UNKNOWN is not durable inflight WAIT; resume clears wait so Verify can go manual."""
+    """UNKNOWN is not durable inflight WAIT; halt/inflight clear so Verify can go manual.
+
+    Leaving EXECUTING is not writeback success — recovery stays set until a
+    terminal writeback status is observed.
+    """
     graph = MagicMock()
     graph.aget_state = AsyncMock(
         return_value=MagicMock(
@@ -261,9 +265,37 @@ async def test_unknown_action_after_cas_miss_does_not_stay_inflight_wait() -> No
     assert graph.aupdate_state.await_args.kwargs["as_node"] == NODE_EXECUTE
     patch = graph.aupdate_state.await_args.args[1]
     assert patch["halted"] is False
-    assert patch["verify_need_writeback_recovery"] is False
     assert patch["execution_inflight"] is False
     assert patch["verify_pending_writeback_action_ids"] == []
+    assert patch.get("verify_need_writeback_recovery") is not False
+    assert patch.get("execution_substate") != ExecutionSubstate.NONE.value
+
+
+@pytest.mark.asyncio
+async def test_inflight_wait_resolved_does_not_clear_recovery_without_confirmed_writeback() -> None:
+    patch = await _reconcile_verify_resume_patch(
+        _SessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_rows=[("act-unknown-2", ActionStatus.UNKNOWN.value)],
+        ),
+        "evt-inflight-no-wb",
+        {
+            "halted": True,
+            "verify_need_writeback_recovery": True,
+            "verify_need_manual_resolution": False,
+            "verify_failed_writebacks": [],
+            "verify_recoverable_writeback_ids": [],
+            "verify_pending_writeback_action_ids": ["act-unknown-2"],
+            "execution_inflight": True,
+            "execution_inflight_action_ids": ["act-unknown-2"],
+            "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+            "disposition_policy": DispositionPolicy.NOT_REQUIRED.value,
+        },
+    )
+    assert patch["halted"] is False
+    assert patch["execution_inflight"] is False
+    assert patch.get("verify_need_writeback_recovery") is not False
+    assert patch.get("execution_substate") != ExecutionSubstate.NONE.value
 
 
 @pytest.mark.asyncio

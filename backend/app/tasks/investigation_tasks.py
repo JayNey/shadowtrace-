@@ -642,7 +642,7 @@ async def _handle_soft_time_limit_exceeded(
         # Full-loop SuperAgent and analysis_only both defer release until here.
         try:
             lease = get_event_lease()
-            await lease.release(event_id, resolved_owner)
+            released = await lease.release(event_id, resolved_owner)
         except SoftTimeLimitExceeded:
             raise
         except Exception:
@@ -653,6 +653,13 @@ async def _handle_soft_time_limit_exceeded(
                 resolved_owner,
                 exc_info=True,
             )
+        else:
+            if released:
+                from app.orchestration.graph_invocation import (
+                    kick_nested_wakeup_after_lease_release,
+                )
+
+                await kick_nested_wakeup_after_lease_release(event_id)
 
 
 @celery_app.task(  # type: ignore[untyped-decorator]
@@ -953,7 +960,7 @@ async def execute_analysis_only_investigation(
                 await renewal_task
         if owns_lease and not soft_limited:
             try:
-                await lease.release(event_id, owner_id)
+                released = await lease.release(event_id, owner_id)
             except SoftTimeLimitExceeded:
                 raise
             except Exception:
@@ -963,6 +970,13 @@ async def execute_analysis_only_investigation(
                     owner_id,
                     exc_info=True,
                 )
+            else:
+                if released:
+                    from app.orchestration.graph_invocation import (
+                        kick_nested_wakeup_after_lease_release,
+                    )
+
+                    await kick_nested_wakeup_after_lease_release(event_id)
 
 
 async def dispatch_analysis_only_investigation(

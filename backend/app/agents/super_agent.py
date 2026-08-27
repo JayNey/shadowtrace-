@@ -554,7 +554,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                 self._reset_convergence_guard(event_id)
             if acquired and self.lease is not None and not soft_limited:
                 try:
-                    await self.lease.release(event_id, resolved_owner)
+                    released = await self.lease.release(event_id, resolved_owner)
                 except SoftTimeLimitExceeded:
                     # ISSUE-314: do not swallow soft-limit into investigate success.
                     raise
@@ -565,6 +565,13 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                         resolved_owner,
                         exc_info=True,
                     )
+                else:
+                    if released:
+                        from app.orchestration.graph_invocation import (
+                            kick_nested_wakeup_after_lease_release,
+                        )
+
+                        await kick_nested_wakeup_after_lease_release(event_id)
 
     # ------------------------------------------------------------------ #
     # _run — BaseAgent template integration

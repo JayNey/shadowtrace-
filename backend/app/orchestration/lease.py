@@ -1,7 +1,8 @@
 """EventLease — Redis-based distributed lease to prevent duplicate orchestration (ISSUE-054).
 
-Acquire uses ``SET NX EX`` for atomicity; renew and release use Lua scripts to
-check owner identity before EXPIRE/DEL. When Redis is unavailable ``acquire`` raises
+Acquire, renew, and release use Lua scripts. Acquire is ``SET NX EX`` plus a
+persisted TTL key in one round-trip; renew/release check owner identity before
+EXPIRE/DEL. When Redis is unavailable ``acquire`` raises
 ``DependencyUnavailableError`` (HTTP 503); duplicate triggers return ``False``
 (HTTP 409).
 
@@ -25,6 +26,20 @@ LEASE_KEY_PREFIX = "shadowtrace:lease:event:"
 LEASE_TTL_KEY_SUFFIX = ":ttl"
 DEFAULT_LEASE_TTL_S = 600
 RENEW_INTERVAL_S = 60
+
+# Lua script: atomically acquire the lease and persist the original TTL.
+# Returns: 1 = acquired (lease + TTL key written), 0 = already held.
+# KEYS[2] stores the original acquire TTL so a rebound EventLease can renew
+# with the same budget instead of fail-closing when the in-process cache is empty.
+_ACQUIRE_SCRIPT = """
+-- shadowtrace-lease-acquire
+local ok = redis.call("SET", KEYS[1], ARGV[1], "NX", "EX", tonumber(ARGV[2]))
+if ok then
+    redis.call("SET", KEYS[2], ARGV[2], "EX", tonumber(ARGV[2]))
+    return 1
+end
+return 0
+"""
 
 # Lua script: atomically delete the key only when the value matches owner_id.
 # Returns: 1 = deleted, 0 = owner mismatch, -1 = key absent.
@@ -64,21 +79,27 @@ return 0
 
 
 def classify_lease_lua_script(source: str) -> str:
-    """Return ``renew`` or ``release`` for a registered EventLease Lua script.
+    """Return ``acquire``, ``renew``, or ``release`` for a registered EventLease Lua script.
 
     Prefer identity against the module constants so comment edits cannot
-    silently swap branches in fake Redis. Fall back to EXPIRE vs DEL.
+    silently swap branches in fake Redis. Fall back to SET NX / EXPIRE / DEL.
     """
     if source is _RENEW_SCRIPT or source == _RENEW_SCRIPT:
         return "renew"
     if source is _RELEASE_SCRIPT or source == _RELEASE_SCRIPT:
         return "release"
+    if source is _ACQUIRE_SCRIPT or source == _ACQUIRE_SCRIPT:
+        return "acquire"
     has_expire = 'redis.call("EXPIRE"' in source or "redis.call('EXPIRE'" in source
     has_del = 'redis.call("DEL"' in source or "redis.call('DEL'" in source
+    has_set = 'redis.call("SET"' in source or "redis.call('SET'" in source
+    has_nx = "NX" in source
     if has_expire and not has_del:
         return "renew"
     if has_del and not has_expire:
         return "release"
+    if has_set and has_nx and not has_expire and not has_del:
+        return "acquire"
     raise ValueError("unknown lease lua script")
 
 
@@ -152,10 +173,11 @@ class EventLease:
     ) -> bool:
         """Atomically acquire the lease.  Returns ``True`` on success.
 
-        Uses ``SET key owner_id NX EX ttl_s`` so only the first caller for
-        a given *event_id* wins.  Returns ``False`` when another owner holds
-        the lease.  Raises :class:`~app.core.errors.DependencyUnavailableError`
-        when Redis is unavailable.
+        Uses a Lua ``SET NX EX`` plus TTL-key write so the original budget is
+        visible to a rebound worker even when the in-process cache is empty.
+        Returns ``False`` when another owner holds the lease.  Raises
+        :class:`~app.core.errors.DependencyUnavailableError` when Redis is
+        unavailable.
         """
         redis = self._raw_redis()
         if redis is None:
@@ -170,17 +192,14 @@ class EventLease:
             )
         ttl_s = _require_positive_ttl(ttl_s)
         key = _lease_key(event_id)
-        acquired = await redis.set(key, owner_id, nx=True, ex=ttl_s)
+        script = self._script_for(redis, _ACQUIRE_SCRIPT)
+        result: Any = await script(
+            keys=[key, _ttl_key(event_id)],
+            args=[owner_id, str(ttl_s)],
+        )
+        acquired = int(result) == 1 if result is not None else False
         if acquired:
             self._acquired_ttl[event_id] = ttl_s
-            try:
-                await redis.set(_ttl_key(event_id), str(ttl_s), ex=ttl_s)
-            except Exception:
-                logger.warning(
-                    "EventLease: failed to persist acquire TTL for event=%s",
-                    event_id,
-                    exc_info=True,
-                )
             logger.info(
                 "EventLease: acquired lease for event=%s owner=%s ttl=%ds",
                 event_id,
@@ -320,6 +339,39 @@ class EventLease:
         except (TypeError, ValueError, ValidationError):
             return None
 
+    async def _read_live_lease_ttl(self, event_id: str) -> int | None:
+        """Remaining TTL on the live lease key, if Redis still holds it.
+
+        Used when the persisted TTL key is missing after HTTP acquire + worker
+        rebind: aborting a still-valid lock would fail-close a healthy run.
+        """
+        redis = self._raw_redis()
+        if redis is None:
+            return None
+        ttl_fn = getattr(redis, "ttl", None)
+        if ttl_fn is None:
+            return None
+        try:
+            raw = await ttl_fn(_lease_key(event_id))
+        except Exception:
+            logger.warning(
+                "EventLease: failed to read live lease TTL for event=%s",
+                event_id,
+                exc_info=True,
+            )
+            return None
+        if raw is None:
+            return None
+        try:
+            remaining = int(raw)
+        except (TypeError, ValueError):
+            return None
+        if remaining == -1:
+            return DEFAULT_LEASE_TTL_S
+        if remaining <= 0:
+            return None
+        return remaining
+
     # ------------------------------------------------------------------ #
     # Background renewal helpers
     # ------------------------------------------------------------------ #
@@ -345,8 +397,19 @@ class EventLease:
             if renew_ttl is None:
                 renew_ttl = await self._read_persisted_ttl(event_id)
             if renew_ttl is None:
+                renew_ttl = await self._read_live_lease_ttl(event_id)
+                if renew_ttl is not None:
+                    logger.warning(
+                        "EventLease.start_renewal: TTL key missing for event=%s; "
+                        "using live lease ttl=%s",
+                        event_id,
+                        renew_ttl,
+                    )
+                    self._acquired_ttl[event_id] = renew_ttl
+            if renew_ttl is None:
                 logger.error(
-                    "EventLease.start_renewal: no persisted TTL for event=%s; fail-closed",
+                    "EventLease.start_renewal: lease TTL unavailable for event=%s; "
+                    "fail-closed",
                     event_id,
                 )
                 if on_renewal_failed is not None:

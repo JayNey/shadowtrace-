@@ -31,9 +31,13 @@ _deferred_graph_resumes: ContextVar[set[str] | None] = ContextVar(
 NestedResumeRunner = Callable[[str], Awaitable[None]]
 NestedResumeFailureHandler = Callable[[str, BaseException, list[str]], Awaitable[None]]
 NestedResumeDurabilityWriter = Callable[[str, str], Awaitable[None]]
+LeaseHeldProbe = Callable[[str], Awaitable[bool]]
+NestedWakeupKicker = Callable[[str], Awaitable[None]]
 _nested_resume_runner: NestedResumeRunner | None = None
 _nested_resume_failure_handler: NestedResumeFailureHandler | None = None
 _nested_resume_durability_writer: NestedResumeDurabilityWriter | None = None
+_lease_held_probe: LeaseHeldProbe | None = None
+_nested_wakeup_kicker: NestedWakeupKicker | None = None
 
 
 class NestedGraphResumeError(RuntimeError):
@@ -87,11 +91,77 @@ def get_nested_resume_durability_writer() -> NestedResumeDurabilityWriter | None
     return _nested_resume_durability_writer
 
 
+def set_investigation_lease_held_probe(probe: LeaseHeldProbe | None) -> None:
+    """Install Redis EventLease ownership probe for nested wakeup gating."""
+    global _lease_held_probe
+    _lease_held_probe = probe
+
+
+def get_investigation_lease_held_probe() -> LeaseHeldProbe | None:
+    return _lease_held_probe
+
+
+def set_nested_wakeup_lease_release_kicker(kicker: NestedWakeupKicker | None) -> None:
+    """Install post-release dispatcher for PENDING/RETRY nested wakeups."""
+    global _nested_wakeup_kicker
+    _nested_wakeup_kicker = kicker
+
+
+def get_nested_wakeup_lease_release_kicker() -> NestedWakeupKicker | None:
+    return _nested_wakeup_kicker
+
+
 def clear_nested_resume_hooks() -> None:
     """Drop process-level nested-resume hooks (tests / reset_deps)."""
     set_nested_resume_runner(None)
     set_nested_resume_failure_handler(None)
     set_nested_resume_durability_writer(None)
+    set_investigation_lease_held_probe(None)
+    set_nested_wakeup_lease_release_kicker(None)
+
+
+async def investigation_lease_is_held(event_id: str) -> bool:
+    """True when Redis EventLease is held for *event_id*.
+
+    Missing probe (unit tests without deps) is treated as not held so existing
+    in-process fixtures keep dispatching. Probe errors fail-closed as held so
+    a second graph cannot start while ownership is unknown.
+    """
+    probe = _lease_held_probe
+    if probe is None:
+        return False
+    try:
+        return bool(await probe(event_id))
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning(
+            "investigation lease probe failed event=%s; treating as held",
+            event_id,
+            exc_info=True,
+        )
+        return True
+
+
+async def kick_nested_wakeup_after_lease_release(event_id: str) -> None:
+    """Dispatch a durable nested wakeup now that EventLease is gone.
+
+    No-op when the production kicker is not installed. Failures are logged
+    rather than raised so lease-release ``finally`` blocks cannot poison the
+    parent investigation.
+    """
+    kicker = _nested_wakeup_kicker
+    if kicker is None:
+        return
+    try:
+        await kicker(event_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception(
+            "nested wakeup kick after lease release failed event=%s",
+            event_id,
+        )
 
 
 async def persist_nested_graph_wakeup(
@@ -224,6 +294,16 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
             await _notify_nested_resume_failure(resume_event_id, error, [resume_event_id])
         return
     for resume_event_id in pending:
+        if await investigation_lease_is_held(resume_event_id):
+            logger.warning(
+                "persist nested graph resume without flush; event lease held event=%s",
+                resume_event_id,
+            )
+            await persist_nested_graph_wakeup(
+                resume_event_id,
+                "investigation_in_progress",
+            )
+            continue
         try:
             await runner(resume_event_id)
         except Exception as exc:
@@ -310,12 +390,18 @@ __all__ = [
     "bind_investigation_graph",
     "clear_nested_resume_hooks",
     "defer_nested_graph_resume",
+    "get_investigation_lease_held_probe",
     "get_nested_resume_durability_writer",
     "get_nested_resume_failure_handler",
     "get_nested_resume_runner",
+    "get_nested_wakeup_lease_release_kicker",
+    "investigation_lease_is_held",
     "is_in_investigation_graph",
+    "kick_nested_wakeup_after_lease_release",
     "persist_nested_graph_wakeup",
+    "set_investigation_lease_held_probe",
     "set_nested_resume_durability_writer",
     "set_nested_resume_failure_handler",
     "set_nested_resume_runner",
+    "set_nested_wakeup_lease_release_kicker",
 ]

@@ -1532,7 +1532,219 @@ async def test_dispatch_nested_wakeup_skips_while_graph_bound_without_db() -> No
         last_error=None,
     )
     async with bind_investigation_graph("evt-bound-dispatch"):
-        service._dispatch_nested_wakeup_if_unbound(record)
+        await service._dispatch_nested_wakeup_if_unbound(record)
         assert dispatched == []
-    service._dispatch_nested_wakeup_if_unbound(record)
+    await service._dispatch_nested_wakeup_if_unbound(record)
     assert dispatched == ["yes"]
+
+
+@pytest.mark.asyncio
+async def test_nested_wakeup_skips_dispatch_while_event_lease_held() -> None:
+    from app.models.graph_resume_intent import (
+        INTENT_KIND_NESTED_GRAPH_WAKEUP,
+        INTENT_VERSION_ISSUE277_V1,
+        NESTED_WAKEUP_HOLD_GENERATION,
+        RESOLUTION_SOURCE_NESTED_WAKEUP,
+        SUBJECT_KIND_EVENT,
+        GraphResumeIntentRecord,
+    )
+    from app.orchestration.graph_invocation import (
+        get_investigation_lease_held_probe,
+        set_investigation_lease_held_probe,
+    )
+
+    dispatched: list[str] = []
+    service = ManualResolutionService(MagicMock())
+    service.schedule_dispatch = lambda **kwargs: dispatched.append("yes")  # type: ignore[method-assign]
+    record = GraphResumeIntentRecord(
+        intent_id="gri-lease-held",
+        event_id="evt-lease-held-dispatch",
+        intent_kind=INTENT_KIND_NESTED_GRAPH_WAKEUP,
+        intent_version=INTENT_VERSION_ISSUE277_V1,
+        status=GraphResumeIntentStatus.PENDING,
+        revision=1,
+        attempt=0,
+        hold_generation=NESTED_WAKEUP_HOLD_GENERATION,
+        checkpoint_id="evt-lease-held-dispatch",
+        operation_id=None,
+        resolution_source=RESOLUTION_SOURCE_NESTED_WAKEUP,
+        subject_kind=SUBJECT_KIND_EVENT,
+        subject_id="evt-lease-held-dispatch",
+        resolution="execution_inflight_wait",
+        principal="NestedGraphResume",
+        skip_reason=None,
+        last_error=None,
+    )
+
+    async def _held(_event_id: str) -> bool:
+        return True
+
+    previous = get_investigation_lease_held_probe()
+    set_investigation_lease_held_probe(_held)
+    try:
+        await service._dispatch_nested_wakeup_if_unbound(record)
+        assert dispatched == []
+    finally:
+        set_investigation_lease_held_probe(previous)
+    await service._dispatch_nested_wakeup_if_unbound(record)
+    assert dispatched == ["yes"]
+
+
+@pytest.mark.asyncio
+async def test_kick_nested_wakeup_ignores_lease_gate_without_db() -> None:
+    from types import SimpleNamespace
+
+    from app.models.graph_resume_intent import (
+        INTENT_KIND_NESTED_GRAPH_WAKEUP,
+        INTENT_VERSION_ISSUE277_V1,
+        NESTED_WAKEUP_HOLD_GENERATION,
+        RESOLUTION_SOURCE_NESTED_WAKEUP,
+        SUBJECT_KIND_EVENT,
+    )
+    from app.orchestration.graph_invocation import (
+        get_investigation_lease_held_probe,
+        set_investigation_lease_held_probe,
+    )
+
+    dispatched: list[str] = []
+    row = SimpleNamespace(
+        intent_id="gri-kick-lease",
+        event_id="evt-kick-lease",
+        intent_kind=INTENT_KIND_NESTED_GRAPH_WAKEUP,
+        intent_version=INTENT_VERSION_ISSUE277_V1,
+        status=GraphResumeIntentStatus.PENDING.value,
+        revision=1,
+        attempt=0,
+        hold_generation=NESTED_WAKEUP_HOLD_GENERATION,
+        checkpoint_id="evt-kick-lease",
+        operation_id=None,
+        resolution_source=RESOLUTION_SOURCE_NESTED_WAKEUP,
+        subject_kind=SUBJECT_KIND_EVENT,
+        subject_id="evt-kick-lease",
+        resolution="execution_inflight_wait",
+        principal="NestedGraphResume",
+        skip_reason=None,
+        last_error=None,
+    )
+
+    class _Session:
+        async def scalar(self, _stmt: object) -> object:
+            return row
+
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    service = ManualResolutionService(_Session)  # type: ignore[arg-type]
+    service.schedule_dispatch = lambda **kwargs: dispatched.append("yes")  # type: ignore[method-assign]
+
+    async def _held(_event_id: str) -> bool:
+        return True
+
+    previous = get_investigation_lease_held_probe()
+    set_investigation_lease_held_probe(_held)
+    try:
+        await service.kick_nested_wakeup_dispatch("evt-kick-lease")
+        assert dispatched == ["yes"]
+    finally:
+        set_investigation_lease_held_probe(previous)
+
+
+@pytest.mark.asyncio
+async def test_nested_wakeup_retry_after_still_waiting_reenqueues_dispatch(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.services.context_service import append_context_journal_in_session
+
+    event_id = await _seed_event(session_factory, status=EventStatus.VERIFYING)
+    async with session_factory() as session:
+        async with session.begin():
+            await append_context_journal_in_session(
+                session,
+                event_id,
+                "execution_substate",
+                ExecutionSubstate.WAITING_WRITEBACK.value,
+            )
+
+    async def _ok(_eid: str) -> None:
+        return None
+
+    dispatched: list[dict[str, object]] = []
+    service = ManualResolutionService(
+        session_factory,
+        resume_runner=_ok,
+        nested_retry_backoff_s=15,
+    )
+
+    def _capture(**kwargs: object) -> None:
+        dispatched.append(dict(kwargs))
+
+    service.schedule_dispatch = _capture  # type: ignore[method-assign]
+    intent = await service.enqueue_nested_wakeup(event_id, reason="execution_inflight_wait")
+    assert intent is not None
+    dispatched.clear()
+    claimed = await service._claim_batch(limit=100)
+    assert intent.intent_id in claimed
+    assert await service._run_claimed_intent(intent.intent_id) is False
+    deferred = [item for item in dispatched if item.get("trigger") == "nested_wakeup_deferred"]
+    assert deferred
+    assert deferred[-1].get("countdown_s") == 15
+    assert deferred[-1].get("intent_id") == intent.intent_id
+
+
+@pytest.mark.asyncio
+async def test_kick_nested_wakeup_dispatch_schedules_pending_intent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.orchestration.graph_invocation import (
+        get_investigation_lease_held_probe,
+        set_investigation_lease_held_probe,
+    )
+
+    event_id = await _seed_event(session_factory, status=EventStatus.VERIFYING)
+    dispatched: list[str] = []
+    service = ManualResolutionService(session_factory)
+
+    def _capture(**kwargs: object) -> None:
+        dispatched.append(str(kwargs.get("event_id") or ""))
+
+    service.schedule_dispatch = _capture  # type: ignore[method-assign]
+
+    async def _held(_eid: str) -> bool:
+        return True
+
+    previous = get_investigation_lease_held_probe()
+    set_investigation_lease_held_probe(_held)
+    try:
+        intent = await service.enqueue_nested_wakeup(event_id, reason="execution_inflight_wait")
+        assert intent is not None
+        assert dispatched == []
+        await service.kick_nested_wakeup_dispatch(event_id)
+        assert dispatched == [event_id]
+    finally:
+        set_investigation_lease_held_probe(previous)
+
+
+@pytest.mark.asyncio
+async def test_kick_nested_wakeup_after_lease_release_hook_dispatches() -> None:
+    from app.orchestration.graph_invocation import (
+        kick_nested_wakeup_after_lease_release,
+        set_nested_wakeup_lease_release_kicker,
+        get_nested_wakeup_lease_release_kicker,
+    )
+
+    kicked: list[str] = []
+
+    async def _kicker(event_id: str) -> None:
+        kicked.append(event_id)
+
+    previous = get_nested_wakeup_lease_release_kicker()
+    set_nested_wakeup_lease_release_kicker(_kicker)
+    try:
+        await kick_nested_wakeup_after_lease_release("evt-kick-hook")
+        assert kicked == ["evt-kick-hook"]
+    finally:
+        set_nested_wakeup_lease_release_kicker(previous)
+

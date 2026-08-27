@@ -901,6 +901,33 @@ class TestRenewalFailure:
         await agent.investigate(_EVENT_ID)
         assert events[_EVENT_ID]["status"] == EventStatus.REPORTING
 
+    async def test_investigate_kicks_nested_wakeup_after_lease_release(self) -> None:
+        from app.orchestration.graph_invocation import (
+            get_nested_wakeup_lease_release_kicker,
+            set_nested_wakeup_lease_release_kicker,
+        )
+
+        kicked: list[str] = []
+
+        async def _kicker(event_id: str) -> None:
+            kicked.append(event_id)
+
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        previous = get_nested_wakeup_lease_release_kicker()
+        set_nested_wakeup_lease_release_kicker(_kicker)
+        try:
+            agent = _build_super_agent(
+                lease=_InMemoryEventLease(),
+                event_service=_MockEventService(events),
+            )
+            await agent.investigate(_EVENT_ID)
+        finally:
+            set_nested_wakeup_lease_release_kicker(previous)
+        assert kicked == [_EVENT_ID]
+        assert events[_EVENT_ID]["status"] == EventStatus.REPORTING
+
     async def test_orchestration_prefers_success_at_renewal_boundary(self) -> None:
         """Graph completion wins when renew fails in the same window (ISSUE-182)."""
         renewal_failed = asyncio.Event()

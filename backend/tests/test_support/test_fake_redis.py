@@ -114,6 +114,22 @@ async def test_lease_rejects_non_positive_ttl() -> None:
 
 
 @pytest.mark.asyncio
+async def test_acquire_writes_ttl_key_with_same_expiry() -> None:
+    now = [400.0]
+    fake = InMemoryFakeRedis(clock=lambda: now[0])
+    lease = _lease_with_fake(fake)
+    event_id = "evt-fake-acquire-ttl"
+    owner = generate_owner_id()
+    assert await lease.acquire(event_id, owner, ttl_s=10) is True
+    ttl_key = f"shadowtrace:lease:event:{event_id}:ttl"
+    assert await fake.get(ttl_key) == b"10"
+    assert await fake.ttl(f"shadowtrace:lease:event:{event_id}") == 10
+    now[0] += 10
+    assert await fake.get(ttl_key) is None
+    assert await lease.get_owner(event_id) is None
+
+
+@pytest.mark.asyncio
 async def test_fake_redis_renew_script_rejects_non_positive_ttl() -> None:
     fake = InMemoryFakeRedis()
     await fake.set("k", "owner-a", nx=True, ex=10)

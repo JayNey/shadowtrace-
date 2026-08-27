@@ -307,6 +307,12 @@ async def _reconcile_verify_resume_patch(
     elif values.get("execution_inflight"):
         pending_actions = await _event_inflight_action_ids(session_factory, event_id)
         patch["verify_pending_writeback_action_ids"] = pending_actions
+    if had_pending and not pending_actions:
+        # Left EXECUTING (UNKNOWN/FAILED/CONFIRMED) is not durable inflight WAIT.
+        # Do not treat this as writeback success — Verify must still re-run.
+        patch["execution_inflight"] = False
+        patch["execution_inflight_action_ids"] = []
+        patch.setdefault("verify_pending_writeback_action_ids", [])
     if not (need_writeback or need_manual or values.get("halted")):
         return patch
 
@@ -315,18 +321,14 @@ async def _reconcile_verify_resume_patch(
     outbox_rows = await _active_outbox_writeback_rows(session_factory, event_id)
     wb_statuses = [status for _intent, status in outbox_rows]
     writebacks_resolved = (
-        not recoverable_writebacks and not pending_actions and _all_writebacks_resolved(wb_statuses)
-    )
-    inflight_wait_resolved = (
-        had_pending
-        and need_writeback
-        and not recoverable_writebacks
+        not recoverable_writebacks
         and not pending_actions
         and not failed_writebacks
+        and _all_writebacks_resolved(wb_statuses)
     )
     disposition_policy = values.get("disposition_policy")
 
-    if need_writeback and (writebacks_resolved or inflight_wait_resolved):
+    if need_writeback and writebacks_resolved:
         patch["verify_need_writeback_recovery"] = False
         patch["verify_failed_writebacks"] = []
         patch["verify_recoverable_writeback_ids"] = []
@@ -860,7 +862,7 @@ async def _with_investigation_lease(
         except asyncio.CancelledError:
             pass
         try:
-            await lease.release(event_id, owner_id)
+            released = await lease.release(event_id, owner_id)
         except Exception:
             logger.warning(
                 "graph resume lease release failed event=%s owner=%s",
@@ -868,6 +870,13 @@ async def _with_investigation_lease(
                 owner_id,
                 exc_info=True,
             )
+        else:
+            if released:
+                from app.orchestration.graph_invocation import (
+                    kick_nested_wakeup_after_lease_release,
+                )
+
+                await kick_nested_wakeup_after_lease_release(event_id)
 
 
 async def _delegate_execute_investigation(

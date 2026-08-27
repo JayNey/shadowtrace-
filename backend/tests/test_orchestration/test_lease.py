@@ -27,6 +27,7 @@ class _FakeRedis:
         self._owner_id = owner_id
         self._renew_side_effect = renew_side_effect
         self._store: dict[str, bytes] = {}
+        self._ttls: dict[str, int] = {}
         self.get_calls: list[str] = []
         self.expire_calls: list[tuple[str, int]] = []
 
@@ -45,13 +46,27 @@ class _FakeRedis:
             return self._renew_side_effect(key)
         if isinstance(self._renew_side_effect, Exception):
             raise self._renew_side_effect
+        self._ttls[key] = ttl
         return True
+
+    async def ttl(self, key: str) -> int:
+        if key not in self._store:
+            return -2
+        stored = self._ttls.get(key)
+        if stored is None:
+            return -1
+        return int(stored)
 
     async def set(self, *args: object, **kwargs: object) -> bool:
         key = str(args[0]) if args else str(kwargs.get("name", ""))
         value = args[1] if len(args) > 1 else kwargs.get("value", "")
         encoded = value if isinstance(value, bytes) else str(value).encode("utf-8")
+        if kwargs.get("nx") and key in self._store:
+            return False
         self._store[key] = encoded
+        ex = kwargs.get("ex")
+        if ex is not None:
+            self._ttls[key] = int(ex)
         return True
 
     def register_script(self, script: str) -> object:
@@ -62,6 +77,16 @@ class _FakeRedis:
         async def _run(*, keys: list[str], args: list[str]) -> int:
             key = keys[0]
             owner_id = args[0]
+            if kind == "acquire":
+                ttl = int(args[1]) if len(args) > 1 else 600
+                if key in self._store:
+                    return 0
+                self._store[key] = owner_id.encode("utf-8")
+                self._ttls[key] = ttl
+                if len(keys) > 1:
+                    self._store[keys[1]] = str(ttl).encode("utf-8")
+                    self._ttls[keys[1]] = ttl
+                return 1
             if kind == "renew":
                 current = await self.get(key)
                 if current is None:
@@ -76,7 +101,9 @@ class _FakeRedis:
                 return 1
             if len(keys) > 1:
                 self._store.pop(keys[1], None)
+                self._ttls.pop(keys[1], None)
             self._store.pop(key, None)
+            self._ttls.pop(key, None)
             return 1
 
         return _run
@@ -413,16 +440,41 @@ async def test_start_renewal_reads_persisted_ttl_after_process_rebind() -> None:
 
 
 @pytest.mark.asyncio
-async def test_start_renewal_fail_closes_when_persisted_ttl_missing() -> None:
+async def test_start_renewal_uses_live_lease_ttl_when_ttl_key_missing() -> None:
+    """HTTP acquire + worker rebind must not fail-close when the TTL key is gone."""
     fake_redis = _FakeRedis()
     lease = _lease_with_fake(fake_redis)
     await lease.acquire("evt-missing-ttl", _OWNER, ttl_s=120)
     for key in [stored for stored in list(fake_redis._store) if stored.endswith(":ttl")]:
         fake_redis._store.pop(key)
+        fake_redis._ttls.pop(key, None)
+    lease._acquired_ttl.clear()
+    renewal_failed = asyncio.Event()
+    async with _fast_renew_loop():
+        task = await lease.start_renewal(
+            "evt-missing-ttl",
+            _OWNER,
+            on_renewal_failed=renewal_failed,
+        )
+        try:
+            await _wait_until(lambda: len(fake_redis.expire_calls) >= 1)
+            assert not renewal_failed.is_set()
+            assert fake_redis.expire_calls[0][1] == 120
+        finally:
+            await _cancel_renew_task(task)
+
+
+@pytest.mark.asyncio
+async def test_start_renewal_fail_closes_when_lease_key_absent() -> None:
+    fake_redis = _FakeRedis()
+    lease = _lease_with_fake(fake_redis)
+    await lease.acquire("evt-lease-gone", _OWNER, ttl_s=120)
+    fake_redis._store.clear()
+    fake_redis._ttls.clear()
     lease._acquired_ttl.clear()
     renewal_failed = asyncio.Event()
     task = await lease.start_renewal(
-        "evt-missing-ttl",
+        "evt-lease-gone",
         _OWNER,
         on_renewal_failed=renewal_failed,
     )
@@ -439,6 +491,28 @@ def test_classify_lease_lua_script_uses_expire_vs_del() -> None:
 
     assert classify_lease_lua_script('redis.call("EXPIRE", KEYS[1], ARGV[2])') == "renew"
     assert classify_lease_lua_script('redis.call("DEL", KEYS[1])') == "release"
+
+
+def test_classify_lease_lua_script_acquire() -> None:
+    from app.orchestration.lease import _ACQUIRE_SCRIPT, classify_lease_lua_script
+
+    assert classify_lease_lua_script(_ACQUIRE_SCRIPT) == "acquire"
+    assert (
+        classify_lease_lua_script(
+            'redis.call("SET", KEYS[1], ARGV[1], "NX", "EX", tonumber(ARGV[2]))'
+        )
+        == "acquire"
+    )
+
+
+@pytest.mark.asyncio
+async def test_acquire_persists_ttl_key_atomically() -> None:
+    fake_redis = _FakeRedis()
+    lease = _lease_with_fake(fake_redis)
+    assert await lease.acquire("evt-atomic-ttl", _OWNER, ttl_s=90) is True
+    ttl_keys = [key for key in fake_redis._store if key.endswith(":ttl")]
+    assert ttl_keys
+    assert fake_redis._store[ttl_keys[0]] == b"90"
 
 
 @pytest.mark.asyncio

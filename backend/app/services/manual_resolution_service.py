@@ -322,7 +322,7 @@ class ManualResolutionService:
                         session.add(row)
                         await session.flush()
                         record = self._record_from_row(row)
-            self._dispatch_nested_wakeup_if_unbound(record)
+            await self._dispatch_nested_wakeup_if_unbound(record)
             return record
         except IntegrityError:
             logger.info(
@@ -335,7 +335,7 @@ class ManualResolutionService:
                     operation_id=None,
                     hold_generation=NESTED_WAKEUP_HOLD_GENERATION,
                 )
-                self._dispatch_nested_wakeup_if_unbound(record)
+                await self._dispatch_nested_wakeup_if_unbound(record)
                 return record
             except ValidationError:
                 logger.exception(
@@ -347,16 +347,33 @@ class ManualResolutionService:
             logger.exception("failed to enqueue nested graph wakeup event=%s", event_id)
             return None
 
-    def _dispatch_nested_wakeup_if_unbound(self, record: GraphResumeIntentRecord) -> None:
+    async def _dispatch_nested_wakeup_if_unbound(
+        self,
+        record: GraphResumeIntentRecord,
+        *,
+        ignore_lease: bool = False,
+    ) -> None:
         """Dispatch only after the investigation graph has unbound this event.
 
-        ContextVar is process-local; EventLease on resume fences the other worker.
+        ContextVar is process-local; Redis EventLease on the parent SuperAgent
+        outlives bind exit, so skip dispatch while that lock is still held.
+        After a successful lease release, callers pass ``ignore_lease=True``:
+        resume still fences via ``EventLease.acquire``.
         """
-        from app.orchestration.graph_invocation import is_in_investigation_graph
+        from app.orchestration.graph_invocation import (
+            investigation_lease_is_held,
+            is_in_investigation_graph,
+        )
 
         if is_in_investigation_graph(event_id=record.event_id):
             logger.info(
                 "nested wakeup persisted without dispatch; graph still bound event=%s",
+                record.event_id,
+            )
+            return
+        if not ignore_lease and await investigation_lease_is_held(record.event_id):
+            logger.info(
+                "nested wakeup persisted without dispatch; event lease held event=%s",
                 record.event_id,
             )
             return
@@ -370,6 +387,33 @@ class ManualResolutionService:
             intent_id=record.intent_id,
             trigger="nested_wakeup",
         )
+
+    async def kick_nested_wakeup_dispatch(self, event_id: str) -> None:
+        """Re-enqueue a PENDING/RETRY nested wakeup after EventLease release.
+
+        Does not insert a new intent — a second insert would resume every
+        investigation that happens to have no active nested row.
+        """
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(orm.GraphResumeIntent)
+                .where(
+                    orm.GraphResumeIntent.event_id == event_id,
+                    orm.GraphResumeIntent.hold_generation == NESTED_WAKEUP_HOLD_GENERATION,
+                    orm.GraphResumeIntent.intent_kind == INTENT_KIND_NESTED_GRAPH_WAKEUP,
+                    orm.GraphResumeIntent.status.in_(
+                        [
+                            GraphResumeIntentStatus.PENDING.value,
+                            GraphResumeIntentStatus.RETRY.value,
+                        ]
+                    ),
+                )
+                .order_by(orm.GraphResumeIntent.updated_at.desc())
+            )
+            if row is None:
+                return
+            record = self._record_from_row(row)
+        await self._dispatch_nested_wakeup_if_unbound(record, ignore_lease=True)
 
     def _nested_retry_ready(self, row: orm.GraphResumeIntent, now: datetime) -> bool:
         if str(row.intent_kind) != INTENT_KIND_NESTED_GRAPH_WAKEUP:
@@ -628,6 +672,7 @@ class ManualResolutionService:
         intent_id: str | None = None,
         trigger: str = "unspecified",
         event_ids: list[str] | None = None,
+        countdown_s: int = 0,
     ) -> None:
         """Best-effort durable dispatch; never raises.
 
@@ -635,6 +680,9 @@ class ManualResolutionService:
         in-process task when Celery is unavailable so local/background mode still
         progresses. When no running event loop exists, emit structured signals
         instead of silently returning (ISSUE-324).
+
+        *countdown_s* delays the enqueue so nested RETRY respects
+        ``nested_retry_backoff_s`` instead of no-op claiming during backoff.
         """
         flagged_event_ids: list[str] = []
         if event_id:
@@ -644,6 +692,8 @@ class ManualResolutionService:
                 if eid and eid not in flagged_event_ids:
                     flagged_event_ids.append(eid)
 
+        delay = max(0, int(countdown_s or 0))
+
         try:
             from app.core.config import TaskMode, get_settings
 
@@ -652,13 +702,17 @@ class ManualResolutionService:
                     dispatch_pending_graph_resume_intents,
                 )
 
-                dispatch_pending_graph_resume_intents.delay()
+                if delay > 0:
+                    dispatch_pending_graph_resume_intents.apply_async(countdown=delay)
+                else:
+                    dispatch_pending_graph_resume_intents.delay()
                 record_dispatch_schedule(domain="graph_resume", outcome="resume_scheduled")
                 logger.debug(
-                    "graph resume dispatch enqueued trigger=%s event_id=%s intent_id=%s",
+                    "graph resume dispatch enqueued trigger=%s event_id=%s intent_id=%s delay=%ss",
                     trigger,
                     event_id or "-",
                     intent_id or "-",
+                    delay,
                 )
                 return
         except Exception as exc:
@@ -670,6 +724,33 @@ class ManualResolutionService:
                 intent_id or "-",
                 type(exc).__name__,
             )
+
+        if delay > 0:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+
+                def _dispatch_later() -> None:
+                    self.schedule_dispatch(
+                        event_id=event_id,
+                        intent_id=intent_id,
+                        trigger=trigger,
+                        event_ids=event_ids,
+                        countdown_s=0,
+                    )
+
+                loop.call_later(delay, _dispatch_later)
+                record_dispatch_schedule(domain="graph_resume", outcome="resume_scheduled")
+                logger.debug(
+                    "graph resume dispatch delayed trigger=%s event_id=%s intent_id=%s delay=%ss",
+                    trigger,
+                    event_id or "-",
+                    intent_id or "-",
+                    delay,
+                )
+                return
 
         job = (intent_id, event_id, trigger, tuple(flagged_event_ids))
         if self._dispatch_scheduled:
@@ -1140,6 +1221,9 @@ class ManualResolutionService:
 
     async def _mark_deferred(self, intent_id: str, *, error: str) -> None:
         """Return the intent to RETRY without burning the DEAD attempt budget."""
+        event_id: str | None = None
+        intent_kind: str | None = None
+        marked = False
         async with self._session_factory() as session:
             async with session.begin():
                 row = await session.get(orm.GraphResumeIntent, intent_id, with_for_update=True)
@@ -1155,6 +1239,16 @@ class ManualResolutionService:
                 row.claim_owner = None
                 row.claim_expires_at = None
                 row.updated_at = datetime.now(UTC)
+                event_id = row.event_id
+                intent_kind = str(row.intent_kind)
+                marked = True
+        if marked and event_id is not None and intent_kind == INTENT_KIND_NESTED_GRAPH_WAKEUP:
+            self.schedule_dispatch(
+                event_id=event_id,
+                intent_id=intent_id,
+                trigger="nested_wakeup_deferred",
+                countdown_s=self._nested_retry_backoff_s,
+            )
 
     async def _mark_failure(self, intent_id: str, *, error: str) -> None:
         async with self._session_factory() as session:

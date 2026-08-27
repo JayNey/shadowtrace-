@@ -753,29 +753,41 @@ async def test_bind_preserves_graph_error_when_flush_fails() -> None:
 def test_reset_deps_clears_nested_resume_hooks() -> None:
     from app.api.v1.deps import reset_deps
     from app.orchestration.graph_invocation import (
+        get_investigation_lease_held_probe,
         get_nested_resume_durability_writer,
         get_nested_resume_failure_handler,
         get_nested_resume_runner,
+        get_nested_wakeup_lease_release_kicker,
+        set_investigation_lease_held_probe,
         set_nested_resume_durability_writer,
         set_nested_resume_failure_handler,
         set_nested_resume_runner,
+        set_nested_wakeup_lease_release_kicker,
     )
 
     previous_runner = get_nested_resume_runner()
     previous_handler = get_nested_resume_failure_handler()
     previous_writer = get_nested_resume_durability_writer()
+    previous_probe = get_investigation_lease_held_probe()
+    previous_kicker = get_nested_wakeup_lease_release_kicker()
     set_nested_resume_runner(AsyncMock())
     set_nested_resume_failure_handler(AsyncMock())
     set_nested_resume_durability_writer(AsyncMock())
+    set_investigation_lease_held_probe(AsyncMock())
+    set_nested_wakeup_lease_release_kicker(AsyncMock())
     try:
         reset_deps()
         assert get_nested_resume_runner() is None
         assert get_nested_resume_failure_handler() is None
         assert get_nested_resume_durability_writer() is None
+        assert get_investigation_lease_held_probe() is None
+        assert get_nested_wakeup_lease_release_kicker() is None
     finally:
         set_nested_resume_runner(previous_runner)
         set_nested_resume_failure_handler(previous_handler)
         set_nested_resume_durability_writer(previous_writer)
+        set_investigation_lease_held_probe(previous_probe)
+        set_nested_wakeup_lease_release_kicker(previous_kicker)
 
 
 @pytest.mark.asyncio
@@ -975,9 +987,11 @@ async def test_bind_flush_while_outer_lease_held_does_not_start_second_ainvoke()
     from app.orchestration.graph_invocation import (
         bind_investigation_graph,
         defer_nested_graph_resume,
+        get_investigation_lease_held_probe,
         get_nested_resume_durability_writer,
         get_nested_resume_failure_handler,
         get_nested_resume_runner,
+        set_investigation_lease_held_probe,
         set_nested_resume_durability_writer,
         set_nested_resume_failure_handler,
         set_nested_resume_runner,
@@ -1006,8 +1020,10 @@ async def test_bind_flush_while_outer_lease_held_does_not_start_second_ainvoke()
     agent.lease = lease
     runtime = MagicMock()
     runtime.set_execution_substate = AsyncMock()
+    flushed: list[str] = []
 
     async def _runner(resume_event_id: str) -> None:
+        flushed.append(resume_event_id)
         await resume_investigation_from_checkpoint(
             _SessionFactory(EventStatus.EXECUTING_RESPONSE.value),
             resume_event_id,
@@ -1020,12 +1036,17 @@ async def test_bind_flush_while_outer_lease_held_does_not_start_second_ainvoke()
     async def _writer(resume_event_id: str, reason: str) -> None:
         persisted.append((resume_event_id, reason))
 
+    async def _lease_held(resume_event_id: str) -> bool:
+        return await lease.get_owner(resume_event_id) is not None
+
     previous_runner = get_nested_resume_runner()
     previous_handler = get_nested_resume_failure_handler()
     previous_writer = get_nested_resume_durability_writer()
+    previous_probe = get_investigation_lease_held_probe()
     set_nested_resume_runner(_runner)
     set_nested_resume_failure_handler(None)
     set_nested_resume_durability_writer(_writer)
+    set_investigation_lease_held_probe(_lease_held)
     try:
         async with bind_investigation_graph(event_id):
             assert defer_nested_graph_resume(event_id) is True
@@ -1033,7 +1054,9 @@ async def test_bind_flush_while_outer_lease_held_does_not_start_second_ainvoke()
         set_nested_resume_runner(previous_runner)
         set_nested_resume_failure_handler(previous_handler)
         set_nested_resume_durability_writer(previous_writer)
+        set_investigation_lease_held_probe(previous_probe)
 
+    assert flushed == []
     graph.ainvoke.assert_not_called()
     graph.aupdate_state.assert_not_awaited()
     graph.aget_state.assert_not_called()

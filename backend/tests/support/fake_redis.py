@@ -72,10 +72,33 @@ class InMemoryFakeRedis:
         entry.expires_at = self._clock() + ttl
         return True
 
+    async def ttl(self, key: str) -> int:
+        self._purge_expired(key)
+        entry = self._entries.get(key)
+        if entry is None:
+            return -2
+        if entry.expires_at is None:
+            return -1
+        remaining = int(entry.expires_at - self._clock())
+        return remaining if remaining > 0 else -2
+
     def register_script(self, script: str) -> Any:
         from app.orchestration.lease import classify_lease_lua_script
 
         kind = classify_lease_lua_script(script)
+
+        async def _acquire(*, keys: list[str], args: list[str]) -> int:
+            lease_key = keys[0]
+            owner_id = args[0]
+            ttl = int(args[1]) if len(args) > 1 else 0
+            if ttl <= 0:
+                return 0
+            ok = await self.set(lease_key, owner_id, nx=True, ex=ttl)
+            if not ok:
+                return 0
+            if len(keys) > 1:
+                await self.set(keys[1], str(ttl), ex=ttl)
+            return 1
 
         async def _release(*, keys: list[str], args: list[str]) -> int:
             key = keys[0]
@@ -110,7 +133,11 @@ class InMemoryFakeRedis:
                 await self.set(keys[1], str(ttl), ex=ttl)
             return 1
 
-        return _renew if kind == "renew" else _release
+        if kind == "acquire":
+            return _acquire
+        if kind == "renew":
+            return _renew
+        return _release
 
 
 class InMemoryFakeRedisClient:
