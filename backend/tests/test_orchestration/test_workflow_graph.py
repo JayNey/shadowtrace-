@@ -1880,9 +1880,7 @@ async def test_approval_wait_node_skips_waiting_substate_when_already_executing(
 
     runtime = _HostAwareRuntime()
     services = _services(runtime=runtime)
-    services["session_factory"] = _ScalarStatusSessionFactory(
-        EventStatus.EXECUTING_RESPONSE.value
-    )
+    services["session_factory"] = _ScalarStatusSessionFactory(EventStatus.EXECUTING_RESPONSE.value)
     graph = build_investigation_graph(_agents(), services)
     node = graph.nodes[NODE_APPROVAL_WAIT]
     result = await node.ainvoke(_base_state(event_id="evt-wait-already-exec"))
@@ -1892,7 +1890,6 @@ async def test_approval_wait_node_skips_waiting_substate_when_already_executing(
     assert state["needs_approval_wait"] is False
     assert ExecutionSubstate.WAITING_APPROVAL not in runtime.substates
     assert ExecutionSubstate.NONE in runtime.substates
-
 
 
 @pytest.mark.asyncio

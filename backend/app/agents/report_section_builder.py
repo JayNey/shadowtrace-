@@ -1023,9 +1023,7 @@ class ReportSectionBuilder:
                     techniques.append(f"{match['technique_id']} {name}".strip())
         techniques = list(dict.fromkeys(techniques))
         mapping = (
-            _bullet(techniques, "暂无 ATT&CK 技术映射")
-            if techniques
-            else "暂无 ATT&CK 技术映射"
+            _bullet(techniques, "暂无 ATT&CK 技术映射") if techniques else "暂无 ATT&CK 技术映射"
         )
         org_lines = _org_context_report_lines(rag_output)
         if not org_lines:

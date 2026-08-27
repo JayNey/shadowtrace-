@@ -76,9 +76,7 @@ async def consolidate_memory_after_close(
         from app.agents.super_agent import _investigation_result_from_context
 
         result = _investigation_result_from_context(context)
-        await memory_agent.execute(
-            MemoryAgentInput(event_id=event_id, investigation_result=result)
-        )
+        await memory_agent.execute(MemoryAgentInput(event_id=event_id, investigation_result=result))
     except Exception as exc:
         logger.warning(
             "memory_after_close consolidation failed event=%s",

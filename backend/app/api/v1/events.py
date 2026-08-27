@@ -612,17 +612,13 @@ async def _list_writeback_envelopes(
         project_writeback_envelope,
     )
 
-    required_events = [
-        event for event in events if _writeback_required(event.disposition_policy)
-    ]
+    required_events = [event for event in events if _writeback_required(event.disposition_policy)]
     if not required_events:
         return {}
     policy_by_id = {event.event_id: event.disposition_policy for event in required_events}
     try:
         async with _get_session_factory()() as session:
-            rows_by_event = await load_writeback_rows_for_events(
-                session, list(policy_by_id)
-            )
+            rows_by_event = await load_writeback_rows_for_events(session, list(policy_by_id))
             envelopes = {
                 event_id: project_writeback_envelope(
                     policy_by_id[event_id],

@@ -170,6 +170,7 @@ describe("eventTodos", () => {
         provider_code: null,
         message_code: null,
         target_results: [],
+        simulated: false,
       },
     ];
     const detail = baseDetail({ execution_substate: "manual_resolution" });

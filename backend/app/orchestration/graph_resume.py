@@ -245,17 +245,21 @@ async def _reconcile_verify_resume_patch(
         patch["verify_pending_writeback_action_ids"] = []
         patch["execution_substate"] = ExecutionSubstate.NONE.value
 
-    if need_manual and not legitimate_manual and (
-        _can_clear_manual_resolution(
-            degraded_flags=degraded_flags,
-            rows=outbox_rows,
-            failed_writebacks=recoverable_writebacks,
-            disposition_policy=disposition_policy,
-        )
-        or _can_reverify_after_analyst_terminal_verdict(
-            final_verdict=final_verdict,
-            failed_writebacks=recoverable_writebacks,
-            degraded_flags=degraded_flags,
+    if (
+        need_manual
+        and not legitimate_manual
+        and (
+            _can_clear_manual_resolution(
+                degraded_flags=degraded_flags,
+                rows=outbox_rows,
+                failed_writebacks=recoverable_writebacks,
+                disposition_policy=disposition_policy,
+            )
+            or _can_reverify_after_analyst_terminal_verdict(
+                final_verdict=final_verdict,
+                failed_writebacks=recoverable_writebacks,
+                degraded_flags=degraded_flags,
+            )
         )
     ):
         patch["verify_need_manual_resolution"] = False

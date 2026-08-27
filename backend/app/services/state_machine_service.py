@@ -1080,8 +1080,7 @@ class StateMachineService:
             )
 
         redis_context_degraded = any(
-            failure.mode == "returned_degraded"
-            and failure.step in REDIS_CONTEXT_PROJECTION_STEPS
+            failure.mode == "returned_degraded" and failure.step in REDIS_CONTEXT_PROJECTION_STEPS
             for failure in outcome.failures
         )
         if redis_context_degraded:

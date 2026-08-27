@@ -925,4 +925,3 @@ async def test_catchup_noop_when_checkpoint_not_halted() -> None:
 
     invoke.assert_not_awaited()
     graph.aupdate_state.assert_not_called()
-

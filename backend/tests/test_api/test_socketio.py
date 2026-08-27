@@ -286,7 +286,6 @@ async def test_dispatch_ref_resolution_error_does_not_increment_failures() -> No
     manager._sio.emit.assert_not_awaited()
 
 
-
 def test_envelope_rejects_unknown_type() -> None:
     """An unknown event type must fail schema validation."""
     doc = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))

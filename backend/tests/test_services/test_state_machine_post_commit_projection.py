@@ -425,9 +425,7 @@ async def test_side_effect_convergence_degraded_does_not_set_redis_flag(
     outcome = PostCommitProjectionOutcome(
         committed=True,
         projection_id="audit:sec",
-        failures=(
-            ProjectionFailure(step="side_effect_convergence", mode="returned_degraded"),
-        ),
+        failures=(ProjectionFailure(step="side_effect_convergence", mode="returned_degraded"),),
         attempts=1,
     )
     await service._mark_projection_degraded(state.row.event_id, outcome)

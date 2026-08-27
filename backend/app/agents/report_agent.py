@@ -296,9 +296,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                     generated_by = GENERATED_BY_TEMPLATE
                     llm_partial_fallback = True
                     missing_core = [
-                        key
-                        for key in required_core
-                        if not str(llm_sections.get(key) or "").strip()
+                        key for key in required_core if not str(llm_sections.get(key) or "").strip()
                     ]
                     logger.warning(
                         "ReportAgent LLM core sections incomplete; merging partial "
@@ -314,8 +312,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                     # Same class as ISSUE-314: a cut-off generation is not a
                     # deliverable report. Callers persist report_generated=false.
                     logger.warning(
-                        "ReportAgent LLM timed out; not using template fallback "
-                        "event=%s",
+                        "ReportAgent LLM timed out; not using template fallback event=%s",
                         input.event_id,
                     )
                     raise

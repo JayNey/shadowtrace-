@@ -236,9 +236,7 @@ def land_factor_score(rule_score: float, choice: LlmFactorChoice) -> tuple[float
         merged = min(max(pulled, lo_bound), hi_bound)
         relation = "区间外软拉"
     merged = max(0.0, min(100.0, merged))
-    secondary = (
-        f" secondary={choice.secondary_rubric_id}" if choice.secondary_rubric_id else ""
-    )
+    secondary = f" secondary={choice.secondary_rubric_id}" if choice.secondary_rubric_id else ""
     reasoning = (
         f"档位={choice.rubric_id} [{choice.lo:.0f}-{choice.hi:.0f}] "
         f"lean={choice.lean}{secondary}; 规则 {rule:.0f} {relation}"
