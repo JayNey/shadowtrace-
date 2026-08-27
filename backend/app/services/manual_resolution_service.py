@@ -58,6 +58,7 @@ _NESTED_WAKEUP_STILL_WAITING = frozenset(
         ExecutionSubstate.WAITING_WRITEBACK,
         ExecutionSubstate.WAITING_EXECUTION,
         ExecutionSubstate.WAITING_APPROVAL,
+        ExecutionSubstate.MANUAL_RESOLUTION,
     }
 )
 
@@ -391,6 +392,18 @@ class ManualResolutionService:
                 return True
             substate = await self._read_execution_substate(session, event_id)
             return substate in _NESTED_WAKEUP_STILL_WAITING
+
+    async def _nested_wakeup_blocked_by_manual_hold(self, event_id: str) -> bool:
+        """True when a durable manual hold already owns the event.
+
+        Nested ainvoke would re-run Verify → manual_hold_node and bump
+        hold generation, invalidating the operator's resume intent.
+        """
+        async with self._session_factory() as session:
+            substate = await self._read_execution_substate(session, event_id)
+            if substate is not ExecutionSubstate.MANUAL_RESOLUTION:
+                return False
+            return await self._read_manual_hold(session, event_id) is not None
 
     async def create_or_replay_resume_intent_in_session(
         self,
@@ -1018,6 +1031,15 @@ class ManualResolutionService:
             if self._resume_runner is None:
                 raise RuntimeError("resume_runner is not bound")
             if kind == INTENT_KIND_NESTED_GRAPH_WAKEUP:
+                if await self._nested_wakeup_blocked_by_manual_hold(event_id):
+                    logger.warning(
+                        "nested graph wakeup deferred: manual hold active "
+                        "intent=%s event=%s",
+                        intent_id,
+                        event_id,
+                    )
+                    await self._mark_deferred(intent_id, error="manual_resolution_hold")
+                    return False
                 await self._resume_runner(event_id)
                 if await self._nested_wakeup_still_waiting(event_id):
                     logger.warning(

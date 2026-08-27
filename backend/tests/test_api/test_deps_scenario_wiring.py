@@ -226,6 +226,72 @@ def test_live_disposition_registers_enabled_http_adapter_when_url_and_credential
         deps.reset_deps()
 
 
+def test_live_disposition_auth_type_basic_registers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_fcntl_on_windows(monkeypatch)
+    deps.reset_deps()
+    monkeypatch.setenv("SHADOWTRACE_XDR_WRITE_TOKEN", "test-write-token")
+    settings = SimpleNamespace(
+        disposition_mode="live",
+        disposition_adapter_kind="generic_http_disposition",
+        disposition_base_url="https://xdr.example",
+        disposition_credential_ref="SHADOWTRACE_XDR_WRITE_TOKEN",
+        disposition_auth_type="basic",
+        allow_live_side_effects=True,
+        allow_xdr_writeback=True,
+    )
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.core.config.is_mock_disposition_mode",
+        lambda _mode: False,
+    )
+    try:
+        registry = deps._get_adapter_registry()
+        adapter = registry.get("generic_http_disposition")
+        assert adapter.config.auth_type == "basic"
+    finally:
+        deps.reset_deps()
+
+
+def test_live_disposition_invalid_auth_type_does_not_register(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_fcntl_on_windows(monkeypatch)
+    deps.reset_deps()
+    monkeypatch.setenv("SHADOWTRACE_XDR_WRITE_TOKEN", "test-write-token")
+    settings = SimpleNamespace(
+        disposition_mode="live",
+        disposition_adapter_kind="generic_http_disposition",
+        disposition_base_url="https://xdr.example",
+        disposition_credential_ref="SHADOWTRACE_XDR_WRITE_TOKEN",
+        disposition_auth_type="api_key",
+        allow_live_side_effects=True,
+        allow_xdr_writeback=True,
+    )
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.core.config.is_mock_disposition_mode",
+        lambda _mode: False,
+    )
+    try:
+        registry = deps._get_adapter_registry()
+        assert registry.list_names() == []
+    finally:
+        deps.reset_deps()
+
+
+def test_live_env_example_lists_disposition_credential_ref() -> None:
+    from pathlib import Path
+
+    example = Path(__file__).resolve().parents[3] / "infra" / ".env.live.example"
+    text = example.read_text(encoding="utf-8")
+    assert "DISPOSITION_CREDENTIAL_REF=" in text
+    assert "DISPOSITION_BASE_URL=" in text
+    assert "DISPOSITION_ADAPTER_KIND=" in text
+    assert "DISPOSITION_AUTH_TYPE=" in text
+
+
 def test_live_disposition_invalid_or_missing_credential_ref_does_not_register(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

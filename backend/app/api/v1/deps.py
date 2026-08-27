@@ -453,6 +453,9 @@ def _get_adapter_registry() -> Any:
                     or credential_ref.upper() != credential_ref
                 )
             )
+            auth_type = str(
+                getattr(settings, "disposition_auth_type", None) or "bearer"
+            ).strip().lower()
             if invalid_ref:
                 logger.error(
                     "invalid disposition credential_ref=%r; not registering live adapter",
@@ -470,6 +473,12 @@ def _get_adapter_registry() -> Any:
                     "not registering a disabled stub adapter kind=%s",
                     kind,
                 )
+            elif auth_type not in {"bearer", "basic"}:
+                logger.error(
+                    "invalid disposition auth_type=%r; not registering live adapter kind=%s",
+                    auth_type,
+                    kind,
+                )
             else:
                 from app.adapters.disposition.http_adapter import HttpDispositionAdapter
                 from app.tools.adapters.base import AdapterConfig
@@ -478,7 +487,7 @@ def _get_adapter_registry() -> Any:
                     AdapterConfig(
                         endpoint=endpoint,
                         credential_ref=credential_ref,
-                        auth_type="bearer",
+                        auth_type="basic" if auth_type == "basic" else "bearer",
                         enabled=True,
                     ),
                     allow_side_effects=allow_side_effects,

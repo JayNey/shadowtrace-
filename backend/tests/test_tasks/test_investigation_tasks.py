@@ -566,6 +566,7 @@ async def test_duplicate_in_progress_result_marks_started_intent_retry(
         assert row.status == InvestigationIntentStatus.RETRY.value
         assert row.last_error == "investigation_in_progress"
         assert row.skip_reason is None
+        assert int(row.attempt or 0) == 0
 
 
 @pytest.mark.asyncio
@@ -628,6 +629,7 @@ async def test_finalize_intent_from_result_keeps_deferred_retryable(
         assert row.status == InvestigationIntentStatus.RETRY.value
         assert row.last_error == "waiting_approval"
         assert row.skip_reason is None
+        assert int(row.attempt or 0) == 0
 
 
 @pytest.mark.asyncio
@@ -1759,6 +1761,7 @@ async def test_execute_redelivery_resume_waiting_approval_does_not_mark_intent_t
         "iin-redelivery-deferred",
         error="waiting_approval",
         broker_task_id="task-redelivery-deferred",
+        increment_attempt=False,
     )
     intent_service.mark_terminal.assert_not_awaited()
     intent_service.mark_skipped.assert_not_awaited()
@@ -1793,9 +1796,43 @@ async def test_finalize_intent_from_result_deferred_calls_mark_retry(
         "iin-deferred-unit",
         error="waiting_approval",
         broker_task_id="task-deferred-unit",
+        increment_attempt=False,
     )
     intent_service.mark_terminal.assert_not_awaited()
     intent_service.mark_skipped.assert_not_awaited()
+
+
+def test_investigation_defer_without_attempt_covers_human_wait_reasons() -> None:
+    assert "waiting_approval" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
+    assert "graph_still_bound" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
+    assert "investigation_in_progress" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
+    assert "manual_resolution_hold" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
+    assert "graph_resume_deferred" in tasks._INVESTIGATION_DEFER_WITHOUT_ATTEMPT
+
+
+@pytest.mark.asyncio
+async def test_finalize_waiting_approval_deferred_does_not_increment_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intent_service = MagicMock()
+    intent_service.mark_retry = AsyncMock(return_value=True)
+    monkeypatch.setattr("app.db.session.get_session_factory", lambda: object())
+    monkeypatch.setattr(
+        "app.services.investigation_intent_service.InvestigationIntentService",
+        lambda *_a, **_k: intent_service,
+    )
+    await tasks._finalize_intent_from_result(
+        "iin-wait-no-burn",
+        {
+            "status": "deferred",
+            "event_id": "evt-wait-no-burn",
+            "reason": "waiting_approval",
+        },
+        broker_task_id="task-wait-no-burn",
+    )
+    kwargs = intent_service.mark_retry.await_args.kwargs
+    assert kwargs["increment_attempt"] is False
+    assert kwargs["error"] == "waiting_approval"
 
 
 @pytest.mark.asyncio

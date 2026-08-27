@@ -3406,7 +3406,7 @@ async def test_verify_node_true_execute_failure_goes_manual() -> None:
 async def test_verify_node_routes_accepted_writeback_to_recovery_not_manual(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ACCEPTED + writeback recovery must persist wakeup so Verify can re-run."""
+    """ACCEPTED + agent-routed writeback recovery must not persist a Verify wakeup."""
     persist_wakeup = AsyncMock(return_value=True)
     monkeypatch.setattr(
         "app.orchestration.workflow_graph.persist_nested_graph_wakeup",
@@ -3436,7 +3436,7 @@ async def test_verify_node_routes_accepted_writeback_to_recovery_not_manual(
             execution_inflight_action_ids=["act-accepted-1"],
         )
     )
-    persist_wakeup.assert_awaited_once_with(event_id, "execution_inflight_wait")
+    persist_wakeup.assert_not_awaited()
     assert result["verify_need_writeback_recovery"] is True
     assert result["verify_need_manual_resolution"] is False
     assert result["execution_substate"] == ExecutionSubstate.WAITING_WRITEBACK.value
@@ -3508,7 +3508,7 @@ async def test_verify_node_real_agent_executing_not_required_does_not_go_manual(
 
 
 @pytest.mark.asyncio
-async def test_verify_inflight_plus_need_writeback_still_persists_wakeup(
+async def test_verify_inflight_plus_need_writeback_does_not_persist_verify_wakeup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     persist_wakeup = AsyncMock(return_value=True)
@@ -3540,10 +3540,47 @@ async def test_verify_inflight_plus_need_writeback_still_persists_wakeup(
             execution_inflight_action_ids=["act-exec-1"],
         )
     )
-    persist_wakeup.assert_awaited_once_with(event_id, "execution_inflight_wait")
+    persist_wakeup.assert_not_awaited()
     assert result["verify_need_writeback_recovery"] is True
     assert result.get("halted") is not True
     assert route_after_verify(result) == ROUTE_WRITEBACK
+
+
+@pytest.mark.asyncio
+async def test_verify_inflight_plus_need_manual_does_not_enqueue_nested_wakeup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persist_wakeup = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.orchestration.workflow_graph.persist_nested_graph_wakeup",
+        persist_wakeup,
+    )
+    event_id = "evt-inflight-plus-manual"
+    verify_agent = StubAgent(
+        VerificationResult(
+            overall_status=VerificationOverallStatus.FAILED,
+            verification_phase=VerificationPhase.EFFECT,
+            need_manual_resolution=True,
+        )
+    )
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    graph = build_investigation_graph(_agents_with_verify(verify_agent), _services(machine))
+    result = await graph.nodes[NODE_VERIFY].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.VERIFYING.value,
+            execution_ok=False,
+            execution_inflight=True,
+            execution_inflight_action_ids=["act-exec-1"],
+        )
+    )
+    persist_wakeup.assert_not_awaited()
+    assert result["verify_need_manual_resolution"] is True
+    assert result.get("halted") is not True
+    assert route_after_verify(result) == ROUTE_MANUAL
 
 
 @pytest.mark.asyncio

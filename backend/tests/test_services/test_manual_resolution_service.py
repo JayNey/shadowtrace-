@@ -1355,6 +1355,66 @@ async def test_nested_wakeup_inflight_halt_marks_retry_not_terminal(
 
 
 @pytest.mark.asyncio
+async def test_nested_wakeup_still_waiting_when_manual_resolution(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory, status=EventStatus.VERIFYING)
+    service = ManualResolutionService(session_factory, nested_retry_backoff_s=0)
+    await service.enter_manual_hold(
+        event_id,
+        reason="verify_need_manual_resolution",
+        event_status=EventStatus.VERIFYING,
+    )
+    assert await service._nested_wakeup_still_waiting(event_id) is True
+    assert await service._nested_wakeup_blocked_by_manual_hold(event_id) is True
+
+
+@pytest.mark.asyncio
+async def test_nested_wakeup_resume_does_not_bump_manual_hold_generation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory, status=EventStatus.VERIFYING)
+    resumed: list[str] = []
+
+    async def _must_not_run(eid: str) -> None:
+        resumed.append(eid)
+
+    service = ManualResolutionService(
+        session_factory,
+        resume_runner=_must_not_run,
+        nested_retry_backoff_s=0,
+    )
+    service.schedule_dispatch = lambda **_kwargs: None  # type: ignore[method-assign]
+    snap = await service.enter_manual_hold(
+        event_id,
+        reason="verify_need_manual_resolution",
+        event_status=EventStatus.VERIFYING,
+    )
+    assert snap.generation == 1
+    intent = await service.enqueue_nested_wakeup(event_id, reason="execution_inflight_wait")
+    assert intent is not None
+    claimed = await service._claim_batch(limit=100)
+    assert intent.intent_id in claimed
+    assert await service._run_claimed_intent(intent.intent_id) is False
+    assert resumed == []
+    async with session_factory() as session:
+        row = await session.get(orm.GraphResumeIntent, intent.intent_id)
+        hold = await session.scalar(
+            select(orm.EventContextJournal.value)
+            .where(
+                orm.EventContextJournal.event_id == event_id,
+                orm.EventContextJournal.field_name == "manual_hold",
+            )
+            .order_by(orm.EventContextJournal.version.desc())
+            .limit(1)
+        )
+    assert row is not None
+    assert row.status == GraphResumeIntentStatus.RETRY.value
+    assert row.last_error == "manual_resolution_hold"
+    assert unwrap_journal_value(hold)["generation"] == 1
+
+
+@pytest.mark.asyncio
 async def test_waiting_approval_deferred_respects_retry_backoff(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1409,6 +1469,15 @@ async def test_nested_wakeup_dispatch_while_graph_bound_is_deferred(
         assert dispatched == []
     await service.enqueue_nested_wakeup(event_id, reason="execution_inflight_wait")
     assert dispatched == [event_id]
+
+
+def test_nested_wakeup_still_waiting_set_includes_manual_resolution() -> None:
+    from app.services.manual_resolution_service import _NESTED_WAKEUP_STILL_WAITING
+
+    assert ExecutionSubstate.MANUAL_RESOLUTION in _NESTED_WAKEUP_STILL_WAITING
+    assert ExecutionSubstate.WAITING_WRITEBACK in _NESTED_WAKEUP_STILL_WAITING
+    assert ExecutionSubstate.WAITING_EXECUTION in _NESTED_WAKEUP_STILL_WAITING
+    assert ExecutionSubstate.WAITING_APPROVAL in _NESTED_WAKEUP_STILL_WAITING
 
 
 def test_nested_retry_ready_honors_backoff_without_db() -> None:

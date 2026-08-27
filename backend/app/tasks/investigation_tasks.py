@@ -498,6 +498,20 @@ async def _handle_redelivered_investigation(
     )
 
 
+# GraphResumeDeferredError / lease contention: stay RETRY without burning DEAD.
+_INVESTIGATION_DEFER_WITHOUT_ATTEMPT = frozenset(
+    {
+        "waiting_approval",
+        "graph_still_bound",
+        "investigation_in_progress",
+        "investigation_lease_lost",
+        "lease_unavailable",
+        "manual_resolution_hold",
+        "graph_resume_deferred",
+    }
+)
+
+
 async def _finalize_intent_from_result(
     intent_id: str,
     result: dict[str, str],
@@ -515,6 +529,7 @@ async def _finalize_intent_from_result(
             intent_id,
             error=reason,
             broker_task_id=broker_task_id,
+            increment_attempt=reason not in _INVESTIGATION_DEFER_WITHOUT_ATTEMPT,
         )
         return
     if status == "skipped":
@@ -526,6 +541,7 @@ async def _finalize_intent_from_result(
                 intent_id,
                 error=reason,
                 broker_task_id=broker_task_id,
+                increment_attempt=False,
             )
             return
         await service.mark_skipped(

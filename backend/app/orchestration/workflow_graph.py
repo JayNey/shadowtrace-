@@ -2269,13 +2269,16 @@ def build_investigation_graph(
 
         # In-flight EXECUTING/ACCEPTED must WAIT/recovery — never collapse into
         # execution_failed_unverified (which forces MANUAL_RESOLUTION).
+        # Nested wakeup is only for the WAIT/halt branch. Routing to
+        # manual/writeback/replan already has its own waiter; persisting here
+        # would re-enter the graph and bump a manual hold generation.
         if execution_inflight:
-            defer_nested_graph_resume(state["event_id"])
-            await persist_nested_graph_wakeup(
-                state["event_id"],
-                "execution_inflight_wait",
-            )
             if not agent_routed:
+                defer_nested_graph_resume(state["event_id"])
+                await persist_nested_graph_wakeup(
+                    state["event_id"],
+                    "execution_inflight_wait",
+                )
                 await runtime.set_execution_substate(
                     state["event_id"],
                     ExecutionSubstate.WAITING_WRITEBACK,
