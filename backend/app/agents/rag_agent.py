@@ -503,7 +503,7 @@ def _build_similar_cases(
             )
         )
 
-    cases.sort(key=lambda item: item.score, reverse=True)
+    cases.sort(key=lambda item: item.score if item.score is not None else 0.0, reverse=True)
     if event_type is None:
         return cases
     same_type = [item for item in cases if item.event_type is event_type]

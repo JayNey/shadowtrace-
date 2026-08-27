@@ -41,6 +41,7 @@ from app.models.workflow import (
     validate_action_status_transition,
 )
 from app.orchestration.graph_invocation import is_in_investigation_graph
+from app.orchestration.graph_resume_observability import ResumeStatus
 from app.services.action_approval_policy import (
     action_level_rank,
     resolve_runtime_max_auto_level,
@@ -61,7 +62,7 @@ logger = logging.getLogger(__name__)
 SYSTEM_TIMEOUT_OPERATOR = "system_timeout"
 APPROVAL_ENGINE_OPERATOR = "ApprovalEngine"
 
-ResumeHook = Callable[[str], Awaitable[Literal["ok", "deferred"] | None]]
+ResumeHook = Callable[[str], Awaitable[ResumeStatus | None]]
 
 _APPROVAL_TERMINAL = frozenset({ActionStatus.APPROVED, ActionStatus.REJECTED})
 # Lifecycle statuses reachable after a human approve (not the decision itself).

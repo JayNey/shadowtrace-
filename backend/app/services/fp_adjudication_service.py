@@ -173,7 +173,8 @@ class PostEvidenceFpAdjudicator:
         )
         arbitration = _arbitration(has_conflicts=bool(conflicts), org_exact=org_exact, level=level)
         recommendation = "close_as_fp" if level == 4 else "investigate"
-        window_id = factors.window.window_id if factors.full_match else None
+        window = factors.window
+        window_id = window.window_id if factors.full_match and window is not None else None
         if recommendation == "close_as_fp":
             logger.info(
                 "PostEvidenceFpAdjudicator: close_as_fp event=%s window=%s evidence=%d org=%d",

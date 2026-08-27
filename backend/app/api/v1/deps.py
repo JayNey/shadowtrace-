@@ -20,6 +20,7 @@ from app.core.redis_client import RedisClient
 from app.db.session_provider import get_session_provider, reset_session_provider
 
 if TYPE_CHECKING:
+    from app.orchestration.graph_resume_observability import ResumeStatus
     from app.services.execution_job_query_service import ExecutionJobQueryService
 
 logger = logging.getLogger(__name__)
@@ -467,7 +468,7 @@ async def get_workflow_runtime() -> Any:
     return await _get_workflow_runtime()
 
 
-async def _resume_investigation(event_id: str) -> str:
+async def _resume_investigation(event_id: str) -> ResumeStatus:
     """Resume graph orchestration after approval or writeback (ISSUE-059 / #613)."""
     settings = get_settings()
     mode = (settings.orchestration_mode or "graph").strip().lower()
