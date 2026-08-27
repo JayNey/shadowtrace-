@@ -459,6 +459,28 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     renewal_failed,
                     event_id=event_id,
                 )
+                try:
+                    from app.api.v1.deps import get_workflow_runtime
+                    from app.orchestration.graph_resume import (
+                        maybe_catchup_approval_resume_same_lease,
+                    )
+
+                    async def _self_agent() -> SuperAgent:
+                        return self
+
+                    await maybe_catchup_approval_resume_same_lease(
+                        self.session_factory,
+                        event_id,
+                        self._investigation_graph,
+                        get_super_agent=_self_agent,
+                        get_workflow_runtime=get_workflow_runtime,
+                    )
+                except Exception:
+                    logger.warning(
+                        "SuperAgent: same-lease approval catchup failed event=%s",
+                        event_id,
+                        exc_info=True,
+                    )
             else:
                 graph = self._build_graph()
                 state: dict[str, Any] = {
@@ -484,7 +506,13 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             if not include_response_execution:
                 await self._persist_analysis_only_complete(event_id)
                 await self._schedule_memory_after_analysis(event_id, ec)
-            if ec.event is not None and ec.event.status is EventStatus.CLOSED:
+            # Graph-owned close_node already spawns consolidation; do not race
+            # a second MemoryAgent execute before memory_output is persisted.
+            if (
+                self._investigation_graph is None
+                and ec.event is not None
+                and ec.event.status is EventStatus.CLOSED
+            ):
                 await self._schedule_memory_after_close(event_id, ec)
 
             if lifecycle_started:

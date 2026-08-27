@@ -15,6 +15,7 @@ from typing import Any, Protocol, cast
 
 import orjson
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import and_, case, delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -416,11 +417,19 @@ def _source_snapshot_from_row(row: orm.SecurityEvent) -> dict[str, Any]:
 
 
 def _security_event_from_row(row: orm.SecurityEvent) -> SecurityEvent:
-    creation = SourceReference.model_validate(row.creation_source_ref)
-    snapshots = [SourceReference.model_validate(s) for s in (row.source_reference_snapshots or [])]
-    disposition = None
-    if row.disposition_source_ref:
-        disposition = SourceObjectLocator.model_validate(row.disposition_source_ref)
+    try:
+        creation = SourceReference.model_validate(row.creation_source_ref)
+        snapshots = [
+            SourceReference.model_validate(s) for s in (row.source_reference_snapshots or [])
+        ]
+        disposition = None
+        if row.disposition_source_ref:
+            disposition = SourceObjectLocator.model_validate(row.disposition_source_ref)
+    except PydanticValidationError as exc:
+        raise ValidationError(
+            "security event source reference is not valid",
+            details={"event_id": row.event_id, "error_count": len(exc.errors())},
+        ) from exc
     entities_raw = row.entities or {}
     try:
         entities = EntitySet.model_validate(entities_raw)
@@ -808,6 +817,40 @@ class EventService:
             if extracted is not None:
                 snapshot["triage_severity"] = extracted
 
+        try:
+            if not isinstance(snapshot.get("org_context_matches"), list):
+                rag_src = snapshot.get("rag_output")
+                if not isinstance(rag_src, dict):
+                    rag_ctx = await self._store.get(event_id, "rag_output")
+                    if hasattr(rag_ctx, "model_dump"):
+                        rag_src = rag_ctx.model_dump(mode="json")
+                    elif isinstance(rag_ctx, dict):
+                        rag_src = rag_ctx
+                if isinstance(rag_src, dict) and isinstance(
+                    rag_src.get("org_context_matches"), list
+                ):
+                    snapshot["org_context_matches"] = rag_src["org_context_matches"]
+        except Exception:
+            logger.debug(
+                "overlay org_context_matches failed event_id=%s",
+                event_id,
+                exc_info=True,
+            )
+
+        try:
+            if not isinstance(snapshot.get("fp_adjudication"), dict):
+                fp_ctx = await self._store.get(event_id, "fp_adjudication")
+                if hasattr(fp_ctx, "model_dump"):
+                    fp_ctx = fp_ctx.model_dump(mode="json")
+                if isinstance(fp_ctx, dict):
+                    snapshot["fp_adjudication"] = fp_ctx
+        except Exception:
+            logger.debug(
+                "overlay fp_adjudication failed event_id=%s",
+                event_id,
+                exc_info=True,
+            )
+
         # ISSUE-254: always return a hard-projected API snapshot (never CLOSED dump).
         projected = project_snapshot_for_api(snapshot)
         return event.model_copy(update={"event_context_snapshot": projected})
@@ -968,7 +1011,15 @@ class EventService:
 
             items: list[SecurityEvent] = []
             for row in rows:
-                event = _security_event_from_row(row)
+                try:
+                    event = _security_event_from_row(row)
+                except ValidationError:
+                    logger.warning(
+                        "skipping unlistable event_id=%s due to invalid source reference",
+                        row.event_id,
+                        exc_info=True,
+                    )
+                    continue
                 # ISSUE-254: list must not return CLOSED full EventContext freezes.
                 items.append(
                     event.model_copy(

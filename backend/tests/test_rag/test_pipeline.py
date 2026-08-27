@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -27,7 +27,12 @@ from app.core.embedding.service import EmbeddingService
 from app.core.errors import LLMError
 from app.core.llm.base import InMemoryLLMCallAuditRecorder
 from app.core.llm.mock_client import MockLLMClient
-from app.models.knowledge import KnowledgeChunk, RetrievalResult, RetrievedChunk
+from app.models.knowledge import (
+    KnowledgeChunk,
+    ListedKnowledgeChunk,
+    RetrievalResult,
+    RetrievedChunk,
+)
 from app.rag.citation_tracer import CitationTracer
 from app.rag.context import RetrievalContext
 from app.rag.hybrid_retriever import HybridRetriever
@@ -36,6 +41,7 @@ from app.rag.query_rewriter import QueryRewriter
 from app.rag.reranker import MockReranker, Reranker
 from app.rag.rrf_fusion import rrf_fuse
 from app.services.knowledge_store import KnowledgeStore
+from tests.helpers.knowledge_isolation import TEST_OWNED_CHUNK_DELETE
 from tests.test_support.production_settings import production_settings
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -65,12 +71,13 @@ requires_postgres = pytest.mark.skipif(
 )
 
 
-def _ctx(event_id: str = "test-event") -> RetrievalContext:
+def _ctx(event_id: str = "test-event", *, has_evidence_conflict: bool = False) -> RetrievalContext:
     return RetrievalContext(
         tenant_id="local",
         principal="investigation:test",
         event_id=event_id,
         trace_id=f"evt:{event_id}",
+        has_evidence_conflict=has_evidence_conflict,
     )
 
 
@@ -180,6 +187,53 @@ class TestRRFFusion:
         assert len(result) == 2
 
 
+class TestConstrainedRRFPipeline:
+    @pytest.mark.asyncio
+    async def test_constraint_channel_promotes_overlap_chunk(self) -> None:
+        from app.rag.constraint_rrf import OrgConstraint
+
+        overlap = _make_chunk(
+            "chk-a",
+            "attack_kb",
+            "Nightly archive to files.corp.internal is expected.",
+        )
+        other = _make_chunk("chk-b", "attack_kb", "Generic exfiltration technique notes.")
+        context = RetrievalContext(
+            tenant_id="local",
+            principal="investigation:test",
+            event_id="evt-crrf",
+            trace_id="trace-crrf",
+            org_constraints=(
+                OrgConstraint(kind="allowed_destination", value="files.corp.internal"),
+            ),
+        )
+        pipeline = RetrievalPipeline(
+            rewriter=_EchoRewriter(),  # type: ignore[arg-type]
+            retriever=_ConstantRetriever([[other, overlap], [overlap, other]]),  # type: ignore[arg-type]
+            reranker=_FailingReranker(),  # type: ignore[arg-type]
+        )
+        result = await pipeline.retrieve("technique notes", ["attack_kb"], top_k=2, context=context)
+        assert result.retrieval_metrics is not None
+        assert result.retrieval_metrics.constraint_channel is True
+        assert result.chunks[0].chunk_id == "chk-a"
+        assert all(chunk.retrieval_method != "exact" for chunk in result.chunks)
+
+    @pytest.mark.asyncio
+    async def test_empty_constraints_leave_constraint_channel_false(self) -> None:
+        chunks = [
+            _make_chunk("chk-a", "attack_kb", "Nightly archive to files.corp.internal."),
+            _make_chunk("chk-b", "attack_kb", "Generic exfiltration technique notes."),
+        ]
+        pipeline = RetrievalPipeline(
+            rewriter=_EchoRewriter(),  # type: ignore[arg-type]
+            retriever=_ConstantRetriever([chunks, list(reversed(chunks))]),  # type: ignore[arg-type]
+            reranker=_FailingReranker(),  # type: ignore[arg-type]
+        )
+        result = await pipeline.retrieve("technique notes", ["attack_kb"], top_k=2, context=_ctx())
+        assert result.retrieval_metrics is not None
+        assert result.retrieval_metrics.constraint_channel is False
+
+
 class TestMockReranker:
     """Deterministic mock reranker tests."""
 
@@ -219,6 +273,36 @@ class TestMockReranker:
         # chk-b has neither -> lowest overlap
         assert result[0].chunk_id == "chk-c"
         assert result[-1].chunk_id == "chk-b"
+
+    @pytest.mark.asyncio
+    async def test_short_substring_does_not_count_as_overlap(self) -> None:
+        chunks = [
+            _make_chunk("chk-sub", "kb1", "inside the window identity token", score=0.5),
+            _make_chunk("chk-tok", "kb1", "ransomware encrypts endpoints", score=0.5),
+        ]
+        reranker = MockReranker()
+        result = await reranker.rerank("ransomware", chunks, top_k=2)
+        assert result[0].chunk_id == "chk-tok"
+
+    @pytest.mark.asyncio
+    async def test_keyword_hits_do_not_get_blanket_boost(self) -> None:
+        keyword = _make_chunk(
+            "chk-kw",
+            "kb1",
+            "unrelated filler text without query tokens",
+            score=0.4,
+        )
+        keyword.retrieval_method = "keyword"
+        vector = _make_chunk(
+            "chk-vec",
+            "kb1",
+            "ransomware encrypts endpoints",
+            score=0.41,
+        )
+        vector.retrieval_method = "vector"
+        reranker = MockReranker()
+        result = await reranker.rerank("ransomware endpoints", [keyword, vector], top_k=2)
+        assert result[0].chunk_id == "chk-vec"
 
     @pytest.mark.asyncio
     async def test_rerank_is_deterministic(self) -> None:
@@ -316,6 +400,69 @@ class _FailingReranker:
         self, query: str, chunks: list[RetrievedChunk], top_k: int
     ) -> list[RetrievedChunk]:
         raise RuntimeError("simulated reranker failure")
+
+
+class _EchoRewriter:
+    async def rewrite(self, query: str, *, context: RetrievalContext) -> list[str]:
+        return [query]
+
+
+class _FakeOrgContextStore:
+    def __init__(self, chunks: list[ListedKnowledgeChunk]) -> None:
+        self._chunks = chunks
+
+    async def list_chunks(self, **kwargs: object) -> list[ListedKnowledgeChunk]:
+        return list(self._chunks)
+
+
+class _CountingRewriter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def rewrite(self, query: str, *, context: RetrievalContext) -> list[str]:
+        self.calls += 1
+        return [query, f"{query} rewritten"]
+
+
+class _ListingFailRetriever:
+    def __init__(self, hybrid_results: list[list[RetrievedChunk]]) -> None:
+        self._store = _RaisingOrgContextStore()
+        self.retrieve_calls = 0
+        self._results = hybrid_results
+
+    async def retrieve(self, *args: object, **kwargs: object) -> list[list[RetrievedChunk]]:
+        self.retrieve_calls += 1
+        return self._results
+
+
+class _RaisingOrgContextStore:
+    async def list_chunks(self, **kwargs: object) -> list[ListedKnowledgeChunk]:
+        raise RuntimeError("catalog unavailable")
+
+
+class _StoreBackedHybridRetriever:
+    def __init__(
+        self,
+        listed: list[ListedKnowledgeChunk],
+        hybrid_results: list[list[RetrievedChunk]],
+    ) -> None:
+        self._store = _FakeOrgContextStore(listed)
+        self.retrieve_calls = 0
+        self._results = hybrid_results
+
+    async def retrieve(self, *args: object, **kwargs: object) -> list[list[RetrievedChunk]]:
+        self.retrieve_calls += 1
+        return self._results
+
+
+class _StoreBackedExplodingRetriever:
+    def __init__(self, chunks: list[ListedKnowledgeChunk]) -> None:
+        self._store = _FakeOrgContextStore(chunks)
+        self.retrieve_calls = 0
+
+    async def retrieve(self, *args: object, **kwargs: object) -> list[list[RetrievedChunk]]:
+        self.retrieve_calls += 1
+        raise AssertionError("hybrid must not run when exact org-context matching applies")
 
 
 class _ConstantRetriever:
@@ -731,7 +878,7 @@ async def session_factory(
 @pytest_asyncio.fixture
 async def clean_knowledge(session_factory: async_sessionmaker[AsyncSession]) -> None:
     async with session_factory() as session:
-        await session.execute(text("DELETE FROM knowledge_chunk"))
+        await session.execute(TEST_OWNED_CHUNK_DELETE)
         await session.commit()
 
 
@@ -920,3 +1067,279 @@ class TestFullPipelineIntegration:
         assert result.chunks == []
         assert result.citations == []
         assert result.query == "anything"
+
+
+class TestOrgContextExactRetrieval:
+    def _listed(self, domain: str) -> list[ListedKnowledgeChunk]:
+        return [
+            ListedKnowledgeChunk(
+                chunk_id="chk-orgdest",
+                kb_name="org_context_kb",
+                content=f"{domain} is an approved internal file-server destination.",
+                metadata={"kind": "allowed_destination", "domains": [domain]},
+                created_at=datetime.now(UTC),
+            )
+        ]
+
+    def _listed_restricted(self, domain: str) -> list[ListedKnowledgeChunk]:
+        return [
+            ListedKnowledgeChunk(
+                chunk_id="chk-orgdeny",
+                kb_name="org_context_kb",
+                content=f"{domain} is not an approved destination.",
+                metadata={
+                    "kind": "data_handling",
+                    "domains": [domain],
+                    "allowed_channels": ["files.corp.internal"],
+                },
+                created_at=datetime.now(UTC),
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_restricted_domain_is_exact_hit_not_allow(self) -> None:
+        retriever = _StoreBackedExplodingRetriever(
+            self._listed_restricted("unknown-upload-example.com")
+        )
+        pipeline = RetrievalPipeline(
+            rewriter=_FailingRewriter(),  # type: ignore[arg-type]
+            retriever=retriever,  # type: ignore[arg-type]
+            reranker=_FailingReranker(),  # type: ignore[arg-type]
+        )
+        result = await pipeline.retrieve(
+            "Domain:unknown-upload-example.com",
+            ["org_context_kb"],
+            top_k=5,
+            context=_ctx("evt-org-restricted"),
+        )
+        assert len(result.chunks) == 1
+        assert result.chunks[0].retrieval_method == "exact"
+        assert result.chunks[0].metadata.get("match_type") == "restricted_domain"
+        assert result.chunks[0].metadata.get("kind") == "data_handling"
+        assert retriever.retrieve_calls == 0
+        assert result.retrieval_metrics is not None
+        assert result.retrieval_metrics.org_context_exact_hit is True
+        assert result.retrieval_metrics.retrieval_action == "sufficient"
+
+    @pytest.mark.asyncio
+    async def test_exact_domain_hit_skips_hybrid(self) -> None:
+        retriever = _StoreBackedExplodingRetriever(self._listed("files.corp.internal"))
+        pipeline = RetrievalPipeline(
+            rewriter=_FailingRewriter(),  # type: ignore[arg-type]
+            retriever=retriever,  # type: ignore[arg-type]
+            reranker=_FailingReranker(),  # type: ignore[arg-type]
+        )
+        result = await pipeline.retrieve(
+            "Domain:files.corp.internal",
+            ["org_context_kb"],
+            top_k=5,
+            context=_ctx("evt-org-exact"),
+        )
+        assert len(result.chunks) == 1
+        assert result.chunks[0].retrieval_method == "exact"
+        assert retriever.retrieve_calls == 0
+        assert result.citations
+        assert result.retrieval_metrics is not None
+        assert result.retrieval_metrics.retrieval_action == "sufficient"
+
+    @pytest.mark.asyncio
+    async def test_exact_hit_with_conflict_does_not_skip_hybrid(self) -> None:
+        hybrid = [
+            _make_chunk(
+                "chk-org-hyb",
+                "org_context_kb",
+                "files.corp.internal approved destination",
+                score=0.4,
+            )
+        ]
+        retriever = _StoreBackedHybridRetriever(
+            self._listed("files.corp.internal"),
+            [hybrid, hybrid],
+        )
+        pipeline = RetrievalPipeline(
+            rewriter=_CountingRewriter(),  # type: ignore[arg-type]
+            retriever=retriever,  # type: ignore[arg-type]
+            reranker=MockReranker(),
+        )
+        result = await pipeline.retrieve(
+            "Domain:files.corp.internal",
+            ["org_context_kb"],
+            top_k=5,
+            context=_ctx("evt-org-conflict", has_evidence_conflict=True),
+        )
+        assert retriever.retrieve_calls == 1
+        assert result.retrieval_metrics is not None
+        assert result.retrieval_metrics.org_context_exact_hit is True
+        assert result.retrieval_metrics.retrieval_action == "conflict"
+        assert any(chunk.retrieval_method == "exact" for chunk in result.chunks)
+
+    @pytest.mark.asyncio
+    async def test_near_miss_falls_back_to_hybrid_without_rewrite(self) -> None:
+        hybrid = [
+            _make_chunk(
+                "chk-org-hyb",
+                "org_context_kb",
+                "files.corp.internal approved destination",
+                score=0.4,
+            )
+        ]
+        rewriter = _CountingRewriter()
+        retriever = _StoreBackedHybridRetriever(
+            self._listed("files.corp.internal"),
+            [hybrid, hybrid],
+        )
+        pipeline = RetrievalPipeline(
+            rewriter=rewriter,  # type: ignore[arg-type]
+            retriever=retriever,  # type: ignore[arg-type]
+            reranker=MockReranker(),
+        )
+        result = await pipeline.retrieve(
+            "Domain:files.corp.internall",
+            ["org_context_kb"],
+            top_k=5,
+            context=_ctx("evt-org-miss"),
+        )
+        assert "org_context_exact_miss" in result.degraded_steps
+        assert retriever.retrieve_calls == 1
+        assert rewriter.calls == 0
+        assert result.chunks
+        assert result.chunks[0].retrieval_method != "exact"
+        assert result.retrieval_metrics is not None
+        assert result.retrieval_metrics.llm_rewrite_calls == 0
+        assert result.retrieval_metrics.org_context_exact_hit is False
+
+    @pytest.mark.asyncio
+    async def test_empty_catalog_does_not_hybrid_or_rewrite(self) -> None:
+        rewriter = _CountingRewriter()
+        retriever = _StoreBackedExplodingRetriever([])
+        pipeline = RetrievalPipeline(
+            rewriter=rewriter,  # type: ignore[arg-type]
+            retriever=retriever,  # type: ignore[arg-type]
+            reranker=_FailingReranker(),  # type: ignore[arg-type]
+        )
+        result = await pipeline.retrieve(
+            "Domain:files.corp.internal",
+            ["org_context_kb"],
+            top_k=5,
+            context=_ctx("evt-org-empty"),
+        )
+        assert result.chunks == []
+        assert retriever.retrieve_calls == 0
+        assert rewriter.calls == 0
+        assert "org_context_empty" in result.degraded_steps
+
+    @pytest.mark.asyncio
+    async def test_listing_failure_skips_rewrite_and_falls_back_hybrid(self) -> None:
+        hybrid = [
+            _make_chunk(
+                "chk-org-hyb",
+                "org_context_kb",
+                "files.corp.internal approved destination",
+                score=0.4,
+            )
+        ]
+        rewriter = _CountingRewriter()
+        retriever = _ListingFailRetriever([hybrid, hybrid])
+        pipeline = RetrievalPipeline(
+            rewriter=rewriter,  # type: ignore[arg-type]
+            retriever=retriever,  # type: ignore[arg-type]
+            reranker=MockReranker(),
+        )
+        result = await pipeline.retrieve(
+            "Domain:files.corp.internal",
+            ["org_context_kb"],
+            top_k=5,
+            context=_ctx("evt-org-list-fail"),
+        )
+        assert "org_context_exact" in result.degraded_steps
+        assert rewriter.calls == 0
+        assert retriever.retrieve_calls == 1
+        assert result.retrieval_metrics is not None
+        assert result.retrieval_metrics.llm_rewrite_calls == 0
+        assert result.chunks
+        assert result.chunks[0].retrieval_method != "exact"
+
+    @pytest.mark.asyncio
+    async def test_structured_query_skips_rewrite_on_attack_kb(self) -> None:
+        chunks = [_make_chunk("chk-atk", "attack_kb", "exfiltration over web service", score=0.9)]
+        rewriter = _CountingRewriter()
+        pipeline = RetrievalPipeline(
+            rewriter=rewriter,  # type: ignore[arg-type]
+            retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
+            reranker=MockReranker(),
+        )
+        result = await pipeline.retrieve(
+            "Event type: data_exfiltration. Domain:evil.example",
+            ["attack_kb"],
+            top_k=1,
+            context=_ctx("evt-skip-rewrite"),
+        )
+        assert rewriter.calls == 0
+        assert result.rewritten_queries == ["Event type: data_exfiltration. Domain:evil.example"]
+        assert result.retrieval_metrics is not None
+        assert result.retrieval_metrics.llm_rewrite_calls == 0
+        assert len(result.chunks) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_entities_falls_back_to_hybrid(self) -> None:
+        chunks = [
+            _make_chunk("chk-org", "org_context_kb", "nightly backup window explanation", score=0.8)
+        ]
+        pipeline = RetrievalPipeline(
+            rewriter=_EchoRewriter(),  # type: ignore[arg-type]
+            retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
+            reranker=MockReranker(),
+        )
+        result = await pipeline.retrieve(
+            "generic operating context",
+            ["org_context_kb"],
+            top_k=1,
+            context=_ctx("evt-org-hybrid"),
+        )
+        assert len(result.chunks) == 1
+        assert result.chunks[0].retrieval_method != "exact"
+
+    @pytest.mark.asyncio
+    async def test_allows_org_context_kb_without_plan_in_production(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        chunks = [_make_chunk("chk-org", "org_context_kb", "org context note", score=0.9)]
+        settings = production_settings(monkeypatch)
+        pipeline = RetrievalPipeline(
+            rewriter=_EchoRewriter(),  # type: ignore[arg-type]
+            retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
+            reranker=MockReranker(),
+            settings=settings,
+        )
+        result = await pipeline.retrieve(
+            "operating context",
+            ["org_context_kb"],
+            top_k=1,
+            context=_ctx("evt-org-prod"),
+        )
+        assert len(result.chunks) == 1
+        assert "plan_required_in_production" not in result.degraded_steps
+
+
+class TestRetrievalRouter:
+    def test_conflict_outranks_exact_hit(self) -> None:
+        from app.rag.retrieval_router import (
+            attack_kb_top_k,
+            decide_retrieval_action,
+            should_short_circuit_org_exact,
+        )
+
+        assert decide_retrieval_action(has_conflict=True, org_exact_hit=True) == "conflict"
+        assert should_short_circuit_org_exact(has_conflict=True) is False
+        assert attack_kb_top_k(has_conflict=True) == 8
+
+    def test_sufficient_only_without_conflict(self) -> None:
+        from app.rag.retrieval_router import (
+            attack_kb_top_k,
+            decide_retrieval_action,
+            should_short_circuit_org_exact,
+        )
+
+        assert decide_retrieval_action(has_conflict=False, org_exact_hit=True) == "sufficient"
+        assert should_short_circuit_org_exact(has_conflict=False) is True
+        assert attack_kb_top_k(has_conflict=False) == 5

@@ -94,6 +94,7 @@ async def test_execute_graph_resume_records_degraded_and_raises() -> None:
             get_super_agent=_get_super_agent,
             get_workflow_runtime=_get_runtime,
             degraded_flags=degraded,
+            lease_acquired=True,
         )
 
     assert exc_info.value.error_type == "checkpoint_missing"
@@ -125,6 +126,7 @@ async def test_reporting_checkpoint_missing_keeps_status_reporting() -> None:
                 return_value=MagicMock(set_execution_substate=AsyncMock())
             ),
             degraded_flags=degraded,
+            lease_acquired=True,
         )
 
     assert exc_info.value.error_type == "checkpoint_missing"
@@ -174,6 +176,7 @@ async def test_execute_graph_resume_retries_transient_errors() -> None:
         get_super_agent=_get_super_agent,
         get_workflow_runtime=_get_runtime,
         degraded_flags=degraded,
+        lease_acquired=True,
     )
 
     assert call_count == 3
@@ -257,6 +260,7 @@ async def test_execute_graph_resume_classifies_invalid_transition() -> None:
             get_super_agent=AsyncMock(return_value=agent),
             get_workflow_runtime=AsyncMock(return_value=MagicMock()),
             degraded_flags=degraded,
+            lease_acquired=True,
         )
 
     assert exc_info.value.error_type == "invalid_state_transition"
@@ -319,6 +323,7 @@ async def test_execute_graph_resume_state_mismatch_is_not_retried() -> None:
             get_super_agent=AsyncMock(return_value=agent),
             get_workflow_runtime=AsyncMock(return_value=runtime),
             degraded_flags=degraded,
+            lease_acquired=True,
         )
 
     assert exc_info.value.error_type == "state_mismatch"
@@ -342,6 +347,7 @@ async def test_execute_graph_resume_transient_exhaustion_records_single_failure(
             get_super_agent=AsyncMock(return_value=agent),
             get_workflow_runtime=AsyncMock(return_value=MagicMock()),
             degraded_flags=degraded,
+            lease_acquired=True,
         )
 
     assert agent._investigation_graph.aget_state.await_count == 3
@@ -375,6 +381,7 @@ async def test_execute_graph_resume_with_retry_preserves_soft_time_limit(
             get_super_agent=AsyncMock(return_value=MagicMock()),
             get_workflow_runtime=AsyncMock(return_value=MagicMock()),
             degraded_flags=degraded,
+            lease_acquired=True,
         )
 
     record.assert_not_awaited()

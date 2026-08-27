@@ -1,14 +1,15 @@
-"""RAGAgent: knowledge-augmented retrieval across four KBs (ISSUE-046).
+"""RAGAgent: knowledge-augmented retrieval across investigation KBs (ISSUE-046).
 
-Concurrently queries attack_kb, fp_case_kb, history_case_kb, and playbook_kb
-via RetrievalPipeline, assembles a structured RAGOutput, and persists it to
-EventContext.rag_output.
+Concurrently queries attack_kb, fp_case_kb, history_case_kb, playbook_kb,
+and org_context_kb via RetrievalPipeline, assembles a structured RAGOutput,
+and persists it to EventContext.rag_output.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import Any, cast
 
 from celery.exceptions import SoftTimeLimitExceeded
@@ -25,35 +26,53 @@ from app.models.agent_io import (
     AttackTechniqueMatch,
     Citation,
     FpSimilarity,
+    OrgContextMatch,
     RAGAgentInput,
     RAGOutput,
     SimilarCaseSummary,
 )
 from app.models.enums import EventType, FinalVerdict
-from app.models.knowledge import RetrievalResult
+from app.models.knowledge import RetrievalMetrics, RetrievalResult
 from app.models.knowledge_release import KnowledgeQueryPlan
 from app.models.playbook_release import PlaybookRef
+from app.rag.constraint_rrf import OrgConstraint, constraints_from_org_matches
 from app.rag.context import RetrievalContext
+from app.rag.retrieval_router import attack_kb_top_k, evidence_conflict_present
 from app.services.knowledge_query_plan_service import resolve_active_knowledge_query_plan
 from app.services.knowledge_release_service import KnowledgeReleaseService
+from app.services.org_context_matcher import (
+    coerce_org_context_kind,
+    is_exact_org_context_match,
+    load_org_context_matches,
+)
 from app.services.playbook_kb_service import playbook_ref_from_metadata
 from app.services.playbook_query_plan_service import resolve_active_playbook_query_plan
 from app.services.playbook_release_service import PlaybookReleaseService
 
 logger = logging.getLogger(__name__)
 
-_KB_NAMES = ["attack_kb", "fp_case_kb", "history_case_kb", "playbook_kb"]
+_ORG_KB = "org_context_kb"
+_KB_NAMES = [
+    "attack_kb",
+    "fp_case_kb",
+    "history_case_kb",
+    "playbook_kb",
+    _ORG_KB,
+]
+_OTHER_KBS = [name for name in _KB_NAMES if name != _ORG_KB]
 _TOP_K = 5
 _NO_ACTIVE_RELEASE = "no_active_knowledge_release"
 _NO_ACTIVE_PLAYBOOK_RELEASE = "no_active_playbook_release"
 
 
 class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
-    """Stage 6 Agent: concurrent RAG retrieval across four knowledge bases.
+    """Stage 6 Agent: two-phase RAG across five knowledge bases.
 
-    Each KB is queried independently; a single KB failure does not interrupt
-    the others. When all four KBs are unavailable the agent returns an empty
-    RAGOutput with ``degraded=True``.
+    Phase 1 retrieves ``org_context_kb`` and materializes allow-constraints.
+    Phase 2 retrieves the other four KBs concurrently; hybrid fusion uses
+    Constrained RRF when those constraints are non-empty. A single KB failure
+    does not interrupt the others. When all five KBs are unavailable the
+    agent returns an empty RAGOutput with ``degraded=True``.
     """
 
     agent_name: str = "rag_agent"
@@ -96,7 +115,7 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
     async def _run(self, input: RAGAgentInput) -> RAGOutput:
         queries = RAGQueryBuilder.build_queries(input.triage_result, input.evidence_output)
 
-        # Concurrent retrieval — one task per KB.
+        # Two-phase retrieval: org_context_kb first, then the other four in parallel.
         if self._pipeline is None:
             output = RAGOutput(degraded=True)
             await self._write_rag_output(input, output)
@@ -108,12 +127,32 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
         base_context = RetrievalContext.from_rag_input(input, settings=cfg, query_plan=attack_plan)
         attack_kb_blocked = self._knowledge_release_service is not None and attack_plan is None
         playbook_kb_blocked = self._playbook_kb_blocked(cfg, playbook_plan)
+        has_conflict = evidence_conflict_present(input.evidence_output)
+        org_result = await self._retrieve_for_kb(
+            _ORG_KB,
+            queries.get(_ORG_KB, ""),
+            top_k=_TOP_K,
+            base_context=base_context,
+            attack_plan=attack_plan,
+            playbook_plan=playbook_plan,
+            org_constraints=(),
+        )
+        # Catalog exact-hits are independent of hybrid citations (retrieval ≠ match).
+        org_context_matches = _merge_org_context_matches(
+            await self._catalog_org_context_matches(input, tenant_id=base_context.tenant_id),
+            _build_org_context_matches(org_result),
+        )
+        org_constraints = constraints_from_org_matches(org_context_matches)
         retrieve_outcomes = await asyncio.gather(
             *(
                 self._retrieve_for_kb(
                     kb_name,
                     queries.get(kb_name, ""),
-                    top_k=_TOP_K,
+                    top_k=(
+                        attack_kb_top_k(has_conflict=has_conflict)
+                        if kb_name == "attack_kb"
+                        else _TOP_K
+                    ),
                     base_context=base_context,
                     attack_plan=attack_plan,
                     playbook_plan=playbook_plan,
@@ -121,17 +160,21 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
                         (kb_name == "attack_kb" and attack_kb_blocked)
                         or (kb_name == "playbook_kb" and playbook_kb_blocked)
                     ),
+                    org_constraints=org_constraints,
                 )
-                for kb_name in _KB_NAMES
+                for kb_name in _OTHER_KBS
             ),
             return_exceptions=False,
         )
-        results = dict(zip(_KB_NAMES, retrieve_outcomes, strict=True))
+        results = {_ORG_KB: org_result, **dict(zip(_OTHER_KBS, retrieve_outcomes, strict=True))}
 
         # Assemble output sections.
         attack_techniques = _build_attack_techniques(results.get("attack_kb"))
         fp_similarity = _build_fp_similarity(results.get("fp_case_kb"))
-        similar_cases = _build_similar_cases(results.get("history_case_kb"))
+        similar_cases = _build_similar_cases(
+            results.get("history_case_kb"),
+            event_type=input.triage_result.event_type,
+        )
         playbook_refs = _build_playbook_refs(results.get("playbook_kb"))
         citations = _aggregate_citations(results)
 
@@ -142,8 +185,10 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
             fp_similarity=fp_similarity,
             similar_cases=similar_cases,
             playbook_refs=playbook_refs,
+            org_context_matches=org_context_matches,
             citations=citations,
             knowledge_query_plan=plan_payload,
+            retrieval_metrics=_aggregate_retrieval_metrics(results),
             degraded=all_failed,
         )
 
@@ -165,6 +210,8 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
             self._knowledge_release_service,
             cfg,
             trace_id=trace_id,
+            tenant_id=(input.tenant_id or "").strip(),
+            principal=(input.principal or "").strip(),
         )
 
     async def _resolve_playbook_query_plan(self, input: RAGAgentInput) -> KnowledgeQueryPlan | None:
@@ -176,6 +223,8 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
             self._playbook_release_service,
             cfg,
             trace_id=trace_id,
+            tenant_id=(input.tenant_id or "").strip(),
+            principal=(input.principal or "").strip(),
         )
 
     def _playbook_kb_blocked(
@@ -200,6 +249,7 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
         attack_plan: KnowledgeQueryPlan | None,
         playbook_plan: KnowledgeQueryPlan | None,
         blocked: bool = False,
+        org_constraints: tuple[OrgConstraint, ...] | None = None,
     ) -> RetrievalResult | None:
         if blocked:
             degraded = [
@@ -216,14 +266,36 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
             query_plan = attack_plan
         elif kb_name == "playbook_kb":
             query_plan = playbook_plan
-        context = RetrievalContext(
-            tenant_id=base_context.tenant_id,
-            principal=base_context.principal,
-            event_id=base_context.event_id,
-            trace_id=base_context.trace_id,
+        context = replace(
+            base_context,
             query_plan=query_plan,
+            org_constraints=(
+                org_constraints if org_constraints is not None else base_context.org_constraints
+            ),
         )
         return await self._retrieve_safe(kb_name, query, top_k=top_k, context=context)
+
+    async def _catalog_org_context_matches(
+        self,
+        input: RAGAgentInput,
+        *,
+        tenant_id: str,
+    ) -> list[OrgContextMatch]:
+        """Exact matcher over the org_context catalog. Independent of hybrid retrieval."""
+        store = getattr(getattr(self._pipeline, "_retriever", None), "_store", None)
+        if store is None or not hasattr(store, "list_chunks"):
+            return []
+        try:
+            return await load_org_context_matches(
+                store,
+                triage_result=input.triage_result,
+                evidence_output=input.evidence_output,
+                tenant_id=tenant_id,
+                occurred_at=input.occurred_at,
+            )
+        except Exception as exc:
+            logger.warning("org_context catalog match failed: %s", exc)
+            return []
 
     async def _retrieve_safe(
         self,
@@ -377,21 +449,33 @@ def _build_fp_similarity(result: RetrievalResult | None) -> FpSimilarity:
     )
 
 
+_SIMILAR_CASE_MIN_SCORE = 0.25
+
+
 def _build_similar_cases(
     result: RetrievalResult | None,
+    *,
+    event_type: EventType | None = None,
 ) -> list[SimilarCaseSummary]:
-    """Extract similar case summaries from history_case_kb retrieval result."""
+    """Extract similar case summaries from history_case_kb retrieval result.
+
+    Prefer same ``event_type`` when the query has one; if that filter empties
+    the list, keep other above-threshold hits (fail-soft).
+    """
     if result is None or not result.chunks:
         return []
 
     cases: list[SimilarCaseSummary] = []
     for chunk in result.chunks:
+        score = max(0.0, min(1.0, chunk.score))
+        if score < _SIMILAR_CASE_MIN_SCORE:
+            continue
         meta = chunk.metadata
         event_type_raw = meta.get("event_type")
-        event_type: EventType | None = None
+        parsed_event_type: EventType | None = None
         if isinstance(event_type_raw, str):
             try:
-                event_type = EventType(event_type_raw)
+                parsed_event_type = EventType(event_type_raw)
             except ValueError:
                 pass
 
@@ -411,15 +495,19 @@ def _build_similar_cases(
         cases.append(
             SimilarCaseSummary(
                 case_id=meta.get("case_id", ""),
-                event_type=event_type,
+                event_type=parsed_event_type,
                 summary=meta.get("summary", ""),
                 final_verdict=final_verdict,
                 risk_score=risk_score,
-                score=max(0.0, min(1.0, chunk.score)),
+                score=score,
             )
         )
 
-    return cases
+    cases.sort(key=lambda item: item.score if item.score is not None else 0.0, reverse=True)
+    if event_type is None:
+        return cases
+    same_type = [item for item in cases if item.event_type is event_type]
+    return same_type or cases
 
 
 def _build_playbook_refs(result: RetrievalResult | None) -> list[PlaybookRef]:
@@ -441,10 +529,66 @@ def _build_playbook_refs(result: RetrievalResult | None) -> list[PlaybookRef]:
     return refs
 
 
+def _merge_org_context_matches(
+    catalog: list[OrgContextMatch],
+    retrieved: list[OrgContextMatch],
+) -> list[OrgContextMatch]:
+    """Catalog exact-hits win; retrieved exact-hits fill gaps by chunk_id."""
+    merged: list[OrgContextMatch] = []
+    seen: set[str] = set()
+    for match in (*catalog, *retrieved):
+        key = match.chunk_id or f"{match.kind}:{match.matched_value}:{match.match_type}"
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(match)
+    return merged
+
+
+def _build_org_context_matches(result: RetrievalResult | None) -> list[OrgContextMatch]:
+    """Project org_context_kb chunks into typed matches. Hits are evidence only."""
+    if result is None or not result.chunks:
+        return []
+    citation_by_chunk = {c.chunk_id: c.citation_id for c in result.citations}
+    matches: list[OrgContextMatch] = []
+    for chunk in result.chunks:
+        kind = coerce_org_context_kind(str(chunk.metadata.get("kind") or ""))
+        if kind is None:
+            continue
+        citation_id = citation_by_chunk.get(chunk.chunk_id)
+        if not citation_id:
+            continue
+        match_type = str(chunk.metadata.get("match_type") or "")
+        if not is_exact_org_context_match(
+            match_type,
+            retrieval_method=chunk.retrieval_method,
+        ):
+            continue
+        matched_value = str(chunk.metadata.get("matched_value") or "")
+        if not matched_value:
+            for key in ("domains", "hosts", "accounts", "ips"):
+                values = chunk.metadata.get(key)
+                if isinstance(values, list) and values:
+                    matched_value = str(values[0])
+                    break
+        matches.append(
+            OrgContextMatch(
+                kind=kind,
+                matched_value=matched_value,
+                explanation=chunk.content,
+                citation_id=citation_id,
+                chunk_id=chunk.chunk_id,
+                match_type=match_type,
+                match_confidence=max(0.0, min(1.0, chunk.score)),
+            )
+        )
+    return matches
+
+
 def _aggregate_citations(
     results: dict[str, RetrievalResult | None],
 ) -> list[Citation]:
-    """Collect and deduplicate citations across all four KB results."""
+    """Collect and deduplicate citations across all investigation KB results."""
     seen: set[str] = set()
     aggregated: list[Citation] = []
     for result in results.values():
@@ -467,3 +611,59 @@ def _aggregate_citations(
                 )
             )
     return aggregated
+
+
+def _aggregate_retrieval_metrics(
+    results: dict[str, RetrievalResult | None],
+) -> RetrievalMetrics:
+    """Two-phase wall clock is ``t_org + max(other KBs)``; rewrite calls are summed.
+
+    Stage peaks (rewrite/retrieve/rrf/rerank) stay max-across-KBs. When
+    ``org_context_kb`` is absent from *results*, wall clock falls back to max.
+    """
+    metrics = [
+        result.retrieval_metrics
+        for result in results.values()
+        if result is not None and result.retrieval_metrics is not None
+    ]
+    if not metrics:
+        return RetrievalMetrics()
+    if "org_context_kb" in results:
+        org = results["org_context_kb"]
+        org_total = (
+            org.retrieval_metrics.total_ms
+            if org is not None and org.retrieval_metrics is not None
+            else 0.0
+        )
+        other_totals = [
+            result.retrieval_metrics.total_ms
+            for key, result in results.items()
+            if key != "org_context_kb"
+            and result is not None
+            and result.retrieval_metrics is not None
+        ]
+        wall = org_total + (max(other_totals) if other_totals else 0.0)
+    else:
+        wall = max(item.total_ms for item in metrics)
+    return RetrievalMetrics(
+        rewrite_ms=max(item.rewrite_ms for item in metrics),
+        retrieve_ms=max(item.retrieve_ms for item in metrics),
+        rrf_ms=max(item.rrf_ms for item in metrics),
+        rerank_ms=max(item.rerank_ms for item in metrics),
+        total_ms=wall,
+        llm_rewrite_calls=sum(item.llm_rewrite_calls for item in metrics),
+        org_context_exact_hit=any(item.org_context_exact_hit for item in metrics),
+        constraint_channel=any(item.constraint_channel for item in metrics),
+        retrieval_action=_aggregate_retrieval_action(metrics),
+    )
+
+
+def _aggregate_retrieval_action(metrics: list[RetrievalMetrics]) -> str:
+    actions = [item.retrieval_action for item in metrics if item.retrieval_action]
+    if "conflict" in actions:
+        return "conflict"
+    if "sufficient" in actions:
+        return "sufficient"
+    if "uncertain" in actions:
+        return "uncertain"
+    return ""

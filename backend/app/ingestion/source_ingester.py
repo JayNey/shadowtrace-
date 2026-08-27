@@ -1196,18 +1196,52 @@ class SourceIngester:
             )
 
 
+def _item_source_updated_at(item: Any) -> datetime | None:
+    reference = getattr(item, "reference", None)
+    stamp = getattr(reference, "source_updated_at", None) if reference is not None else None
+    return stamp if isinstance(stamp, datetime) else None
+
+
+def _max_item_updated_after(page: SourcePage) -> str | None:
+    stamps = [stamp for stamp in (_item_source_updated_at(item) for item in page.items) if stamp]
+    if not stamps:
+        return None
+    return max(stamps).isoformat()
+
+
+def _later_updated_after(left: str | None, right: str | None) -> str | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    left_dt = _watermark_time({"updated_after": left})
+    right_dt = _watermark_time({"updated_after": right})
+    if left_dt is None:
+        return right
+    if right_dt is None:
+        return left
+    return right if right_dt >= left_dt else left
+
+
 def _next_watermark(
     *,
     before: dict[str, Any] | None,
     page: SourcePage,
 ) -> dict[str, Any]:
     previous_updated = (before or {}).get("updated_after")
+    if isinstance(previous_updated, datetime):
+        previous_updated = previous_updated.isoformat()
+    elif previous_updated is not None:
+        previous_updated = str(previous_updated)
     if page.has_more:
         updated_after = previous_updated
+    elif page.items:
+        updated_after = _later_updated_after(previous_updated, _max_item_updated_after(page))
     else:
-        updated_after = (
-            page.server_time.isoformat() if page.server_time is not None else previous_updated
-        )
+        # Empty terminal page: never jump to wall-clock server_time. Mock XDR
+        # sets server_time=now, which would skip historical gold seeds on the
+        # next poll.
+        updated_after = previous_updated
     return {
         "cursor": page.next_cursor,
         "updated_after": updated_after,

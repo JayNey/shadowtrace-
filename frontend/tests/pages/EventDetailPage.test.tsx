@@ -27,6 +27,7 @@ const mockListMemoryReviews = vi.fn();
 const mockApproveAction = vi.fn();
 const mockRejectAction = vi.fn();
 const mockGenerateReport = vi.fn();
+const mockGetReport = vi.fn();
 
 vi.mock("../../src/services/eventApi", () => ({
   getEvent: (...args: unknown[]) => mockGetEvent(...args),
@@ -45,11 +46,20 @@ vi.mock("../../src/services/eventApi", () => ({
   approveAction: (...args: unknown[]) => mockApproveAction(...args),
   rejectAction: (...args: unknown[]) => mockRejectAction(...args),
   generateReport: (...args: unknown[]) => mockGenerateReport(...args),
+  getReport: (...args: unknown[]) => mockGetReport(...args),
 }));
 
 vi.mock("../../src/services/knowledgeApi", () => ({
   listMemoryReviews: (...args: unknown[]) => mockListMemoryReviews(...args),
 }));
+
+vi.mock("../../src/utils/eventMemoryReviews", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/utils/eventMemoryReviews")>();
+  return {
+    ...actual,
+    CLOSED_MEMORY_REVIEW_POLL_MS: [0, 20, 40],
+  };
+});
 
 vi.mock("../../src/services/auditApi", () => ({
   getDecisionTrace: (...args: unknown[]) => mockGetDecisionTrace(...args),
@@ -67,6 +77,17 @@ const socketHandlers = new Set<SocketHandler>();
 /** @deprecated keep for tests that emit via the last-registered handler name */
 let socketHandler: SocketHandler | undefined;
 const mockSocketSubscribe = vi.fn();
+
+const MockIntersectionObserver = vi.fn(() => ({
+  observe: vi.fn(),
+  unobserve: vi.fn(),
+  disconnect: vi.fn(),
+  takeRecords: vi.fn(() => []),
+  root: null,
+  rootMargin: "",
+  thresholds: [],
+}));
+vi.stubGlobal("IntersectionObserver", MockIntersectionObserver);
 
 function emitSocketEvent(event: {
   type: string;
@@ -106,6 +127,32 @@ vi.mock("../../src/services/socketClient", () => ({
 vi.mock("echarts-for-react", () => ({
   default: () => <div data-testid="risk-radar-chart" />,
 }));
+
+function makeInvestigationReport() {
+  return {
+    report_id: "rpt-70",
+    event_id: "evt-70",
+    title: "内部泄露调查报告",
+    summary: "confirmed threat",
+    sections: [
+      {
+        key: "overview",
+        title: "概述",
+        content: "分析结论：确认威胁。",
+        data: {},
+      },
+    ],
+    final_verdict: "confirmed_threat",
+    risk_score: 72,
+    severity: "high",
+    version: 1,
+    generated_by: "llm",
+    generated_at: "2026-07-27T08:10:00Z",
+    updated_at: "2026-07-27T08:10:00Z",
+    report_quality: "complete" as const,
+    degraded: false,
+  };
+}
 
 function makeDetail(overrides: Partial<EventDetailResponse["event"]> = {}): EventDetailResponse {
   return {
@@ -366,6 +413,9 @@ describe("EventDetailPage", () => {
     mockCloseEvent.mockResolvedValue({ data: { event_id: "evt-70", status: "closed" } });
     mockResolveUnknownAction.mockResolvedValue({ data: {} });
     mockGenerateReport.mockResolvedValue({ data: { report: {} } });
+    mockGetReport.mockRejectedValue(
+      new ApiError({ error_code: "not_found", error_message: "report not found" }),
+    );
     mockResolveWriteback.mockResolvedValue({ data: {} });
     mockApproveAction.mockResolvedValue({
       data: {
@@ -1656,6 +1706,54 @@ describe("EventDetailPage", () => {
     expect(screen.queryByTestId("reject-action-act-70")).not.toBeInTheDocument();
   });
 
+  it("renders GET /report when snapshot only has report_generated", async () => {
+    mockGetEvent.mockResolvedValue({
+      data: makeDetail({
+        status: "closed",
+        event_context_snapshot: {
+          ...makeDetail().event.event_context_snapshot,
+          report_generated: true,
+        },
+      }),
+    });
+    mockGetReport.mockResolvedValue({
+      data: { report: makeInvestigationReport() },
+    });
+    renderPage("/events/evt-70#report");
+    expect(await screen.findByTestId("report-viewer")).toBeInTheDocument();
+    expect(screen.getByText("内部泄露调查报告")).toBeInTheDocument();
+    expect(screen.queryByText("报告尚未生成")).not.toBeInTheDocument();
+  });
+
+  it("polls pending memory reviews after close until candidates appear", async () => {
+    mockGetEvent.mockResolvedValue({
+      data: makeDetail({ status: "closed" }),
+    });
+    mockListMemoryReviews
+      .mockResolvedValueOnce({ data: { total: 0, items: [] } })
+      .mockResolvedValueOnce({ data: { total: 0, items: [] } })
+      .mockResolvedValue({
+        data: {
+          total: 1,
+          items: [
+            {
+              review_id: "rev-1",
+              kb_name: "history_case_kb",
+              candidate_type: "history_case",
+              payload: { event_id: "evt-70" },
+              status: "pending",
+              confidence: 0.9,
+              created_at: "2026-08-24T00:00:00Z",
+            },
+          ],
+        },
+      });
+    renderPage();
+    expect(await screen.findByText("异常管理员登录")).toBeInTheDocument();
+    expect(screen.queryByText("待知识审核")).not.toBeInTheDocument();
+    expect(await screen.findByText("待知识审核")).toBeInTheDocument();
+  });
+
   // ---- ISSUE-206: on-demand report generation ---------------------------------
 
   it("generates a report from the empty-state CTA and refreshes", async () => {
@@ -1739,6 +1837,26 @@ describe("EventDetailPage", () => {
     expect(
       await screen.findByText("分析尚未完成，请待事件进入「报告生成」状态后再生成报告。"),
     ).toBeInTheDocument();
+  });
+
+  it("does not pretend a timed-out generation succeeded", async () => {
+    const user = userEvent.setup();
+    mockGetEvent.mockResolvedValue({ data: makeDetail({ status: "reporting" }) });
+    mockGenerateReport.mockRejectedValueOnce(
+      new ApiError({
+        error_code: "llm_timeout",
+        error_message: "LLM request timed out",
+      }),
+    );
+    renderPage("/events/evt-70#report");
+    await screen.findByTestId("report-generate-button");
+
+    await user.click(screen.getByTestId("report-generate-button"));
+
+    expect(
+      await screen.findByText("报告生成超时：模型未写完，不会用模板充数。请稍后重试。"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("报告尚未生成")).toBeInTheDocument();
   });
 
   it("warns when the report is generated but the follow-up refresh fails", async () => {

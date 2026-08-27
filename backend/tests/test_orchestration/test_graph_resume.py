@@ -17,6 +17,7 @@ from app.models.enums import (
 )
 from app.orchestration.graph_resume import (
     _reconcile_verify_resume_patch,
+    maybe_catchup_approval_resume_same_lease,
     prepare_graph_resume_state,
     resume_investigation_from_checkpoint,
 )
@@ -32,12 +33,18 @@ class _SessionFactory:
         status: str,
         *,
         outbox_rows: list[OutboxRow] | None = None,
+        final_verdict: str = "none",
     ) -> None:
         self._status = status
         self._outbox_rows = outbox_rows or []
+        self._final_verdict = final_verdict
 
     def __call__(self) -> _SessionCtx:
-        return _SessionCtx(self._status, outbox_rows=self._outbox_rows)
+        return _SessionCtx(
+            self._status,
+            outbox_rows=self._outbox_rows,
+            final_verdict=self._final_verdict,
+        )
 
 
 class _OutboxExecuteResult:
@@ -54,11 +61,16 @@ class _ScalarSession:
         status: str,
         *,
         outbox_rows: list[OutboxRow] | None = None,
+        final_verdict: str = "none",
     ) -> None:
         self._status = status
         self._outbox_rows = outbox_rows or []
+        self._final_verdict = final_verdict
 
-    async def scalar(self, _stmt: Any) -> str:
+    async def scalar(self, stmt: Any) -> str:
+        rendered = str(stmt)
+        if "final_verdict" in rendered:
+            return self._final_verdict
         return self._status
 
     async def execute(self, _stmt: Any) -> _OutboxExecuteResult:
@@ -71,14 +83,17 @@ class _SessionCtx:
         status: str,
         *,
         outbox_rows: list[OutboxRow] | None = None,
+        final_verdict: str = "none",
     ) -> None:
         self._status = status
         self._outbox_rows = outbox_rows
+        self._final_verdict = final_verdict
 
     async def __aenter__(self) -> _ScalarSession:
         return _ScalarSession(
             self._status,
             outbox_rows=self._outbox_rows,
+            final_verdict=self._final_verdict,
         )
 
     async def __aexit__(self, *_args: Any) -> None:
@@ -259,6 +274,30 @@ async def test_reconcile_verify_resume_keeps_manual_when_no_outbox() -> None:
     )
     assert patch.get("halted") is False
     assert patch.get("verify_need_manual_resolution") is not False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_verify_resume_reenters_verify_after_analyst_terminal_verdict() -> None:
+    """Analyst confirmed_threat with no outbox yet must re-enter Verify."""
+    patch = await _reconcile_verify_resume_patch(
+        _SessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_rows=[],
+            final_verdict="confirmed_threat",
+        ),
+        "evt-analyst-verdict",
+        {
+            "halted": True,
+            "verify_need_manual_resolution": True,
+            "verify_need_writeback_recovery": False,
+            "verify_failed_writebacks": [],
+            "degraded_flags": ["verify_degraded=True"],
+            "disposition_policy": DispositionPolicy.REQUIRED.value,
+        },
+    )
+    assert patch.get("halted") is False
+    assert patch["verify_need_manual_resolution"] is False
+    assert patch["execution_substate"] == ExecutionSubstate.NONE.value
 
 
 @pytest.mark.asyncio
@@ -472,6 +511,7 @@ async def test_resume_raises_when_checkpoint_missing_mid_flight() -> None:
             "evt-no-checkpoint",
             get_super_agent=_get_super_agent,
             get_workflow_runtime=_get_runtime,
+            lease_acquired=True,
         )
 
     assert exc_info.value.error_type == "checkpoint_missing"
@@ -514,6 +554,7 @@ async def test_resume_fallback_execute_investigation_when_graph_never_started() 
             "evt-never-started",
             get_super_agent=_get_super_agent,
             get_workflow_runtime=_get_runtime,
+            lease_acquired=True,
         )
 
     resolve_include.assert_awaited_once()
@@ -618,6 +659,7 @@ async def test_resume_reporting_without_graph_uses_report_only_not_full_restart(
             "evt-247-report-only",
             get_super_agent=AsyncMock(return_value=agent),
             get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+            lease_acquired=True,
         )
 
     execute.assert_not_awaited()
@@ -647,6 +689,7 @@ async def test_resume_closed_or_failed_without_graph_is_noop() -> None:
                 f"evt-247-{status}",
                 get_super_agent=AsyncMock(return_value=agent),
                 get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+                lease_acquired=True,
             )
 
         execute.assert_not_awaited()
@@ -671,6 +714,7 @@ async def test_resume_closed_or_failed_with_graph_is_noop() -> None:
                 f"evt-247-graph-{status}",
                 get_super_agent=AsyncMock(return_value=agent),
                 get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+                lease_acquired=True,
             )
 
         execute.assert_not_awaited()
@@ -700,6 +744,7 @@ async def test_resume_reporting_missing_checkpoint_keeps_reporting_error() -> No
             "evt-247-no-ckpt",
             get_super_agent=AsyncMock(return_value=agent),
             get_workflow_runtime=AsyncMock(return_value=runtime),
+            lease_acquired=True,
         )
 
     assert exc_info.value.error_type == "checkpoint_missing"
@@ -743,6 +788,7 @@ async def test_resume_reporting_with_checkpoint_invokes_graph_not_execute() -> N
             "evt-247-ckpt-reporting",
             get_super_agent=AsyncMock(return_value=agent),
             get_workflow_runtime=AsyncMock(return_value=runtime),
+            lease_acquired=True,
         )
 
     execute.assert_not_awaited()
@@ -773,9 +819,109 @@ async def test_resume_executing_without_graph_still_delegates_execute() -> None:
             "evt-247-executing-fallback",
             get_super_agent=AsyncMock(return_value=agent),
             get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+            lease_acquired=True,
         )
 
     execute.assert_awaited_once_with(
         "evt-247-executing-fallback",
         include_response_execution=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_resume_returns_deferred_when_lease_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    graph = MagicMock()
+    graph.ainvoke = AsyncMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "halted": True,
+                "needs_approval_wait": True,
+                "execution_substate": ExecutionSubstate.WAITING_APPROVAL.value,
+            }
+        )
+    )
+    agent = MagicMock()
+    agent._investigation_graph = graph
+
+    lease = MagicMock()
+    lease.acquire = AsyncMock(return_value=False)
+    monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: lease)
+
+    outcome = await resume_investigation_from_checkpoint(
+        _SessionFactory(EventStatus.EXECUTING_RESPONSE.value),
+        "evt-lease-held",
+        get_super_agent=AsyncMock(return_value=agent),
+        get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+        lease_acquired=False,
+    )
+
+    assert outcome == "deferred"
+    graph.ainvoke.assert_not_called()
+    lease.acquire.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_catchup_resumes_once_from_approval_wait_halt() -> None:
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "halted": True,
+                "needs_approval_wait": True,
+                "execution_substate": ExecutionSubstate.WAITING_APPROVAL.value,
+                "event_status": EventStatus.WAITING_APPROVAL.value,
+            }
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+    agent = MagicMock()
+    agent._investigation_graph = graph
+    runtime = MagicMock()
+    runtime.set_execution_substate = AsyncMock()
+
+    with patch(
+        "app.orchestration.graph_resume.invoke_investigation_graph",
+        new_callable=AsyncMock,
+    ) as invoke:
+        await maybe_catchup_approval_resume_same_lease(
+            _SessionFactory(EventStatus.EXECUTING_RESPONSE.value),
+            "evt-catchup-wait",
+            graph,
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=runtime),
+        )
+
+    invoke.assert_awaited_once()
+    graph.aupdate_state.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_catchup_noop_when_checkpoint_not_halted() -> None:
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "halted": False,
+                "needs_approval_wait": False,
+                "execution_substate": ExecutionSubstate.NONE.value,
+            }
+        )
+    )
+    agent = MagicMock()
+    agent._investigation_graph = graph
+
+    with patch(
+        "app.orchestration.graph_resume.invoke_investigation_graph",
+        new_callable=AsyncMock,
+    ) as invoke:
+        await maybe_catchup_approval_resume_same_lease(
+            _SessionFactory(EventStatus.EXECUTING_RESPONSE.value),
+            "evt-catchup-noop",
+            graph,
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+        )
+
+    invoke.assert_not_awaited()
+    graph.aupdate_state.assert_not_called()

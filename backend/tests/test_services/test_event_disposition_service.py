@@ -1038,6 +1038,40 @@ def test_resolver_false_positive_blocked_when_mixed_verified_and_non_verifiable(
     assert result.need_manual_resolution is True
 
 
+def test_resolver_none_verdict_is_verdict_not_terminal() -> None:
+    from app.services.terminal_disposition_resolver import TerminalDispositionResolver
+
+    resolver = TerminalDispositionResolver()
+    result = resolver.resolve(
+        final_verdict=FinalVerdict.NONE,
+        verification=None,
+        approved_terminal_dispositions=[SourceDisposition.CONTAINED],
+        disposition_only=False,
+        disposition_policy=DispositionPolicy.REQUIRED,
+        writeback_readiness=WritebackReadiness.READY,
+    )
+    assert result.disposition is None
+    assert result.need_manual_resolution is True
+    assert result.skipped_reason == "verdict_not_terminal"
+
+
+def test_resolver_possible_fp_is_verdict_not_terminal() -> None:
+    from app.services.terminal_disposition_resolver import TerminalDispositionResolver
+
+    resolver = TerminalDispositionResolver()
+    result = resolver.resolve(
+        final_verdict=FinalVerdict.POSSIBLE_FALSE_POSITIVE,
+        verification=None,
+        approved_terminal_dispositions=[SourceDisposition.IGNORED],
+        disposition_only=False,
+        disposition_policy=DispositionPolicy.REQUIRED,
+        writeback_readiness=WritebackReadiness.READY,
+    )
+    assert result.disposition is None
+    assert result.need_manual_resolution is True
+    assert result.skipped_reason == "verdict_not_terminal"
+
+
 def test_resolver_false_positive_ignored_when_only_deferred_skipped() -> None:
     """ISSUE-232: deferred_pending_activation must not block FP IGNORED."""
     from app.services.terminal_disposition_resolver import TerminalDispositionResolver

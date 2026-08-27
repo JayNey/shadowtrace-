@@ -12,6 +12,7 @@ from app.agents.verdict_resolver import VerdictResolver
 from app.models.agent_io import (
     CollectionStatus,
     EvidenceOutput,
+    OrgContextMatch,
     RiskAssessment,
     ScoringMode,
     TriageResult,
@@ -142,6 +143,39 @@ def _triage() -> TriageResult:
     )
 
 
+def _org_match(*, match_type: str = "account_exact", kind: str = "account_role") -> OrgContextMatch:
+    return OrgContextMatch(
+        kind=kind,  # type: ignore[arg-type]
+        matched_value="ops-change-bot" if kind != "person_status" else "contractor-temp",
+        explanation="org context hit",
+        citation_id="cit-0c0000aa",
+        chunk_id="chk-orgacct",
+        match_type=match_type,
+        match_confidence=1.0,
+    )
+
+
+def _adjudicate_close_kwargs(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "event_id": "evt-001",
+        "evidence_output": EvidenceOutput(
+            evidence_list=[_auth_evidence(), _asset_evidence()],
+            conflicts=[],
+            gaps=[],
+            success_sources=["identity", "asset"],
+            failed_sources=[],
+            overall_confidence=0.8,
+            collection_status=CollectionStatus.COMPLETED,
+        ),
+        "triage_result": _triage(),
+        "source_snapshot": {"source_tenant_id": "tenant-demo"},
+        "occurred_at": datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
+        "org_context_matches": [_org_match()],
+    }
+    payload.update(overrides)
+    return payload
+
+
 def test_pre_evidence_recommendation_never_close_as_fp() -> None:
     assert _recommendation_for(FP_HIGH_THRESHOLD) == "investigate_with_flag"
     assert _recommendation_for(1.0) == "investigate_with_flag"
@@ -165,26 +199,15 @@ def test_vector_alert_text_excludes_scenario_and_signature() -> None:
 
 def test_post_evidence_close_with_authorization(tmp_path: Path) -> None:
     adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
-    result = adjudicator.adjudicate(
-        event_id="evt-001",
-        evidence_output=EvidenceOutput(
-            evidence_list=[_auth_evidence(), _asset_evidence()],
-            conflicts=[],
-            gaps=[],
-            success_sources=["identity", "asset"],
-            failed_sources=[],
-            overall_confidence=0.8,
-            collection_status=CollectionStatus.COMPLETED,
-        ),
-        triage_result=_triage(),
-        source_snapshot={"source_tenant_id": "tenant-demo"},
-        occurred_at=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
-    )
+    result = adjudicator.adjudicate(**_adjudicate_close_kwargs())
     assert result.recommendation == "close_as_fp"
     assert result.supporting_evidence_ids == ["evd-auth-001"]
     assert "baseline_window_match" in result.matched_conditions
+    assert "org_context_exact_hit" in result.matched_conditions
     assert result.matched_window_id == "cw-test"
     assert result.max_score == 0.9
+    assert result.qualification_level == 4
+    assert result.arbitration == "no_contradiction"
 
 
 def test_close_as_fp_max_score_floor_when_auth_confidence_low(tmp_path: Path) -> None:
@@ -204,9 +227,30 @@ def test_close_as_fp_max_score_floor_when_auth_confidence_low(tmp_path: Path) ->
         triage_result=_triage(),
         source_snapshot={"source_tenant_id": "tenant-demo"},
         occurred_at=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
+        org_context_matches=[_org_match()],
     )
     assert result.recommendation == "close_as_fp"
     assert result.max_score == 0.88
+    assert result.qualification_level == 4
+
+
+def test_unauthorized_asset_group_does_not_close(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        **_adjudicate_close_kwargs(
+            evidence_output=EvidenceOutput(
+                evidence_list=[_auth_evidence(), _asset_evidence(asset_group="finance")],
+                conflicts=[],
+                gaps=[],
+                success_sources=["identity", "asset"],
+                failed_sources=[],
+                overall_confidence=0.8,
+                collection_status=CollectionStatus.COMPLETED,
+            )
+        )
+    )
+    assert result.recommendation != "close_as_fp"
+    assert "baseline_window_match" in result.missing_conditions
 
 
 def test_missing_asset_group_blocks_fp_close(tmp_path: Path) -> None:
@@ -255,7 +299,7 @@ def test_malicious_conflicts_block_fp_close(tmp_path: Path) -> None:
     result = adjudicator.adjudicate(
         event_id="evt-001",
         evidence_output=EvidenceOutput(
-            evidence_list=[_auth_evidence(), _malicious_edr_evidence()],
+            evidence_list=[_auth_evidence(), _asset_evidence(), _malicious_edr_evidence()],
             conflicts=[
                 EvidenceConflict(
                     conflict_id="cfl-1",
@@ -277,6 +321,9 @@ def test_malicious_conflicts_block_fp_close(tmp_path: Path) -> None:
     assert result.recommendation == "investigate"
     assert result.conflicts
     assert "no_malicious_conflicts" in result.missing_conditions
+    assert result.qualification_level == 3
+    assert result.matched_window_id == "cw-test"
+    assert result.arbitration == "malicious_overrides_allowance"
 
 
 @pytest.mark.parametrize(
@@ -295,7 +342,7 @@ def test_malicious_source_conflicts_block_fp_close_without_conflict_record(
     result = adjudicator.adjudicate(
         event_id="evt-001",
         evidence_output=EvidenceOutput(
-            evidence_list=[_auth_evidence(), malicious_evidence],
+            evidence_list=[_auth_evidence(), _asset_evidence(), malicious_evidence],
             conflicts=[],
             gaps=[],
             success_sources=["identity", malicious_evidence.source.value],
@@ -309,6 +356,8 @@ def test_malicious_source_conflicts_block_fp_close_without_conflict_record(
     assert result.recommendation == "investigate", description
     assert result.conflicts
     assert "no_malicious_conflicts" in result.missing_conditions
+    assert result.qualification_level == 3
+    assert result.arbitration == "malicious_overrides_allowance"
 
 
 def test_absence_of_malicious_evidence_is_not_fp_proof(tmp_path: Path) -> None:
@@ -512,11 +561,181 @@ def test_window_match_is_independent_of_scenario_field(tmp_path: Path) -> None:
         evidence_output=evidence,
         triage_result=_triage(),
         source_snapshot=snapshot_with,
+        occurred_at=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
+        org_context_matches=[_org_match()],
     )
     without_scenario = adjudicator.adjudicate(
         event_id="evt-b",
         evidence_output=evidence,
         triage_result=_triage(),
         source_snapshot=snapshot_without,
+        occurred_at=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
+        org_context_matches=[_org_match()],
     )
     assert with_scenario.recommendation == without_scenario.recommendation == "close_as_fp"
+
+
+def test_missing_org_context_does_not_block_close_as_fp(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(**_adjudicate_close_kwargs(org_context_matches=[]))
+    assert result.recommendation == "close_as_fp"
+    assert "org_context_exact_hit" not in result.matched_conditions
+    assert "org_context_exact_hit" not in result.missing_conditions
+
+
+def test_vector_org_match_type_is_not_a_close_gate(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        **_adjudicate_close_kwargs(org_context_matches=[_org_match(match_type="vector")])
+    )
+    assert result.recommendation == "close_as_fp"
+    assert "org_context_exact_hit" not in result.matched_conditions
+
+
+def test_same_account_outside_change_window_does_not_close(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    outside = datetime(2024, 6, 15, 18, 0, tzinfo=UTC)
+    outside_auth = _auth_evidence().model_copy(update={"timestamp": outside})
+    result = adjudicator.adjudicate(
+        **_adjudicate_close_kwargs(
+            evidence_output=EvidenceOutput(
+                evidence_list=[outside_auth, _asset_evidence()],
+                conflicts=[],
+                gaps=[],
+                success_sources=["identity", "asset"],
+                failed_sources=[],
+                overall_confidence=0.8,
+                collection_status=CollectionStatus.COMPLETED,
+            ),
+            occurred_at=outside,
+        )
+    )
+    assert result.recommendation != "close_as_fp"
+    assert "baseline_window_match" in result.missing_conditions
+    assert "time_match" in result.missing_conditions
+    assert "identity_scope_match" not in result.missing_conditions
+    assert result.qualification_level == 1
+
+
+def test_org_hit_alone_does_not_close(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        event_id="evt-001",
+        evidence_output=EvidenceOutput(
+            evidence_list=[],
+            conflicts=[],
+            gaps=[],
+            success_sources=[],
+            failed_sources=[],
+            overall_confidence=0.0,
+            collection_status=CollectionStatus.COMPLETED,
+        ),
+        triage_result=_triage(),
+        source_snapshot={"source_tenant_id": "tenant-demo"},
+        occurred_at=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
+        org_context_matches=[_org_match()],
+    )
+    assert result.recommendation == "no_fp_signal"
+    assert result.recommendation != "close_as_fp"
+    assert result.qualification_level <= 1
+
+
+def test_person_status_hit_is_not_a_close_gate(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        **_adjudicate_close_kwargs(
+            org_context_matches=[_org_match(kind="person_status")],
+        )
+    )
+    assert result.recommendation == "close_as_fp"
+    assert "org_context_exact_hit" not in result.matched_conditions
+    assert result.qualification_level == 4
+
+
+def _endpoint_process(*, process: str, cmdline: str) -> Evidence:
+    return Evidence(
+        evidence_id="evd-proc-001",
+        event_id="evt-001",
+        source=EvidenceSource.ENDPOINT,
+        evidence_type="process",
+        description=cmdline,
+        confidence=0.9,
+        timestamp=datetime(2024, 6, 15, 9, 35, tzinfo=UTC),
+        raw_data={"process": process, "cmdline": cmdline},
+    )
+
+
+def test_encoded_powershell_blocks_fp_close(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        **_adjudicate_close_kwargs(
+            evidence_output=EvidenceOutput(
+                evidence_list=[
+                    _auth_evidence(),
+                    _asset_evidence(),
+                    _endpoint_process(
+                        process="powershell.exe",
+                        cmdline="powershell.exe -EncodedCommand SQBFAFgA",
+                    ),
+                ],
+                conflicts=[],
+                gaps=[],
+                success_sources=["identity", "asset", "endpoint"],
+                failed_sources=[],
+                overall_confidence=0.8,
+                collection_status=CollectionStatus.COMPLETED,
+            )
+        )
+    )
+    assert result.recommendation != "close_as_fp"
+    assert result.qualification_level == 3
+    assert result.arbitration == "malicious_overrides_allowance"
+    assert any("encoded_powershell" in item for item in result.conflicts)
+
+
+def test_bare_powershell_does_not_block_fp_close(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        **_adjudicate_close_kwargs(
+            evidence_output=EvidenceOutput(
+                evidence_list=[
+                    _auth_evidence(),
+                    _asset_evidence(),
+                    _endpoint_process(
+                        process="powershell.exe",
+                        cmdline="powershell.exe Get-Service",
+                    ),
+                ],
+                conflicts=[],
+                gaps=[],
+                success_sources=["identity", "asset", "endpoint"],
+                failed_sources=[],
+                overall_confidence=0.8,
+                collection_status=CollectionStatus.COMPLETED,
+            )
+        )
+    )
+    assert result.recommendation == "close_as_fp"
+    assert result.qualification_level == 4
+
+
+def test_unauthorized_asset_reports_only_failed_scope(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        **_adjudicate_close_kwargs(
+            evidence_output=EvidenceOutput(
+                evidence_list=[_auth_evidence(), _asset_evidence(asset_group="finance")],
+                conflicts=[],
+                gaps=[],
+                success_sources=["identity", "asset"],
+                failed_sources=[],
+                overall_confidence=0.8,
+                collection_status=CollectionStatus.COMPLETED,
+            )
+        )
+    )
+    assert result.recommendation != "close_as_fp"
+    assert result.qualification_level == 2
+    assert "asset_scope_match" in result.missing_conditions
+    assert "time_match" not in result.missing_conditions
+    assert "time_match" in result.matched_conditions

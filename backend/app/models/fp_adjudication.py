@@ -48,6 +48,16 @@ class FpAdjudicationResult(BaseModel):
         default=None,
         description="Confidence score for close_as_fp recommendations (0.0–1.0).",
     )
+    qualification_level: int = Field(
+        default=0,
+        ge=0,
+        le=4,
+        description="Evidence qualification 0–4. close_as_fp only at level 4.",
+    )
+    arbitration: str | None = Field(
+        default=None,
+        description="no_contradiction | malicious_overrides_allowance",
+    )
     adjudicated_at: str | None = None
     source: str = "PostEvidenceFpAdjudicator"
 

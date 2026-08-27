@@ -1699,7 +1699,6 @@ async def _supersede_undeployed_deferred(
         .where(
             orm.Action.event_id == event_id,
             orm.Action.plan_revision == old_revision,
-            orm.Action.tool_name == VIRTUAL_DISPOSITION_TOOL,
             orm.Action.execution_job_id.is_(None),
             orm.Action.status.in_(
                 (

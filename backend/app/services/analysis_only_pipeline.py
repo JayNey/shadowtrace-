@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 
 from celery.exceptions import SoftTimeLimitExceeded
@@ -156,6 +157,7 @@ async def run_rag_stage(
     principal: str | None = None,
     trace_id: str | None = None,
     source_snapshot: dict[str, Any] | None = None,
+    occurred_at: datetime | None = None,
 ) -> tuple[RAGOutput | None, bool]:
     """Invoke RAGAgent between evidence and risk; never raise to callers."""
     resolved_tenant = tenant_id or resolve_tenant_id(source_snapshot)
@@ -168,6 +170,7 @@ async def run_rag_stage(
                 tenant_id=resolved_tenant,
                 principal=principal,
                 trace_id=trace_id,
+                occurred_at=occurred_at,
             )
         )
         if not isinstance(output, RAGOutput):
@@ -219,6 +222,7 @@ class AnalysisOnlyPipeline:
         content_projection_service: Any | None = None,
         convergence_guard: Any | None = None,
         output_quality_evaluator: Any | None = None,
+        knowledge_store: Any | None = None,
     ) -> None:
         self._triage = triage_agent
         self._evidence = evidence_agent
@@ -240,6 +244,7 @@ class AnalysisOnlyPipeline:
         self._content_projection_service = content_projection_service
         self._convergence_guard = convergence_guard
         self._output_quality_evaluator = output_quality_evaluator
+        self._knowledge_store = knowledge_store
 
         # Back-compat aliases for ISSUE-047 unit tests.
         self.triage_agent = triage_agent
@@ -277,6 +282,9 @@ class AnalysisOnlyPipeline:
             )
         finally:
             self._reset_convergence_guard(event_id)
+            pending = [task for task in tuple(self._memory_tasks) if not task.done()]
+            if pending:
+                await asyncio.wait(pending, timeout=45.0)
 
     def _reset_convergence_guard(self, event_id: str) -> None:
         """Release convergence counters for *event_id* after the run.
@@ -403,6 +411,7 @@ class AnalysisOnlyPipeline:
                 if self._context_store is not None and event is None
                 else None
             ),
+            occurred_at=getattr(event, "occurred_at", None) if event is not None else None,
         )
 
         graph_output = await self._run_graph(event_id, evidence_output)
@@ -803,6 +812,7 @@ class AnalysisOnlyPipeline:
             source_snapshot=source_snapshot if isinstance(source_snapshot, dict) else None,
             occurred_at=occurred_at,
             working_memory=fp_wm,
+            knowledge_store=self._knowledge_store,
         )
         return result.model_dump(mode="json")
 

@@ -58,6 +58,22 @@ async def test_run_rag_stage_propagates_explicit_context_fields() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_rag_stage_propagates_occurred_at() -> None:
+    from datetime import UTC, datetime
+
+    agent = _CapturingRAGAgent()
+    occurred = datetime(2024, 6, 15, 9, 30, tzinfo=UTC)
+    await run_rag_stage(
+        agent,
+        event_id="evt-001",
+        triage_result=_triage(),
+        evidence_output=_evidence(),
+        occurred_at=occurred,
+    )
+    assert agent.inputs[0].occurred_at == occurred
+
+
+@pytest.mark.asyncio
 async def test_run_rag_stage_resolves_tenant_from_source_snapshot() -> None:
     agent = _CapturingRAGAgent()
     await run_rag_stage(

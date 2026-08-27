@@ -27,21 +27,21 @@ _BACKEND = _ROOT / "backend"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
+from sqlalchemy import select, update
+
 from app.adapters.mock_xdr import MockXDRSourceAdapter
 from app.core.redis_client import RedisClient
 from app.data_generators.scenarios import (
     SCENARIO_BUILDERS,
     build_scenario,
 )
+from app.db import models as orm
 from app.db.session import dispose_session_provider, get_session_factory
 from app.ingestion.source_ingester import SourceIngester
 from app.models.enums import SourceObjectKind
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import DegradedFlagService
 from app.services.event_service import EventService
-from sqlalchemy import select
-
-from app.db import models as orm
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("seed_mock_xdr_and_ingest")
@@ -75,8 +75,23 @@ async def _snapshot_event_ids() -> set[str]:
         return {str(event_id) for event_id in rows.all()}
 
 
+async def _reset_mock_checkpoints() -> None:
+    """Drop incremental watermarks so historical gold seeds are visible again.
+
+    Empty mock-xdr pages previously advanced ``updated_after`` to wall-clock
+    ``server_time``, after which 2024 scenario objects are skipped.
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        await session.execute(
+            update(orm.SourceCheckpoint).values(watermark=None, cursor=None)
+        )
+        await session.commit()
+
+
 async def _poll_ingest(*, mock_xdr_url: str) -> dict:
     factory = get_session_factory()
+    await _reset_mock_checkpoints()
     redis = RedisClient()
     try:
         store = EventContextStore(redis, factory)

@@ -11,25 +11,18 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.knowledge import KnowledgeChunk, RetrievedChunk
+from app.rag.keyword_aliases import CHINESE_SOC_QUERY_BENCHMARKS, expand_keyword_query
 from app.services.knowledge_store import KnowledgeStore
 
 KB_NAME = "attack_kb"
 
-# P0 mock-stage aliases: MockEmbedder cannot cross-match Chinese queries to English
-# technique text. The keyword leg uses expanded terms until remote/local embeddings
-# are enabled (GitHub issue #522). When ``embedding_mode`` is remote|local,
-# ``search_techniques`` uses vector-only search and ignores this map.
-_KEYWORD_QUERY_ALIASES: dict[str, str] = {
-    "数据外泄": "exfiltration",
-}
-
-# Regression anchors for Chinese SOC analyst queries (issue #522 benchmarks).
-# Each row is (query_text, expected_technique_id, expected_tactic).
-CHINESE_SOC_QUERY_BENCHMARKS: tuple[tuple[str, str, str], ...] = (
-    ("数据外泄", "T1567", "Exfiltration"),
-    ("数据外泄", "T1048", "Exfiltration"),
-    ("数据外泄", "T1041", "Exfiltration"),
-)
+# Re-export so existing tests keep importing from this module.
+__all__ = [
+    "AttackKBService",
+    "CHINESE_SOC_QUERY_BENCHMARKS",
+    "KB_NAME",
+    "_format_content",
+]
 
 
 def _derive_chunk_id(technique_id: str, attack_version: str) -> str:
@@ -127,22 +120,44 @@ class AttackKBService:
             row = result.fetchone()
             return dict(row.metadata) if row else None
 
-    async def search_techniques(self, query_text: str, top_k: int = 5) -> list[RetrievedChunk]:
+    async def search_techniques(
+        self,
+        query_text: str,
+        top_k: int = 5,
+        *,
+        tenant_id: str | None = None,
+        query_plan: Any | None = None,
+    ) -> list[RetrievedChunk]:
         """Search ATT&CK techniques.
 
         * ``embedding_mode=remote|local`` (semantic enabled): pure vector search.
         * ``embedding_mode=mock`` (P0 default): hybrid vector + keyword search with
           the minimal ``_KEYWORD_QUERY_ALIASES`` map for Chinese analyst queries.
         """
+        release_id: str | None = None
+        embedding_release_id: str | None = None
+        if query_plan is not None:
+            tenant_id = (getattr(query_plan, "tenant_id", None) or "").strip() or tenant_id
+            release_id = getattr(query_plan, "active_release_id", None) or None
+            embedding_release_id = getattr(query_plan, "embedding_release_id", None) or None
         if self._store.semantic_search_enabled:
-            # TODO(#644): route through validated KnowledgeQueryPlan + tenant scope.
-            return await self._store.vector_search_query(KB_NAME, query_text, top_k=top_k)
+            return await self._store.vector_search_query(
+                KB_NAME,
+                query_text,
+                top_k=top_k,
+                tenant_id=tenant_id,
+                release_id=release_id,
+                embedding_release_id=embedding_release_id,
+            )
 
         stripped = query_text.strip()
-        keyword_query = _KEYWORD_QUERY_ALIASES.get(stripped, stripped)
+        keyword_query = expand_keyword_query(stripped)
         return await self._store.hybrid_search(
             KB_NAME,
             query_text,
             keyword_query=keyword_query,
             top_k=top_k,
+            tenant_id=tenant_id,
+            release_id=release_id,
+            embedding_release_id=embedding_release_id,
         )

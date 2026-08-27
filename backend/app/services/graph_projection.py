@@ -6,6 +6,8 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
+from app.graph.path_rank import PathRankSignals, rank_attack_paths
+
 MAX_PATH_DEPTH = 6
 MAX_ATTACK_PATHS = 3
 
@@ -38,8 +40,10 @@ def find_attack_paths(
     edges: list[Any],
     max_depth: int = MAX_PATH_DEPTH,
     max_paths: int = MAX_ATTACK_PATHS,
+    *,
+    signals: PathRankSignals | None = None,
 ) -> list[list[str]]:
-    """Discover time-monotonic attack paths with depth-limited DFS."""
+    """Discover time-monotonic attack paths, then rank with KAPR."""
 
     if not edges:
         return []
@@ -60,12 +64,13 @@ def find_attack_paths(
 
     seen: set[str] = set()
     unique: list[list[str]] = []
-    for path in sorted(paths, key=lambda item: (-len(item), str(item))):
+    for path in paths:
         key = "|".join(path)
-        if key not in seen:
-            seen.add(key)
-            unique.append(path)
-    return unique[:max_paths]
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return rank_attack_paths(unique, edges, signals)[:max_paths]
 
 
 def _dfs_chain(

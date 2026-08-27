@@ -21,10 +21,13 @@ from app.db import models as orm
 from app.models.enums import EventStatus, ExecutionSubstate, GraphResumeIntentStatus
 from app.models.graph_resume_intent import (
     ACTIVE_GRAPH_RESUME_STATUSES,
+    APPROVAL_PLAN_RESUME_HOLD_GENERATION,
+    INTENT_KIND_APPROVAL_PLAN_RESUME,
     INTENT_KIND_MANUAL_RESOLUTION_RESUME,
     INTENT_VERSION_ISSUE277_V1,
     MANUAL_HOLD_JOURNAL_FIELD,
     RESOLUTION_SOURCE_ACTION_UNKNOWN,
+    RESOLUTION_SOURCE_APPROVAL_PLAN,
     RESOLUTION_SOURCE_WRITEBACK_AUTO,
     RESOLUTION_SOURCE_WRITEBACK_MANUAL,
     SUBJECT_KIND_ACTION,
@@ -449,6 +452,75 @@ class ManualResolutionService:
                 )
             return self._record_from_row(active)
 
+    async def enqueue_approval_plan_resume_intent(self, event_id: str) -> GraphResumeIntentRecord:
+        """Insert a PENDING approval_plan_resume intent without a MANUAL_RESOLUTION hold.
+
+        Lost-wake path after HTTP approve while the investigation worker still holds
+        the event lease. Distinct from ``create_or_replay_resume_intent`` which
+        requires a hold fence.
+        """
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    event = await session.get(orm.SecurityEvent, event_id, with_for_update=True)
+                    if event is None:
+                        raise ValidationError(
+                            "event not found for approval plan resume intent",
+                            details={"event_id": event_id},
+                        )
+                    active = await session.scalar(
+                        select(orm.GraphResumeIntent)
+                        .where(
+                            orm.GraphResumeIntent.event_id == event_id,
+                            orm.GraphResumeIntent.hold_generation
+                            == APPROVAL_PLAN_RESUME_HOLD_GENERATION,
+                            orm.GraphResumeIntent.status.in_(
+                                [status.value for status in ACTIVE_GRAPH_RESUME_STATUSES]
+                            ),
+                        )
+                        .with_for_update()
+                    )
+                    if active is not None:
+                        return self._record_from_row(active)
+                    row = orm.GraphResumeIntent(
+                        intent_id=new_graph_resume_intent_id(),
+                        event_id=event_id,
+                        intent_kind=INTENT_KIND_APPROVAL_PLAN_RESUME,
+                        intent_version=INTENT_VERSION_ISSUE277_V1,
+                        status=GraphResumeIntentStatus.PENDING.value,
+                        revision=1,
+                        attempt=0,
+                        hold_generation=APPROVAL_PLAN_RESUME_HOLD_GENERATION,
+                        checkpoint_id=event_id,
+                        resolution_source=RESOLUTION_SOURCE_APPROVAL_PLAN,
+                        subject_kind=SUBJECT_KIND_EVENT,
+                        subject_id=event_id,
+                    )
+                    session.add(row)
+                    await session.flush()
+                    return self._record_from_row(row)
+        except IntegrityError:
+            logger.info("approval_plan_resume insert raced event=%s", event_id)
+            async with self._session_factory() as session:
+                raced = await session.scalar(
+                    select(orm.GraphResumeIntent)
+                    .where(
+                        orm.GraphResumeIntent.event_id == event_id,
+                        orm.GraphResumeIntent.hold_generation
+                        == APPROVAL_PLAN_RESUME_HOLD_GENERATION,
+                        orm.GraphResumeIntent.status.in_(
+                            [status.value for status in ACTIVE_GRAPH_RESUME_STATUSES]
+                        ),
+                    )
+                    .order_by(orm.GraphResumeIntent.updated_at.desc())
+                )
+                if raced is None:
+                    raise ValidationError(
+                        "failed to locate approval plan resume intent after race",
+                        details={"event_id": event_id},
+                    ) from None
+                return self._record_from_row(raced)
+
     def schedule_dispatch(
         self,
         *,
@@ -803,28 +875,30 @@ class ManualResolutionService:
                     return False
                 if GraphResumeIntentStatus(row.status) is not GraphResumeIntentStatus.CLAIMED:
                     return False
-                hold = await self._read_manual_hold(session, row.event_id)
-                if hold is None or hold.generation != int(row.hold_generation):
-                    validate_graph_resume_transition(
-                        GraphResumeIntentStatus.CLAIMED,
-                        GraphResumeIntentStatus.SKIPPED,
-                    )
-                    row.status = GraphResumeIntentStatus.SKIPPED.value
-                    row.skip_reason = "stale_hold_generation"
-                    row.claim_owner = None
-                    row.claim_expires_at = None
-                    return False
-                substate = await self._read_execution_substate(session, row.event_id)
-                if substate is not ExecutionSubstate.MANUAL_RESOLUTION:
-                    validate_graph_resume_transition(
-                        GraphResumeIntentStatus.CLAIMED,
-                        GraphResumeIntentStatus.SKIPPED,
-                    )
-                    row.status = GraphResumeIntentStatus.SKIPPED.value
-                    row.skip_reason = "hold_already_cleared"
-                    row.claim_owner = None
-                    row.claim_expires_at = None
-                    return False
+                is_approval_plan = row.intent_kind == INTENT_KIND_APPROVAL_PLAN_RESUME
+                if not is_approval_plan:
+                    hold = await self._read_manual_hold(session, row.event_id)
+                    if hold is None or hold.generation != int(row.hold_generation):
+                        validate_graph_resume_transition(
+                            GraphResumeIntentStatus.CLAIMED,
+                            GraphResumeIntentStatus.SKIPPED,
+                        )
+                        row.status = GraphResumeIntentStatus.SKIPPED.value
+                        row.skip_reason = "stale_hold_generation"
+                        row.claim_owner = None
+                        row.claim_expires_at = None
+                        return False
+                    substate = await self._read_execution_substate(session, row.event_id)
+                    if substate is not ExecutionSubstate.MANUAL_RESOLUTION:
+                        validate_graph_resume_transition(
+                            GraphResumeIntentStatus.CLAIMED,
+                            GraphResumeIntentStatus.SKIPPED,
+                        )
+                        row.status = GraphResumeIntentStatus.SKIPPED.value
+                        row.skip_reason = "hold_already_cleared"
+                        row.claim_owner = None
+                        row.claim_expires_at = None
+                        return False
                 validate_graph_resume_transition(
                     GraphResumeIntentStatus.CLAIMED,
                     GraphResumeIntentStatus.STARTED,
@@ -839,11 +913,18 @@ class ManualResolutionService:
                 raise RuntimeError("resume_runner is not bound")
             # Keep MANUAL_RESOLUTION until resume succeeds so a crash mid-run
             # remains reclaimable (clearing first would fence as hold_already_cleared).
-            await self._resume_runner(event_id)
+            resume_result = await self._resume_runner(event_id)
         except Exception as exc:
             logger.exception("graph resume intent failed intent=%s event=%s", intent_id, event_id)
             await self._mark_failure(intent_id, error=str(exc))
             return False
+
+        if is_approval_plan:
+            if resume_result == "deferred":
+                await self._requeue_deferred(intent_id)
+                return False
+            await self._mark_terminal(intent_id)
+            return True
 
         try:
             await self._clear_manual_resolution_for_resume(event_id, generation)
@@ -857,6 +938,21 @@ class ManualResolutionService:
             )
         await self._mark_terminal(intent_id)
         return True
+
+    async def _requeue_deferred(self, intent_id: str) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(orm.GraphResumeIntent, intent_id, with_for_update=True)
+                if row is None:
+                    return
+                current = GraphResumeIntentStatus(row.status)
+                if current in TERMINAL_GRAPH_RESUME_STATUSES:
+                    return
+                validate_graph_resume_transition(current, GraphResumeIntentStatus.RETRY)
+                row.status = GraphResumeIntentStatus.RETRY.value
+                row.claim_owner = None
+                row.claim_expires_at = None
+                row.updated_at = datetime.now(UTC)
 
     async def _clear_manual_resolution_for_resume(
         self,

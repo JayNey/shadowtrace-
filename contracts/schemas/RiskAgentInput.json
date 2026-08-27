@@ -1170,6 +1170,62 @@
       "title": "KnowledgeReleaseLifecycleState",
       "type": "string"
     },
+    "OrgContextMatch": {
+      "additionalProperties": false,
+      "description": "Exact org-context hit. Evidence only — never auto-closes or sets verdict.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "allowed_destination",
+            "allowed_source",
+            "time_window",
+            "account_role",
+            "person_status",
+            "data_handling",
+            "security_product"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "matched_value": {
+          "title": "Matched Value",
+          "type": "string"
+        },
+        "explanation": {
+          "title": "Explanation",
+          "type": "string"
+        },
+        "citation_id": {
+          "title": "Citation Id",
+          "type": "string"
+        },
+        "chunk_id": {
+          "title": "Chunk Id",
+          "type": "string"
+        },
+        "match_type": {
+          "default": "exact",
+          "title": "Match Type",
+          "type": "string"
+        },
+        "match_confidence": {
+          "default": 1.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Match Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "kind",
+        "matched_value",
+        "explanation",
+        "citation_id",
+        "chunk_id"
+      ],
+      "title": "OrgContextMatch",
+      "type": "object"
+    },
     "PlaybookRef": {
       "additionalProperties": false,
       "description": "Immutable playbook version/hash reference — not a bare playbook_id string.",
@@ -1353,6 +1409,13 @@
           "title": "Playbook Refs",
           "type": "array"
         },
+        "org_context_matches": {
+          "items": {
+            "$ref": "#/$defs/OrgContextMatch"
+          },
+          "title": "Org Context Matches",
+          "type": "array"
+        },
         "citations": {
           "items": {
             "$ref": "#/$defs/Citation"
@@ -1374,6 +1437,17 @@
           "description": "Release-pinned query plans keyed by kb_name (attack_kb, playbook_kb)",
           "title": "Knowledge Query Plan"
         },
+        "retrieval_metrics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetrievalMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "degraded": {
           "default": false,
           "title": "Degraded",
@@ -1381,6 +1455,59 @@
         }
       },
       "title": "RAGOutput",
+      "type": "object"
+    },
+    "RetrievalMetrics": {
+      "description": "RAG-segment timings. Approval / writeback / Celery wait are out of scope.",
+      "properties": {
+        "rewrite_ms": {
+          "default": 0.0,
+          "title": "Rewrite Ms",
+          "type": "number"
+        },
+        "retrieve_ms": {
+          "default": 0.0,
+          "title": "Retrieve Ms",
+          "type": "number"
+        },
+        "rrf_ms": {
+          "default": 0.0,
+          "title": "Rrf Ms",
+          "type": "number"
+        },
+        "rerank_ms": {
+          "default": 0.0,
+          "title": "Rerank Ms",
+          "type": "number"
+        },
+        "total_ms": {
+          "default": 0.0,
+          "title": "Total Ms",
+          "type": "number"
+        },
+        "llm_rewrite_calls": {
+          "default": 0,
+          "title": "Llm Rewrite Calls",
+          "type": "integer"
+        },
+        "org_context_exact_hit": {
+          "default": false,
+          "title": "Org Context Exact Hit",
+          "type": "boolean"
+        },
+        "constraint_channel": {
+          "default": false,
+          "title": "Constraint Channel",
+          "type": "boolean"
+        },
+        "retrieval_action": {
+          "default": "",
+          "description": "sufficient | uncertain | conflict. Empty when unset.",
+          "title": "Retrieval Action",
+          "type": "string"
+        }
+      },
+      "title": "RetrievalMetrics",
       "type": "object"
     },
     "Severity": {

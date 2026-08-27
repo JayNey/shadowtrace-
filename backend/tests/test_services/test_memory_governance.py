@@ -43,6 +43,7 @@ from app.services.case_kb_service import FP_KB_NAME, HISTORY_KB_NAME, CaseKBServ
 from app.services.knowledge_store import KnowledgeStore
 from app.services.memory_governance import PROFILE_KB_NAME, MemoryGovernance
 from app.services.profile_service import ProfileService
+from tests.helpers.knowledge_isolation import PRESERVE_ORG_CONTEXT_DELETE
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.environ.get(
@@ -78,7 +79,7 @@ async def clean_memory_tables(
 ) -> None:
     async with session_factory() as session:
         await session.execute(text("DELETE FROM memory_review"))
-        await session.execute(text("DELETE FROM knowledge_chunk"))
+        await session.execute(PRESERVE_ORG_CONTEXT_DELETE)
         await session.execute(text("DELETE FROM entity_profile"))
         await session.commit()
 

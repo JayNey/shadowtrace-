@@ -603,6 +603,9 @@ async def test_rebuild_merges_late_writeback_receipt(
                     tool_name="",
                     action_level="l1",
                     execution_owner="xdr_managed",
+                    writeback_required=True,
+                    writeback_applicable=True,
+                    writeback_readiness=WritebackReadiness.READY.value,
                 )
             )
             await session.flush()
@@ -752,6 +755,9 @@ async def test_writeback_summary_status_aggregate_priority_order(
                     tool_name="block_ip",
                     action_level="l2",
                     execution_owner="direct_tool",
+                    writeback_required=True,
+                    writeback_applicable=True,
+                    writeback_readiness=WritebackReadiness.READY.value,
                 )
             )
             await session.flush()
@@ -783,6 +789,123 @@ async def test_writeback_summary_status_aggregate_priority_order(
     assert ctx.writeback_summary is not None
     # PENDING outranks CONFIRMED — the cycle is not fully settled.
     assert ctx.writeback_summary.aggregate_status is WritebackStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_writeback_summary_ignores_non_applicable_entity_outboxes(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Entity isolate_host outboxes must not pollute EventContext envelope."""
+    from app.models.action import TERMINAL_DISPOSITION_TOOL
+    from app.models.enums import SourceDisposition
+
+    sfx = _sfx()
+    event_id = await _seed_event(session_factory, disposition_policy="required")
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SourceConnector(
+                    connector_id=f"conn-{sfx}",
+                    source_product="mock_xdr",
+                    display_name="Mock",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.SourceObject(
+                    source_record_id=f"src-{sfx}",
+                    source_product="mock_xdr",
+                    source_tenant_id="t1",
+                    connector_id=f"conn-{sfx}",
+                    source_kind="incident",
+                    source_object_id=f"INC-{sfx}",
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=f"act-ent-{sfx}",
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-ent-{sfx}",
+                    action_category="response",
+                    action_name="isolate host",
+                    tool_name="isolate_host",
+                    action_level="l2",
+                    execution_owner="xdr_managed",
+                    writeback_required=True,
+                    writeback_applicable=False,
+                    writeback_readiness=WritebackReadiness.NOT_REQUIRED.value,
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=f"act-term-{sfx}",
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-term-{sfx}",
+                    action_category="response",
+                    action_name=TERMINAL_DISPOSITION_TOOL,
+                    tool_name=TERMINAL_DISPOSITION_TOOL,
+                    action_level="l1",
+                    execution_owner="xdr_managed",
+                    writeback_required=True,
+                    writeback_applicable=True,
+                    writeback_readiness=WritebackReadiness.READY.value,
+                    writeback_status=WritebackStatus.CONFIRMED.value,
+                    approved_terminal_dispositions=[SourceDisposition.CONTAINED.value],
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-ent-{sfx}",
+                    writeback_id=f"wbk-ent-{sfx}",
+                    disposition_id=f"disp-ent-{sfx}",
+                    action_id=f"act-ent-{sfx}",
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=f"src-{sfx}",
+                    source_locator_hash="e" * 64,
+                    source_sequence=1,
+                    intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                    logical_slot="entity",
+                    idempotency_key=f"idem-ent-{sfx}",
+                    command_payload={},
+                    command_payload_sha256="e" * 64,
+                    delivery_status="delivered",
+                    latest_writeback_status=WritebackStatus.ACCEPTED.value,
+                )
+            )
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-term-{sfx}",
+                    writeback_id=f"wbk-term-{sfx}",
+                    disposition_id=f"disp-term-{sfx}",
+                    action_id=f"act-term-{sfx}",
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=f"src-{sfx}",
+                    source_locator_hash="t" * 64,
+                    source_sequence=2,
+                    intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                    logical_slot="terminal",
+                    idempotency_key=f"idem-term-{sfx}",
+                    command_payload={"disposition": "contained"},
+                    command_payload_sha256="t" * 64,
+                    delivery_status="delivered",
+                    latest_writeback_status=WritebackStatus.CONFIRMED.value,
+                )
+            )
+
+    ctx = await store.rebuild_context(event_id)
+    assert ctx.writeback_summary is not None
+    assert ctx.writeback_summary.aggregate_readiness is WritebackReadiness.READY
+    assert ctx.writeback_summary.aggregate_status is WritebackStatus.CONFIRMED
+    assert ctx.writeback_summary.applicable_action_count == 1
+    assert ctx.writeback_summary.writeback_counts.get(WritebackStatus.ACCEPTED, 0) == 0
+    assert ctx.writeback_summary.writeback_counts.get(WritebackStatus.CONFIRMED) == 1
+    assert ctx.writeback_summary.terminal_event_confirmed is True
 
 
 # --------------------------------------------------------------------------- #

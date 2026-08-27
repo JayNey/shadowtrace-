@@ -39,7 +39,9 @@ const POST_ANALYSIS_STATUSES = new Set([
 ]);
 
 export function hasInvestigationReport(detail: EventDetailResponse): boolean {
-  const report = detail.event.event_context_snapshot?.report;
+  const snap = detail.event.event_context_snapshot;
+  if (snap?.report_generated === true) return true;
+  const report = snap?.report;
   return Boolean(report && typeof report === "object" && Object.keys(report).length > 0);
 }
 

@@ -34,6 +34,7 @@ from app.models.enums import CaseLabel, EventType
 from app.models.knowledge import KnowledgeChunk
 from app.services.case_kb_service import CaseKBService
 from app.services.knowledge_store import KnowledgeStore
+from tests.helpers.knowledge_isolation import PRESERVE_ORG_CONTEXT_DELETE
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 REPO_ROOT = BACKEND_DIR.parent
@@ -82,7 +83,7 @@ async def session_factory(
 async def clean_knowledge(session_factory: async_sessionmaker[AsyncSession]) -> None:
     """Truncate knowledge_chunk before each test for isolation."""
     async with session_factory() as session:
-        await session.execute(text("DELETE FROM knowledge_chunk"))
+        await session.execute(PRESERVE_ORG_CONTEXT_DELETE)
         await session.commit()
 
 
@@ -376,6 +377,13 @@ class TestSeedLoading:
         raw = json.loads(HISTORY_CASES_FILE.read_text(encoding="utf-8"))
         cases = [HistoryCase.model_validate(row) for row in raw]
         assert len(cases) >= 16
+
+        hosts_by_id = {case.case_id: case.key_entities for case in cases}
+        assert "PC-FIN-023" not in hosts_by_id["case-10000003"]
+        assert "zhangsan" not in hosts_by_id["case-10000003"]
+        assert "PC-FIN-023" in hosts_by_id["case-10000017"]
+        assert "7z.exe" in hosts_by_id["case-10000017"]
+        assert "unknown-upload-example.com" in hosts_by_id["case-10000017"]
 
         chunks = [_make_history_chunk(case) for case in cases]
         await knowledge_store.upsert_chunks(HISTORY_KB_NAME, chunks)

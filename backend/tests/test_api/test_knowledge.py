@@ -13,7 +13,6 @@ import pytest_asyncio
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -24,6 +23,7 @@ from app.main import app
 from app.models.knowledge import KnowledgeChunk
 from app.services.knowledge_query_service import KnowledgeQueryService
 from app.services.knowledge_store import KnowledgeStore
+from tests.helpers.knowledge_isolation import TEST_OWNED_CHUNK_DELETE
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.environ.get(
@@ -215,7 +215,7 @@ async def session_factory(
 @pytest_asyncio.fixture
 async def clean_knowledge(session_factory: async_sessionmaker[AsyncSession]) -> None:
     async with session_factory() as session:
-        await session.execute(text("DELETE FROM knowledge_chunk"))
+        await session.execute(TEST_OWNED_CHUNK_DELETE)
         await session.commit()
 
 

@@ -230,6 +230,62 @@ def test_writeback_updated_valid_payload() -> None:
     jsonschema.validate(instance=envelope, schema=doc)  # must not raise
 
 
+def test_approval_required_null_impact_assessment_validates_offline() -> None:
+    """impact_assessment=null must not hit HTTP $ref resolution (S-2)."""
+    from app.core.socketio_manager import _events_schema, _events_schema_registry
+
+    envelope = {
+        "type": "approval_required",
+        "event_id": "evt-20260712-a1b2c3d4",
+        "sequence": 1,
+        "timestamp": "2026-07-12T10:00:00Z",
+        "payload": {
+            "action_id": "act-0a1b2c3d",
+            "action_name": "isolate_host",
+            "impact_assessment": None,
+        },
+    }
+    jsonschema.validate(
+        instance=envelope,
+        schema=_events_schema(),
+        registry=_events_schema_registry(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_ref_resolution_error_does_not_increment_failures() -> None:
+    from app.core.socketio_manager import _SCHEMA_REF_ERRORS, SocketIOManager
+
+    assert _SCHEMA_REF_ERRORS, "expected jsonschema/referencing $ref error types"
+    manager = SocketIOManager(AsyncMock())  # type: ignore[arg-type]
+    manager._consecutive_failures = 0
+    manager._sio.emit = AsyncMock()  # type: ignore[method-assign]
+    manager._increment_sequence = AsyncMock(return_value=1)  # type: ignore[method-assign]
+    manager._disconnect_invalid_sessions = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    ref_error = _SCHEMA_REF_ERRORS[0]("offline $ref failed")
+    with patch(
+        "app.core.socketio_manager.jsonschema.validate",
+        side_effect=ref_error,
+    ):
+        await manager._dispatch(
+            b"shadowtrace:events:evt-ref-err",
+            RedisClient.dumps(
+                {
+                    "message_type": "approval_required",
+                    "payload": {
+                        "action_id": "act-0a1b2c3d",
+                        "action_name": "isolate_host",
+                        "impact_assessment": None,
+                    },
+                }
+            ),
+        )
+
+    assert manager._consecutive_failures == 0
+    manager._sio.emit.assert_not_awaited()
+
+
 def test_envelope_rejects_unknown_type() -> None:
     """An unknown event type must fail schema validation."""
     doc = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))

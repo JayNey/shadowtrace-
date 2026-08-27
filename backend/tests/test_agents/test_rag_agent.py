@@ -10,10 +10,13 @@ import pytest
 from app.agents.rag_agent import (
     RAGAgent,
     _aggregate_citations,
+    _aggregate_retrieval_metrics,
     _build_attack_techniques,
     _build_fp_similarity,
+    _build_org_context_matches,
     _build_playbook_refs,
     _build_similar_cases,
+    _merge_org_context_matches,
 )
 from app.agents.rag_query_builder import RAGQueryBuilder
 from app.core.errors import (
@@ -29,10 +32,10 @@ from app.models.agent_io import (
     RAGOutput,
     TriageResult,
 )
-from app.models.entities import EntitySet, HostEntity, IPEntity, ProcessEntity
+from app.models.entities import AccountEntity, EntitySet, HostEntity, IPEntity, ProcessEntity
 from app.models.enums import EventType, EvidenceSource, Severity
 from app.models.evidence import Evidence
-from app.models.knowledge import RetrievalResult, RetrievedChunk
+from app.models.knowledge import RetrievalMetrics, RetrievalResult, RetrievedChunk
 from app.models.knowledge_release import KnowledgeRelease
 from app.models.workflow import FP_LOW_THRESHOLD
 from tests.test_support.production_settings import production_settings
@@ -190,13 +193,14 @@ def _make_chunk(
     content: str,
     score: float = 0.85,
     metadata: dict | None = None,
+    retrieval_method: str = "reranked",
 ) -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=chunk_id,
         kb_name=kb_name,
         content=content,
         score=score,
-        retrieval_method="reranked",
+        retrieval_method=retrieval_method,
         metadata=metadata or {},
     )
 
@@ -427,6 +431,33 @@ _PLAYBOOK_CITATIONS = [
 ]
 
 
+_ORG_CONTEXT_CHUNKS = [
+    _make_chunk(
+        "org-001",
+        "org_context_kb",
+        "files.corp.internal is an approved internal file-server destination.",
+        score=1.0,
+        retrieval_method="exact",
+        metadata={
+            "kind": "allowed_destination",
+            "domains": ["files.corp.internal"],
+            "matched_value": "files.corp.internal",
+            "match_type": "domain_exact",
+        },
+    ),
+]
+
+_ORG_CONTEXT_CITATIONS = [
+    _make_knowledge_citation(
+        "cit-0c000001",
+        "org-001",
+        "org_context_kb",
+        "approved internal file-server destination",
+        1.0,
+    ),
+]
+
+
 def _make_full_results() -> dict[str, RetrievalResult]:
     return {
         "attack_kb": RetrievalResult(
@@ -449,6 +480,11 @@ def _make_full_results() -> dict[str, RetrievalResult]:
             chunks=_PLAYBOOK_CHUNKS,
             citations=_PLAYBOOK_CITATIONS,
         ),
+        "org_context_kb": RetrievalResult(
+            query="",
+            chunks=_ORG_CONTEXT_CHUNKS,
+            citations=_ORG_CONTEXT_CITATIONS,
+        ),
     }
 
 
@@ -458,7 +494,7 @@ def _make_full_results() -> dict[str, RetrievalResult]:
 
 
 class TestRAGQueryBuilder:
-    def test_builds_four_queries(self):
+    def test_builds_five_queries(self):
         triage = _make_triage_result()
         queries = RAGQueryBuilder.build_queries(triage)
         assert set(queries.keys()) == {
@@ -466,14 +502,19 @@ class TestRAGQueryBuilder:
             "fp_case_kb",
             "history_case_kb",
             "playbook_kb",
+            "org_context_kb",
         }
         for q in queries.values():
             assert isinstance(q, str) and len(q) > 0
+        assert "IP:45.153.12.88" in queries["org_context_kb"]
+        assert "Host:web-server-01" in queries["org_context_kb"]
 
     def test_attack_query_includes_event_type(self):
         triage = _make_triage_result(EventType.DATA_EXFILTRATION)
         queries = RAGQueryBuilder.build_queries(triage)
         assert "data_exfiltration" in queries["attack_kb"]
+        assert "数据外泄" in queries["attack_kb"]
+        assert "exfiltration" in queries["attack_kb"]
 
     def test_attack_query_includes_evidence_behaviors(self):
         triage = _make_triage_result()
@@ -506,11 +547,39 @@ class TestRAGQueryBuilder:
         queries = RAGQueryBuilder.build_queries(triage)
         assert "45.153.12.88" in queries["history_case_kb"]
 
+    def test_history_and_fp_queries_include_account(self):
+        triage = _make_triage_result()
+        triage = triage.model_copy(
+            update={
+                "entities": triage.entities.model_copy(
+                    update={
+                        "accounts": [
+                            AccountEntity(
+                                entity_id="acct-1",
+                                entity_type="account",
+                                username="zhangsan",
+                            )
+                        ]
+                    }
+                )
+            }
+        )
+        queries = RAGQueryBuilder.build_queries(triage)
+        assert "Account:zhangsan" in queries["history_case_kb"]
+        assert "Account:zhangsan" in queries["fp_case_kb"]
+
     def test_playbook_query_includes_event_type_and_severity(self):
         triage = _make_triage_result(EventType.DATA_EXFILTRATION, Severity.HIGH)
         queries = RAGQueryBuilder.build_queries(triage)
         assert "data_exfiltration" in queries["playbook_kb"]
         assert "high" in queries["playbook_kb"]
+
+    def test_host_compromise_query_does_not_use_valid_accounts(self):
+        triage = _make_triage_result(EventType.HOST_COMPROMISE, Severity.HIGH)
+        queries = RAGQueryBuilder.build_queries(triage)
+        assert "valid accounts" not in queries["attack_kb"]
+        assert "credential dumping" in queries["attack_kb"]
+        assert "T1059" in queries["attack_kb"]
 
 
 # --------------------------------------------------------------------------- #
@@ -638,6 +707,28 @@ class TestBuildSimilarCases:
         assert cases[0].event_type == EventType.DATA_EXFILTRATION
         assert cases[0].risk_score == 85
 
+    def test_prefers_same_event_type_when_provided(self):
+        mixed = [
+            *_HISTORY_CHUNKS,
+            _make_chunk(
+                "hist-other",
+                "history_case_kb",
+                "unrelated host compromise",
+                score=0.99,
+                metadata={
+                    "case_id": "case-h-other",
+                    "event_type": "host_compromise",
+                    "summary": "Emotet on another host",
+                    "final_verdict": "confirmed_threat",
+                    "risk_score": 92,
+                },
+            ),
+        ]
+        result = RetrievalResult(query="", chunks=mixed, citations=[])
+        cases = _build_similar_cases(result, event_type=EventType.DATA_EXFILTRATION)
+        assert {item.case_id for item in cases} == {"case-h00001", "case-h00002"}
+        assert all(item.event_type is EventType.DATA_EXFILTRATION for item in cases)
+
     def test_empty_result_returns_empty(self):
         assert _build_similar_cases(None) == []
 
@@ -697,6 +788,250 @@ class TestBuildPlaybookRefs:
         assert _build_playbook_refs(None) == []
 
 
+class TestBuildOrgContextMatches:
+    def test_projects_exact_hits(self):
+        result = RetrievalResult(
+            query="",
+            chunks=_ORG_CONTEXT_CHUNKS,
+            citations=_ORG_CONTEXT_CITATIONS,
+        )
+        matches = _build_org_context_matches(result)
+        assert len(matches) == 1
+        assert matches[0].kind == "allowed_destination"
+        assert matches[0].matched_value == "files.corp.internal"
+        assert matches[0].match_type == "domain_exact"
+        assert matches[0].citation_id == "cit-0c000001"
+
+    def test_skips_unknown_kind(self):
+        chunk = _make_chunk(
+            "org-bad",
+            "org_context_kb",
+            "untyped note",
+            metadata={"kind": "not_a_kind", "matched_value": "x"},
+        )
+        result = RetrievalResult(
+            query="",
+            chunks=[chunk],
+            citations=[_make_knowledge_citation("cit-0c000099", "org-bad", "org_context_kb")],
+        )
+        assert _build_org_context_matches(result) == []
+
+    def test_skips_keyword_guesses_even_with_kind_metadata(self):
+        chunk = _make_chunk(
+            "org-hyb",
+            "org_context_kb",
+            "files.corp.internal is an approved internal file-server destination.",
+            retrieval_method="keyword",
+            metadata={
+                "kind": "allowed_destination",
+                "domains": ["files.corp.internal"],
+                "matched_value": "files.corp.internal",
+                "match_type": "domain_exact",
+            },
+        )
+        result = RetrievalResult(
+            query="",
+            chunks=[chunk],
+            citations=[_make_knowledge_citation("cit-0c000088", "org-hyb", "org_context_kb")],
+        )
+        assert _build_org_context_matches(result) == []
+
+    def test_hybrid_fallback_chunks_are_not_typed_matches(self):
+        for method in ("vector", "reranked", "hybrid"):
+            chunk = _make_chunk(
+                f"org-{method}",
+                "org_context_kb",
+                "files.corp.internal is an approved internal file-server destination.",
+                retrieval_method=method,
+                metadata={
+                    "kind": "allowed_destination",
+                    "domains": ["files.corp.internal"],
+                    "matched_value": "files.corp.internal",
+                    "match_type": "domain_exact",
+                },
+            )
+            result = RetrievalResult(
+                query="",
+                chunks=[chunk],
+                citations=[
+                    _make_knowledge_citation("cit-0c000077", chunk.chunk_id, "org_context_kb")
+                ],
+            )
+            assert _build_org_context_matches(result) == []
+
+    def test_empty_result_returns_empty(self):
+        assert _build_org_context_matches(None) == []
+        assert _build_org_context_matches(RetrievalResult(query="")) == []
+
+    def test_projects_restricted_domain_hits(self):
+        chunk = _make_chunk(
+            "org-deny",
+            "org_context_kb",
+            "unknown-upload-example.com is not an approved destination.",
+            retrieval_method="exact",
+            metadata={
+                "kind": "data_handling",
+                "matched_value": "unknown-upload-example.com",
+                "match_type": "restricted_domain",
+            },
+        )
+        result = RetrievalResult(
+            query="",
+            chunks=[chunk],
+            citations=[_make_knowledge_citation("cit-0c000066", "org-deny", "org_context_kb")],
+        )
+        matches = _build_org_context_matches(result)
+        assert len(matches) == 1
+        assert matches[0].kind == "data_handling"
+        assert matches[0].match_type == "restricted_domain"
+        assert matches[0].matched_value == "unknown-upload-example.com"
+
+    def test_merge_prefers_catalog_then_fills_retrieved(self):
+        from app.models.agent_io import OrgContextMatch
+
+        catalog = [
+            OrgContextMatch(
+                kind="data_handling",
+                matched_value="unknown-upload-example.com",
+                explanation="not approved",
+                citation_id="cit-catalog",
+                chunk_id="chk-deny",
+                match_type="restricted_domain",
+            )
+        ]
+        retrieved = [
+            OrgContextMatch(
+                kind="data_handling",
+                matched_value="unknown-upload-example.com",
+                explanation="retrieved duplicate",
+                citation_id="cit-retrieved",
+                chunk_id="chk-deny",
+                match_type="restricted_domain",
+            ),
+            OrgContextMatch(
+                kind="allowed_destination",
+                matched_value="files.corp.internal",
+                explanation="approved",
+                citation_id="cit-allow",
+                chunk_id="chk-allow",
+                match_type="domain_exact",
+            ),
+        ]
+        merged = _merge_org_context_matches(catalog, retrieved)
+        assert [m.chunk_id for m in merged] == ["chk-deny", "chk-allow"]
+        assert merged[0].citation_id == "cit-catalog"
+
+
+@pytest.mark.asyncio
+async def test_catalog_overlay_fills_matches_when_hybrid_retrieval_has_none() -> None:
+    from datetime import UTC, datetime
+
+    from app.knowledge.org_context_seed import mock_org_context_records, records_to_chunks
+    from app.models.entities import DomainEntity
+    from app.models.knowledge import ListedKnowledgeChunk
+
+    listed = [
+        ListedKnowledgeChunk(
+            chunk_id=chunk.chunk_id,
+            kb_name=chunk.kb_name,
+            content=chunk.content,
+            metadata=chunk.metadata,
+            created_at=datetime(2026, 8, 24, 15, 0, tzinfo=UTC),
+        )
+        for chunk in records_to_chunks(mock_org_context_records())
+    ]
+
+    class _Store:
+        async def list_chunks(self, **kwargs):  # noqa: ANN003
+            page = int(kwargs.get("page") or 1)
+            return listed if page == 1 else []
+
+    class _Retriever:
+        _store = _Store()
+
+    pipeline = _MockPipeline(results=_make_full_results())
+    pipeline._retriever = _Retriever()  # type: ignore[attr-defined]
+    wm = _MockBoundWorkingMemory()
+    agent = RAGAgent(working_memory=wm, pipeline=pipeline)
+    triage = _make_triage_result()
+    triage = triage.model_copy(
+        update={
+            "entities": triage.entities.model_copy(
+                update={
+                    "domains": [
+                        DomainEntity(entity_id="d1", fqdn="unknown-upload-example.com"),
+                    ]
+                }
+            )
+        }
+    )
+    output = await agent._run(
+        RAGAgentInput(
+            event_id="evt-org-overlay",
+            triage_result=triage,
+            tenant_id="tenant-demo",
+        )
+    )
+    assert any(
+        match.kind == "data_handling"
+        and match.match_type == "restricted_domain"
+        and match.matched_value == "unknown-upload-example.com"
+        for match in output.org_context_matches
+    )
+
+
+class TestAggregateRetrievalMetrics:
+    def test_wall_clock_is_max_and_rewrite_calls_are_summed(self):
+        results = {
+            "attack_kb": RetrievalResult(
+                query="",
+                retrieval_metrics=RetrievalMetrics(
+                    rewrite_ms=40.0,
+                    retrieve_ms=12.0,
+                    rrf_ms=1.0,
+                    rerank_ms=3.0,
+                    total_ms=50.0,
+                    llm_rewrite_calls=1,
+                ),
+            ),
+            "org_context_kb": RetrievalResult(
+                query="",
+                retrieval_metrics=RetrievalMetrics(
+                    rewrite_ms=0.0,
+                    retrieve_ms=8.0,
+                    rrf_ms=0.0,
+                    rerank_ms=0.0,
+                    total_ms=9.0,
+                    llm_rewrite_calls=0,
+                    org_context_exact_hit=True,
+                ),
+            ),
+            "fp_case_kb": None,
+        }
+        metrics = _aggregate_retrieval_metrics(results)
+        assert metrics.total_ms == 59.0
+        assert metrics.rewrite_ms == 40.0
+        assert metrics.retrieve_ms == 12.0
+        assert metrics.llm_rewrite_calls == 1
+        assert metrics.org_context_exact_hit is True
+        assert metrics.constraint_channel is False
+
+    def test_wall_clock_falls_back_to_max_without_org_key(self):
+        results = {
+            "attack_kb": RetrievalResult(
+                query="",
+                retrieval_metrics=RetrievalMetrics(total_ms=50.0, constraint_channel=True),
+            ),
+            "fp_case_kb": RetrievalResult(
+                query="",
+                retrieval_metrics=RetrievalMetrics(total_ms=12.0),
+            ),
+        }
+        metrics = _aggregate_retrieval_metrics(results)
+        assert metrics.total_ms == 50.0
+        assert metrics.constraint_channel is True
+
+
 class TestAggregateCitations:
     def test_aggregates_all_citations(self):
         results = {
@@ -704,6 +1039,7 @@ class TestAggregateCitations:
             "fp_case_kb": RetrievalResult(query="", citations=_FP_CITATIONS),
             "history_case_kb": RetrievalResult(query="", citations=_HISTORY_CITATIONS),
             "playbook_kb": RetrievalResult(query="", citations=_PLAYBOOK_CITATIONS),
+            "org_context_kb": RetrievalResult(query="", citations=_ORG_CONTEXT_CITATIONS),
         }
         aggregated = _aggregate_citations(results)
         expected_count = (
@@ -711,6 +1047,7 @@ class TestAggregateCitations:
             + len(_FP_CITATIONS)
             + len(_HISTORY_CITATIONS)
             + len(_PLAYBOOK_CITATIONS)
+            + len(_ORG_CONTEXT_CITATIONS)
         )
         assert len(aggregated) == expected_count
 
@@ -801,6 +1138,8 @@ class TestRAGAgentBasic:
 
         assert len(output.similar_cases) >= 1
         assert len(output.playbook_refs) >= 1
+        assert len(output.org_context_matches) >= 1
+        assert output.org_context_matches[0].kind == "allowed_destination"
 
     @pytest.mark.asyncio
     async def test_citations_aggregated(self):
@@ -832,7 +1171,7 @@ class TestRAGAgentBasic:
         assert "attack_techniques" in stored
 
     @pytest.mark.asyncio
-    async def test_run_issues_four_retrieve_calls(self):
+    async def test_run_issues_five_retrieve_calls(self):
         """Each knowledge base is queried exactly once."""
         wm = _MockBoundWorkingMemory()
         results = _make_full_results()
@@ -841,14 +1180,87 @@ class TestRAGAgentBasic:
 
         await agent._run(_make_input())
 
-        assert len(pipeline.calls) == 4
+        assert len(pipeline.calls) == 5
+        assert pipeline.calls[0]["kb_names"] == ["org_context_kb"]
         called_kbs = {call["kb_names"][0] for call in pipeline.calls}
         assert called_kbs == {
             "attack_kb",
             "fp_case_kb",
             "history_case_kb",
             "playbook_kb",
+            "org_context_kb",
         }
+        org_ctx = pipeline.calls[0]["context"]
+        assert org_ctx.org_constraints == ()
+        other_constraints = [call["context"].org_constraints for call in pipeline.calls[1:]]
+        assert all(other_constraints)
+        assert all(
+            item.kind == "allowed_destination" and item.value == "files.corp.internal"
+            for constraints in other_constraints
+            for item in constraints
+        )
+
+    @pytest.mark.asyncio
+    async def test_org_exact_hit_still_retrieves_attack_kb(self):
+        wm = _MockBoundWorkingMemory()
+        results = _make_full_results()
+        results["org_context_kb"] = results["org_context_kb"].model_copy(
+            update={
+                "retrieval_metrics": RetrievalMetrics(
+                    llm_rewrite_calls=0,
+                    org_context_exact_hit=True,
+                    total_ms=4.0,
+                )
+            }
+        )
+        for kb_name in ("attack_kb", "fp_case_kb", "history_case_kb", "playbook_kb"):
+            results[kb_name] = results[kb_name].model_copy(
+                update={"retrieval_metrics": RetrievalMetrics(llm_rewrite_calls=0, total_ms=10.0)}
+            )
+        pipeline = _MockPipeline(results=results)
+        agent = RAGAgent(working_memory=wm, pipeline=pipeline)
+
+        output = await agent._run(_make_input())
+
+        called_kbs = {call["kb_names"][0] for call in pipeline.calls}
+        assert "attack_kb" in called_kbs
+        assert "org_context_kb" in called_kbs
+        assert output.retrieval_metrics is not None
+        assert output.retrieval_metrics.llm_rewrite_calls == 0
+        assert output.retrieval_metrics.org_context_exact_hit is True
+        assert output.retrieval_metrics.total_ms == 14.0
+        assert output.org_context_matches
+        assert output.attack_techniques
+
+    @pytest.mark.asyncio
+    async def test_conflict_raises_attack_top_k(self):
+        wm = _MockBoundWorkingMemory()
+        pipeline = _MockPipeline(results=_make_full_results())
+        agent = RAGAgent(working_memory=wm, pipeline=pipeline)
+        evidence = EvidenceOutput(
+            evidence_list=[
+                Evidence(
+                    evidence_id="evd-dlp-1",
+                    event_id="evt-001",
+                    source=EvidenceSource.DATA_SECURITY,
+                    evidence_type="file_access",
+                    description="dlp blocked sensitive upload",
+                    confidence=0.9,
+                    raw_data={"dlp_blocked": True},
+                )
+            ],
+            collection_status=CollectionStatus.COMPLETED,
+            overall_confidence=0.8,
+            success_sources=["data_security"],
+        )
+        await agent._run(_make_input(evidence_output=evidence))
+        attack_calls = [call for call in pipeline.calls if call["kb_names"] == ["attack_kb"]]
+        assert attack_calls
+        assert attack_calls[0]["top_k"] == 8
+        assert all(call["context"].has_evidence_conflict for call in pipeline.calls)
+        other = [call for call in pipeline.calls if call["kb_names"] != ["attack_kb"]]
+        assert other
+        assert all(call["top_k"] == 5 for call in other)
 
     @pytest.mark.asyncio
     async def test_run_propagates_retrieval_context(self):
@@ -867,7 +1279,7 @@ class TestRAGAgentBasic:
         await agent._run(input_)
 
         contexts = [call["context"] for call in pipeline.calls]
-        assert len(contexts) == 4
+        assert len(contexts) == 5
         assert all(ctx.event_id == "evt-001" for ctx in contexts)
         assert all(ctx.tenant_id == "tenant-alpha" for ctx in contexts)
         assert all(ctx.principal == "investigation:super_agent" for ctx in contexts)
@@ -933,7 +1345,7 @@ class TestRAGAgentBasic:
 class TestRAGAgentDegraded:
     @pytest.mark.asyncio
     async def test_single_kb_failure_does_not_interrupt(self):
-        """When one KB fails, the other three return results normally."""
+        """When one KB fails, the other four return results normally."""
         wm = _MockBoundWorkingMemory()
         full = _make_full_results()
         results = {
@@ -955,7 +1367,7 @@ class TestRAGAgentDegraded:
         # Similar cases and playbook refs should be present.
         assert len(output.similar_cases) >= 1
         assert len(output.playbook_refs) >= 1
-        # Not fully degraded (3 of 4 KBs succeeded).
+        # Not fully degraded (4 of 5 KBs succeeded).
         assert output.degraded is False
 
     @pytest.mark.asyncio
@@ -967,6 +1379,7 @@ class TestRAGAgentDegraded:
             "fp_case_kb": RuntimeError("DB down"),
             "history_case_kb": RuntimeError("DB down"),
             "playbook_kb": RuntimeError("DB down"),
+            "org_context_kb": RuntimeError("DB down"),
         }
         pipeline = _MockPipeline(results=results)
         agent = RAGAgent(working_memory=wm, pipeline=pipeline)
@@ -979,6 +1392,7 @@ class TestRAGAgentDegraded:
         assert output.fp_similarity.max_score == 0.0
         assert output.similar_cases == []
         assert output.playbook_refs == []
+        assert output.org_context_matches == []
         assert output.citations == []
 
     @pytest.mark.asyncio
@@ -1133,13 +1547,14 @@ class TestRAGAgentTrace:
         trace_svc.log_trace = AsyncMock()
 
         wm = _MockBoundWorkingMemory()
-        # All four KBs fail → degraded=true, agent completes normally.
+        # All five KBs fail → degraded=true, agent completes normally.
         pipeline = _MockPipeline(
             results={
                 "attack_kb": RuntimeError("DB crash"),
                 "fp_case_kb": RuntimeError("DB crash"),
                 "history_case_kb": RuntimeError("DB crash"),
                 "playbook_kb": RuntimeError("DB crash"),
+                "org_context_kb": RuntimeError("DB crash"),
             }
         )
 
@@ -1427,7 +1842,7 @@ class TestRAGAgentReleasePinning:
         assert output.attack_techniques == []
         attack_calls = [c for c in pipeline.calls if c["kb_names"] == ["attack_kb"]]
         assert attack_calls == []
-        assert len([c for c in pipeline.calls if c["kb_names"] != ["attack_kb"]]) == 3
+        assert len([c for c in pipeline.calls if c["kb_names"] != ["attack_kb"]]) == 4
 
     @pytest.mark.asyncio
     async def test_production_blocks_attack_kb_without_active_release(
@@ -1594,6 +2009,7 @@ class TestRAGOutputSchema:
         assert output.fp_similarity.max_score == 0.0
         assert output.similar_cases == []
         assert output.playbook_refs == []
+        assert output.org_context_matches == []
         assert output.citations == []
         assert output.knowledge_query_plan is None
 

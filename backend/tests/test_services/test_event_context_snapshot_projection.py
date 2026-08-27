@@ -210,7 +210,24 @@ def test_project_closed_freeze_extracts_bounded_summary_without_dump() -> None:
                 "prompt": "SYSTEM",
             },
             "report": {"sections": ["huge"]},
-            "rag_output": {"chunks": ["x" * 1000]},
+            "rag_output": {
+                "chunks": ["x" * 1000],
+                "org_context_matches": [
+                    {
+                        "kind": "allowed_destination",
+                        "matched_value": "files.corp.internal",
+                        "explanation": "should-not-appear",
+                        "citation_id": "cit-deadbeef",
+                        "chunk_id": "chk-deadbeef",
+                    }
+                ],
+            },
+            "fp_adjudication": {
+                "recommendation": "close_as_fp",
+                "matched_window_id": "cw-test",
+                "reasoning": "hidden-fp-cot",
+                "supporting_evidence_ids": ["e1"],
+            },
             "risk_assessment": {
                 "risk_score": 40,
                 "evidence_limited": True,
@@ -229,12 +246,22 @@ def test_project_closed_freeze_extracts_bounded_summary_without_dump() -> None:
     assert "evidence_output" not in projected
     assert "report" not in projected
     assert "rag_output" not in projected
+    assert projected["org_context_matches"] == [
+        {"kind": "allowed_destination", "matched_value": "files.corp.internal"}
+    ]
+    assert projected["fp_adjudication"] == {
+        "recommendation": "close_as_fp",
+        "matched_window_id": "cw-test",
+    }
     assert set(projected) <= SNAPSHOT_SUMMARY_KEYS
     blob = orjson.dumps(projected).decode()
     assert "LEAK" not in blob
     assert "SECRET" not in blob
     assert "hidden" not in blob
     assert "SYSTEM" not in blob
+    assert "should-not-appear" not in blob
+    assert "hidden-fp-cot" not in blob
+    assert "cit-deadbeef" not in blob
 
 
 def test_project_snapshot_exposes_bounded_triage_severity_not_payload() -> None:
@@ -270,3 +297,26 @@ def test_project_hard_whitelist_drops_unknown_heavy_keys() -> None:
     assert "scratchpad" not in projected
     assert "execution_plan" not in projected
     assert len(orjson.dumps(projected)) <= 65_536
+
+
+def test_project_snapshot_exposes_fp_qualification_and_arbitration() -> None:
+    projected = project_snapshot_for_api(
+        {
+            "fp_adjudication": {
+                "recommendation": "investigate",
+                "matched_window_id": "cw-test",
+                "qualification_level": 3,
+                "arbitration": "malicious_overrides_allowance",
+                "reasoning": "hidden-fp-cot",
+            }
+        }
+    )
+    assert projected is not None
+    assert projected["fp_adjudication"] == {
+        "recommendation": "investigate",
+        "matched_window_id": "cw-test",
+        "qualification_level": "3",
+        "arbitration": "malicious_overrides_allowance",
+    }
+    blob = orjson.dumps(projected).decode()
+    assert "hidden-fp-cot" not in blob

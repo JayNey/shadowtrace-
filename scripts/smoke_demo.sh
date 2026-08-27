@@ -67,7 +67,7 @@ if [[ -z "${beat_id}" ]]; then
   echo "[smoke-demo] ERROR: scheduler-beat container not found" >&2
   exit 1
 fi
-if ! docker exec "${beat_id}" pgrep -f 'celery.*beat' >/dev/null; then
+if ! docker exec "${beat_id}" python -c "import pathlib; raise SystemExit(0 if b'beat' in pathlib.Path('/proc/1/cmdline').read_bytes() else 1)"; then
   echo "[smoke-demo] ERROR: scheduler-beat process not running" >&2
   exit 1
 fi

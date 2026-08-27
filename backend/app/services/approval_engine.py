@@ -41,6 +41,7 @@ from app.models.workflow import (
     validate_action_status_transition,
 )
 from app.orchestration.graph_invocation import is_in_investigation_graph
+from app.orchestration.graph_resume_observability import ResumeStatus
 from app.services.action_approval_policy import (
     action_level_rank,
     resolve_runtime_max_auto_level,
@@ -61,7 +62,7 @@ logger = logging.getLogger(__name__)
 SYSTEM_TIMEOUT_OPERATOR = "system_timeout"
 APPROVAL_ENGINE_OPERATOR = "ApprovalEngine"
 
-ResumeHook = Callable[[str], Awaitable[None]]
+ResumeHook = Callable[[str], Awaitable[ResumeStatus | None]]
 
 _APPROVAL_TERMINAL = frozenset({ActionStatus.APPROVED, ActionStatus.REJECTED})
 # Lifecycle statuses reachable after a human approve (not the decision itself).
@@ -323,6 +324,7 @@ class ApprovalEngine:
         capability_manifest: CapabilityManifest | None = None,
         resume_investigation: ResumeHook | None = None,
         impact_assessment_service: Any | None = None,
+        manual_resolution: Any | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._event_bus = event_bus
@@ -336,6 +338,7 @@ class ApprovalEngine:
             self._manifest = capability_manifest
         self._resume = resume_investigation
         self._impact_assessment = impact_assessment_service
+        self._manual_resolution = manual_resolution
         self._approval_required_published: set[str] = set()
 
     async def evaluate_plan(
@@ -498,7 +501,7 @@ class ApprovalEngine:
             )
         ).all()
         for record in rows:
-            action = await self._load_action_row(session, record.action_id)
+            action = await self._load_action_row(session, record.action_id, for_update=True)
             if action is None:
                 continue
             if action.status != ActionStatus.WAITING_APPROVAL.value:
@@ -934,9 +937,10 @@ class ApprovalEngine:
                     "defer resume_investigation while graph active event=%s",
                     event_id,
                 )
+                await self._enqueue_approval_plan_resume(event_id)
                 return "deferred"
             try:
-                await self._resume(event_id)
+                resume_result = await self._resume(event_id)
             except Exception as exc:
                 from app.orchestration.graph_resume_observability import GraphResumeFailedError
 
@@ -953,12 +957,56 @@ class ApprovalEngine:
                     exc_info=True,
                 )
                 return "failed"
+            if resume_result == "deferred":
+                await self._enqueue_approval_plan_resume(event_id)
+                return "deferred"
             return "ok"
         logger.warning(
             "resume_investigation not injected; approval facts persisted event=%s",
             event_id,
         )
         return "skipped"
+
+    async def _enqueue_approval_plan_resume(self, event_id: str) -> None:
+        service = self._manual_resolution
+        if service is None:
+            logger.warning(
+                "approval_plan_resume intent not injected; wake may be lost event=%s",
+                event_id,
+            )
+            return
+        enqueue = getattr(service, "enqueue_approval_plan_resume_intent", None)
+        if enqueue is None:
+            logger.warning(
+                "approval_plan_resume enqueue missing on manual_resolution event=%s",
+                event_id,
+            )
+            return
+        try:
+            record = await enqueue(event_id)
+        except Exception:
+            logger.warning(
+                "failed to enqueue approval_plan_resume intent event=%s",
+                event_id,
+                exc_info=True,
+            )
+            return
+        schedule = getattr(service, "schedule_dispatch", None)
+        if schedule is None:
+            return
+        intent_id = getattr(record, "intent_id", None)
+        try:
+            schedule(
+                event_id=event_id,
+                intent_id=intent_id,
+                trigger="approval_plan_resume",
+            )
+        except Exception:
+            logger.warning(
+                "failed to schedule approval_plan_resume dispatch event=%s",
+                event_id,
+                exc_info=True,
+            )
 
     async def _event_status(self, event_id: str) -> EventStatus | None:
         async with self._session_factory() as session:

@@ -354,6 +354,8 @@ export interface Evidence {
   source_ref?: SourceReference | null;
   /** Removed from ordinary API responses (ISSUE-269); kept optional for legacy clients. */
   raw_data?: Record<string, unknown>;
+  /** Compact sanitized source-record fields (ISSUE-269); never the raw blob. */
+  observation_fields?: Record<string, string>;
   schema_version?: string;
   mitre_technique?: string | null;
   is_conflicting: boolean;
@@ -509,6 +511,8 @@ export interface GraphOutput {
   central_entities: string[];
   attack_path_candidates: string[][];
   cross_event_paths?: CrossEventPath[];
+  degraded?: boolean;
+  degraded_reason?: string | null;
 }
 
 export interface CrossEventPath {
@@ -561,6 +565,8 @@ export interface EventContextSnapshot {
   risk_assessment?: RiskAssessment | null;
   /** ISSUE-330: bounded triage severity for explicit dual-source disclosure. */
   triage_severity?: Severity | null;
+  org_context_matches?: Array<{ kind?: string; matched_value?: string }> | null;
+  fp_adjudication?: { recommendation?: string; matched_window_id?: string } | null;
   execution_jobs?: ExecutionJobResponse[];
   execution_summary?: {
     jobs?: ExecutionJobResponse[];
@@ -576,6 +582,8 @@ export interface EventContextSnapshot {
   disposition_receipts?: DispositionReceipt[];
   writeback_summary?: WritebackSummary | null;
   report?: Record<string, unknown> | null;
+  report_generated?: boolean;
+  report_quality?: string | null;
   state_history?: Record<string, unknown>[];
   [key: string]: unknown;
 }

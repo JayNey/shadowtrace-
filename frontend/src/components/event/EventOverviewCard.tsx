@@ -108,6 +108,17 @@ export default function EventOverviewCard({ detail, onRefresh }: Props) {
     finalVerdict: event.final_verdict,
   }) && demotionCodes.length > 0;
 
+  const snapshot = event.event_context_snapshot;
+  const ragOutput = snapshot?.rag_output as
+    | { org_context_matches?: Array<{ kind?: string; matched_value?: string }> }
+    | undefined;
+  const orgMatches = Array.isArray(snapshot?.org_context_matches)
+    ? snapshot.org_context_matches
+    : Array.isArray(ragOutput?.org_context_matches)
+      ? (ragOutput.org_context_matches ?? [])
+      : [];
+  const fpAdjudication = snapshot?.fp_adjudication ?? undefined;
+
   const openModal = () => {
     form.setFieldsValue({
       event_type: event.event_type,
@@ -236,6 +247,25 @@ export default function EventOverviewCard({ detail, onRefresh }: Props) {
             externalUnsynced={event.external_unsynced}
           />
         </Descriptions.Item>
+        {fpAdjudication?.recommendation ? (
+          <Descriptions.Item label="误报裁决">
+            {fpAdjudication.recommendation}
+            {fpAdjudication.matched_window_id
+              ? ` (${fpAdjudication.matched_window_id})`
+              : ""}
+          </Descriptions.Item>
+        ) : null}
+        {orgMatches.length > 0 ? (
+          <Descriptions.Item label="组织上下文">
+            {orgMatches
+              .slice(0, 3)
+              .map((match) =>
+                [match.kind, match.matched_value].filter(Boolean).join(" "),
+              )
+              .filter(Boolean)
+              .join("；")}
+          </Descriptions.Item>
+        ) : null}
       </Descriptions>
 
       <Modal

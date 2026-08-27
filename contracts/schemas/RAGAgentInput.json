@@ -1068,6 +1068,19 @@
       ],
       "default": null,
       "title": "Trace Id"
+    },
+    "occurred_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Occurred At"
     }
   },
   "required": [

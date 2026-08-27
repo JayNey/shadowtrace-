@@ -72,6 +72,7 @@ from app.models.workflow import (
     validate_outbox_delivery_transition,
     validate_writeback_status_transition,
 )
+from app.orchestration.graph_resume_observability import ResumeStatus
 from app.services.context_service import (
     EventContextStore,
     append_context_journal_in_session,
@@ -101,7 +102,7 @@ _TERMINAL_JOB_STATUSES = frozenset(
     }
 )
 
-ResumeInvestigationHook = Callable[[str], Awaitable[None]]
+ResumeInvestigationHook = Callable[[str], Awaitable[ResumeStatus | None]]
 _DEFAULT_LEASE_SECONDS = 30
 _ERROR_DETAIL_MAX_LEN = 500
 OUTBOX_SUPERSEDED_ERROR_CODE = "superseded_by_new_head"

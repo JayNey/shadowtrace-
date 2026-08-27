@@ -589,6 +589,7 @@ async def test_main_scenario_score_ge_70_confirmed_threat(
     assert len(output.risk_factors) == 6
     assert abs(sum(f.weight for f in output.risk_factors) - 1.0) < 1e-9
     assert all(f.reasoning for f in output.risk_factors)
+    assert all("档位=" in f.reasoning for f in output.risk_factors)
     assert agent.last_raw_confidence is not None
     assert output.confidence <= 1.0
     assert output.confidence < agent.last_raw_confidence

@@ -10,10 +10,14 @@ from pydantic import BaseModel, Field
 # Shared corpus chunks (e.g. playbook_soar) are visible to all tenants in strict mode.
 GLOBAL_KB_TENANT_ID = "__global__"
 
-KnowledgeKbName = Literal["attack_kb", "fp_case_kb", "history_case_kb", "playbook_kb"]
+KnowledgeKbName = Literal[
+    "attack_kb", "fp_case_kb", "history_case_kb", "playbook_kb", "org_context_kb"
+]
+
+ORG_CONTEXT_KB_NAME = "org_context_kb"
 
 KNOWLEDGE_KB_NAMES: frozenset[str] = frozenset(
-    {"attack_kb", "fp_case_kb", "history_case_kb", "playbook_kb"}
+    {"attack_kb", "fp_case_kb", "history_case_kb", "playbook_kb", ORG_CONTEXT_KB_NAME}
 )
 
 
@@ -21,7 +25,10 @@ class KnowledgeChunk(BaseModel):
     """A chunk of knowledge to be stored and embedded."""
 
     chunk_id: str = Field(..., description="chk-{8 hex}")
-    kb_name: str = Field(..., description="attack_kb | fp_case_kb | history_case_kb | playbook_kb")
+    kb_name: str = Field(
+        ...,
+        description="attack_kb | fp_case_kb | history_case_kb | playbook_kb | org_context_kb",
+    )
     content: str = Field(..., description="Plain-text chunk body")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Arbitrary metadata")
 
@@ -44,7 +51,10 @@ class RetrievedChunk(BaseModel):
     content: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     score: float = Field(..., description="Normalized 0-1 relevance score (RRF or rerank)")
-    retrieval_method: str = Field(..., description="'vector', 'keyword', 'hybrid', or 'reranked'")
+    retrieval_method: str = Field(
+        ...,
+        description="'vector', 'keyword', 'hybrid', 'reranked', or 'exact'",
+    )
     raw_rrf_score: float = Field(default=0.0, description="Raw RRF score before normalization")
     created_at: datetime | None = Field(
         default=None,
@@ -67,6 +77,23 @@ class Citation(BaseModel):
     object_id: str | None = Field(default=None, description="Stable object id within release")
 
 
+class RetrievalMetrics(BaseModel):
+    """RAG-segment timings. Approval / writeback / Celery wait are out of scope."""
+
+    rewrite_ms: float = 0.0
+    retrieve_ms: float = 0.0
+    rrf_ms: float = 0.0
+    rerank_ms: float = 0.0
+    total_ms: float = 0.0
+    llm_rewrite_calls: int = 0
+    org_context_exact_hit: bool = False
+    constraint_channel: bool = False
+    retrieval_action: str = Field(
+        default="",
+        description="sufficient | uncertain | conflict. Empty when unset.",
+    )
+
+
 class RetrievalResult(BaseModel):
     """Complete result from the RAG retrieval pipeline (ISSUE-045)."""
 
@@ -79,3 +106,4 @@ class RetrievalResult(BaseModel):
         default=None,
         description="Pinned release ids written to trace/decision artifacts",
     )
+    retrieval_metrics: RetrievalMetrics | None = None

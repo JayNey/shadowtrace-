@@ -56,6 +56,38 @@ def test_from_rag_input_uses_explicit_fields() -> None:
     assert ctx.principal == "investigation:super_agent"
     assert ctx.event_id == "evt-test-001"
     assert ctx.trace_id == "abc123"
+    assert ctx.org_constraints == ()
+
+
+def test_from_rag_input_threads_occurred_at() -> None:
+    from datetime import UTC, datetime
+
+    occurred = datetime(2024, 6, 15, 2, 30, tzinfo=UTC)
+    ctx = RetrievalContext.from_rag_input(_rag_input(occurred_at=occurred))
+    assert ctx.org_context_facts is not None
+    assert ctx.org_context_facts.now == occurred
+
+
+def test_from_rag_input_flags_evidence_conflict() -> None:
+    from app.models.enums import EvidenceSource
+    from app.models.evidence import Evidence
+
+    evidence = EvidenceOutput(
+        collection_status=CollectionStatus.COMPLETED,
+        evidence_list=[
+            Evidence(
+                evidence_id="evd-ti-1",
+                event_id="evt-test-001",
+                source=EvidenceSource.THREAT_INTEL,
+                evidence_type="indicator",
+                description="malicious ip",
+                confidence=0.9,
+                raw_data={"ti_malicious": True},
+            )
+        ],
+    )
+    ctx = RetrievalContext.from_rag_input(_rag_input(evidence_output=evidence))
+    assert ctx.has_evidence_conflict is True
 
 
 def test_from_rag_input_falls_back_to_settings_default_tenant() -> None:

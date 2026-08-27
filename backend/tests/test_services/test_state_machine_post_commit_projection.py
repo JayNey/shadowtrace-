@@ -26,6 +26,7 @@ from app.services.degraded_flag_service import apply_flag_to_list
 from app.services.state_machine_service import (
     STATE_TRANSITION_PROJECTION_DEGRADED_FLAG,
     PostCommitProjectionOutcome,
+    ProjectionFailure,
     StateMachineService,
 )
 
@@ -414,6 +415,25 @@ async def test_returned_degraded_is_distinct_from_direct_exception(
         flag.startswith(f"{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}=")
         for flag in state.row.degraded_flags
     )
+
+
+@pytest.mark.asyncio
+async def test_side_effect_convergence_degraded_does_not_set_redis_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, state, _store = _build_service(monkeypatch)
+    outcome = PostCommitProjectionOutcome(
+        committed=True,
+        projection_id="audit:sec",
+        failures=(ProjectionFailure(step="side_effect_convergence", mode="returned_degraded"),),
+        attempts=1,
+    )
+    await service._mark_projection_degraded(state.row.event_id, outcome)
+    assert any(
+        flag.startswith(f"{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}=")
+        for flag in state.row.degraded_flags
+    )
+    assert "redis_context_unavailable=true" not in state.row.degraded_flags
 
 
 @pytest.mark.asyncio

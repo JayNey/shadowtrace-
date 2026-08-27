@@ -1213,6 +1213,39 @@ async def test_evaluate_plan_defers_resume_while_graph_active(
 
 
 @pytest.mark.asyncio
+async def test_evaluate_plan_lease_deferred_is_not_ok_and_enqueues_wake(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    state_machine: StateMachineService,
+    fake_bus: FakeEventBus,
+    cleanup: None,
+) -> None:
+    resume = AsyncMock(return_value="deferred")
+    enqueue = AsyncMock()
+    manual = MagicMock()
+    manual.enqueue_approval_plan_resume_intent = enqueue
+    engine = ApprovalEngine(
+        session_factory,
+        event_bus=fake_bus,  # type: ignore[arg-type]
+        state_machine=state_machine,
+        resume_investigation=resume,
+        capability_manifest=build_mock_capability_manifest(),
+        manual_resolution=manual,
+    )
+    event_id = await _create_event(session_factory, store)
+    await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L0),
+    )
+    result = await engine.evaluate_plan(event_id, 1, _risk())
+    assert result.needs_wait is False
+    assert result.resume_deferred is True
+    resume.assert_awaited_once_with(event_id)
+    enqueue.assert_awaited_once_with(event_id)
+
+
+@pytest.mark.asyncio
 async def test_evaluate_plan_resume_hook_called_when_fully_decided(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,
@@ -1283,6 +1316,7 @@ async def test_timeout_all_reject_resume_keeps_reporting_without_full_restart(
             eid,
             get_super_agent=AsyncMock(return_value=agent),
             get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+            lease_acquired=True,
         )
 
     engine = ApprovalEngine(

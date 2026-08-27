@@ -2,26 +2,38 @@
   "content": {
     "factors": {
       "asset_impact": {
+        "rubric_id": "departmental_high",
+        "lean": "high",
         "score": 82,
         "reason": "DEV-WKS-012 developer endpoint running suspicious ransomware-stage binary chain"
       },
       "behavior_anomaly": {
+        "rubric_id": "destructive_or_exfil",
+        "lean": "mid",
         "score": 90,
         "reason": "Encoded PowerShell and ransomware-like process spawn sequence is highly anomalous"
       },
       "evidence_confidence": {
+        "rubric_id": "completed_consistent",
+        "lean": "high",
         "score": 84,
         "reason": "Endpoint and network telemetry corroborate malicious process execution"
       },
       "attack_stage": {
+        "rubric_id": "impact_ransom",
+        "lean": "mid",
         "score": 92,
         "reason": "Activity reaches execution and impact staging consistent with ransomware prep"
       },
       "data_sensitivity": {
+        "rubric_id": "confidential_business",
+        "lean": "high",
         "score": 76,
         "reason": "Developer workstation may hold source code and internal build artifacts"
       },
       "threat_intel": {
+        "rubric_id": "matched_technique",
+        "lean": "high",
         "score": 80,
         "reason": "External C2 domain and malicious_process keyword align with high-risk intel"
       }

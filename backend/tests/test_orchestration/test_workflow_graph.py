@@ -758,8 +758,47 @@ def test_remaining_route_truth_tables() -> None:
         == ROUTE_RESPONSE
     )
     assert (
+        route_after_risk(
+            _base_state(
+                final_verdict=FinalVerdict.FALSE_POSITIVE.value,
+                disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
+                defer_response_execution=False,
+            )
+        )
+        == ROUTE_REPORT
+    )
+    assert (
+        route_after_risk(
+            _base_state(
+                final_verdict=FinalVerdict.FALSE_POSITIVE.value,
+                disposition_policy=DispositionPolicy.REQUIRED.value,
+                disposition_only_intent=True,
+                defer_response_execution=False,
+            )
+        )
+        == ROUTE_RESPONSE
+    )
+    assert (
+        route_after_risk(
+            _base_state(
+                final_verdict=FinalVerdict.NONE.value,
+                defer_response_execution=False,
+            )
+        )
+        == ROUTE_RESPONSE
+    )
+    assert (
         route_after_report(_base_state(disposition_policy=DispositionPolicy.REQUIRED.value))
         == ROUTE_HALT
+    )
+    assert (
+        route_after_report(
+            _base_state(
+                disposition_policy=DispositionPolicy.REQUIRED.value,
+                escalated=True,
+            )
+        )
+        == ROUTE_CLOSE
     )
     assert (
         route_after_report(
@@ -879,6 +918,65 @@ async def test_graph_replan_one_cycle_then_success() -> None:
     assert final["escalated"] is False
     assert NODE_CLOSE in trace
     assert len(verify_agent.calls) == 2
+    assert machine.status is EventStatus.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_close_node_runs_memory_after_graph_owned_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Human-approve resume CLOSES in close_node; memory must still enqueue."""
+    called: list[str] = []
+
+    def _fake_spawn(event_id: str, **_kwargs: Any) -> None:
+        called.append(event_id)
+
+    monkeypatch.setattr(
+        "app.services.memory_after_close.spawn_memory_after_close",
+        _fake_spawn,
+    )
+    agents = _agents()
+    agents["memory_agent"] = object()
+    machine = FakeStateMachine()
+    final = await build_investigation_graph(agents, _services(machine)).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-memory-after-close"}},
+    )
+    assert NODE_CLOSE in final["node_trace"]
+    assert machine.status is EventStatus.CLOSED
+    assert called == ["evt-graph-001"]
+
+
+@pytest.mark.asyncio
+async def test_close_node_closes_without_memory_agent() -> None:
+    machine = FakeStateMachine()
+    final = await build_investigation_graph(_agents(), _services(machine)).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-memory-missing-agent"}},
+    )
+    assert NODE_CLOSE in final["node_trace"]
+    assert machine.status is EventStatus.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_close_node_closes_when_memory_spawn_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("spawn failed")
+
+    monkeypatch.setattr(
+        "app.services.memory_after_close.spawn_memory_after_close",
+        _boom,
+    )
+    agents = _agents()
+    agents["memory_agent"] = object()
+    machine = FakeStateMachine()
+    final = await build_investigation_graph(agents, _services(machine)).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-memory-spawn-raises"}},
+    )
+    assert NODE_CLOSE in final["node_trace"]
     assert machine.status is EventStatus.CLOSED
 
 
@@ -1065,6 +1163,30 @@ async def test_deferred_response_not_required_reaches_closed() -> None:
         NODE_CLOSE,
     ]
     assert machine.status is EventStatus.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_false_positive_not_required_skips_entity_response() -> None:
+    """Confirmed FP + not_required must not enter PLANNING_RESPONSE under full_loop."""
+    machine = FakeStateMachine()
+    services = _services(machine)
+    final = await build_investigation_graph(_agents(), services).ainvoke(
+        _base_state(
+            final_verdict=FinalVerdict.FALSE_POSITIVE.value,
+            disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
+            defer_response_execution=False,
+            fp_adjudication={"recommendation": "close_as_fp"},
+        ),
+        {"configurable": {"thread_id": "evt-fp-no-entity-response"}},
+    )
+    assert NODE_RESPONSE not in final["node_trace"]
+    assert NODE_REPORT in final["node_trace"]
+    assert NODE_CLOSE in final["node_trace"]
+    assert machine.status is EventStatus.CLOSED
+    assert all(
+        reason != "investigation:plan_response"
+        for _event_id, _target, reason in machine.transitions
+    )
 
 
 @pytest.mark.asyncio
@@ -1708,6 +1830,66 @@ async def test_approval_halts_at_wait_node_not_before() -> None:
     assert final["execution_substate"] == ExecutionSubstate.WAITING_APPROVAL.value
     # approval_node should have run and set needs_approval_wait
     assert NODE_APPROVAL in final["node_trace"]
+
+
+class _ScalarStatusSession:
+    def __init__(self, status: str) -> None:
+        self._status = status
+
+    async def scalar(self, _stmt: Any) -> str:
+        return self._status
+
+    async def __aenter__(self) -> _ScalarStatusSession:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+
+class _ScalarStatusSessionFactory:
+    def __init__(self, status: str) -> None:
+        self._status = status
+
+    def __call__(self) -> _ScalarStatusSession:
+        return _ScalarStatusSession(self._status)
+
+
+@pytest.mark.asyncio
+async def test_approval_wait_node_skips_waiting_substate_when_already_executing() -> None:
+    """B-1′: HTTP approve already moved DB to executing_response before halt."""
+    from app.models.workflow import validate_execution_substate
+
+    class _HostAwareRuntime(FakeRuntime):
+        async def set_execution_substate(
+            self,
+            event_id: str,
+            substate: ExecutionSubstate,
+            *,
+            event_status: EventStatus,
+        ) -> None:
+            validate_execution_substate(
+                EventStatus.EXECUTING_RESPONSE,
+                ExecutionSubstate.NONE,
+                substate,
+            )
+            await super().set_execution_substate(
+                event_id,
+                substate,
+                event_status=event_status,
+            )
+
+    runtime = _HostAwareRuntime()
+    services = _services(runtime=runtime)
+    services["session_factory"] = _ScalarStatusSessionFactory(EventStatus.EXECUTING_RESPONSE.value)
+    graph = build_investigation_graph(_agents(), services)
+    node = graph.nodes[NODE_APPROVAL_WAIT]
+    result = await node.ainvoke(_base_state(event_id="evt-wait-already-exec"))
+    state = result if isinstance(result, dict) else getattr(result, "values", result)
+    assert state["halted"] is True
+    assert state["execution_substate"] == ExecutionSubstate.NONE.value
+    assert state["needs_approval_wait"] is False
+    assert ExecutionSubstate.WAITING_APPROVAL not in runtime.substates
+    assert ExecutionSubstate.NONE in runtime.substates
 
 
 @pytest.mark.asyncio

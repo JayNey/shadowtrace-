@@ -30,6 +30,7 @@ from app.core.llm.mock_client import MockLLMClient
 from app.core.redis_client import RedisClient
 from app.data_generators.scenarios import build_scenario, write_scenario_artifacts
 from app.ingestion.source_ingester import SourceIngester
+from app.knowledge.org_context_seed import seed_org_context_store
 from app.mock_xdr.api import create_app
 from app.mock_xdr.state import MockXDRState
 from app.models.tool_meta import ToolResult, ToolResultStatus
@@ -332,6 +333,20 @@ class FailingLLMClient:
 _RAG_PIPELINE_UNSET = object()
 
 
+@pytest_asyncio.fixture
+async def seeded_org_context_kb(
+    session_factory: async_sessionmaker[AsyncSession],
+    e2e_settings: Settings,
+) -> None:
+    """Explicit mock org-context seed for e2e (not the FP hot path)."""
+    embed_service = EmbeddingService(e2e_settings)
+    store = KnowledgeStore(session_factory, embed_service)
+    try:
+        await seed_org_context_store(store, e2e_settings)
+    finally:
+        await embed_service.close()
+
+
 @pytest.fixture
 def e2e_tool_executor(tool_executor: Any, budget_service: BudgetService) -> Any:
     tool_executor.budget_service = budget_service
@@ -352,6 +367,7 @@ def build_analysis_pipeline(
     agent_trace_service: AgentTraceService,
     e2e_settings: Settings,
     e2e_tool_executor: Any,
+    seeded_org_context_kb: None,
 ) -> Callable[..., tuple[AnalysisOnlyPipeline, EvidenceProjection]]:
     """Factory for ISSUE-039 analysis-only pipelines."""
 
@@ -449,6 +465,7 @@ def build_analysis_pipeline(
                 degraded_flags=degraded_flags,
                 blocking_enabled=e2e_settings.output_quality_blocking,
             ),
+            knowledge_store=knowledge_store,
         )
         projection = EvidenceProjection(session_factory)
         return pipeline, projection
@@ -469,6 +486,7 @@ def build_super_agent(
     agent_trace_service: AgentTraceService,
     e2e_settings: Settings,
     e2e_tool_executor: Any,
+    seeded_org_context_kb: None,
 ) -> Callable[..., tuple[Any, EvidenceProjection]]:
     """Factory for ISSUE-054 graph-mode SuperAgent (no distributed lease in tests)."""
     from app.agents.planner_agent import PlannerAgent

@@ -318,11 +318,8 @@ describe("EventListPage", () => {
     const btn = screen.getByTestId("trigger-investigation-evt-1");
     await user.click(btn);
     expect(await screen.findByTestId("investigate-mode-modal")).toBeInTheDocument();
-    // ISSUE-206/204: the report-generation toggle defaults OFF, and checking
-    // it sends generate_report=true to the investigate API.
+    // ISSUE-204: report-generation toggle defaults ON so investigate can CLOSED.
     const toggle = screen.getByTestId("investigate-generate-report");
-    expect(toggle).not.toBeChecked();
-    await user.click(toggle);
     expect(toggle).toBeChecked();
     await user.click(screen.getByText("开始调查"));
 
@@ -356,7 +353,7 @@ describe("EventListPage", () => {
     await waitFor(() =>
       expect(mockTriggerInvestigation).toHaveBeenCalledWith("evt-1", {
         includeResponseExecution: false,
-        generateReport: false,
+        generateReport: true,
       }),
     );
     // Warning hint should appear
@@ -480,7 +477,7 @@ describe("EventListPage", () => {
     await waitFor(() =>
       expect(mockTriggerInvestigation).toHaveBeenCalledWith("evt-1", {
         includeResponseExecution: true,
-        generateReport: false,
+        generateReport: true,
       }),
     );
   });
@@ -600,7 +597,7 @@ describe("EventListPage", () => {
     await waitFor(() =>
       expect(mockTriggerInvestigation).toHaveBeenCalledWith("evt-1", {
         includeResponseExecution: false,
-        generateReport: false,
+        generateReport: true,
       }),
     );
     expect(await screen.findByTestId("celery-task-evt-1")).toHaveTextContent(

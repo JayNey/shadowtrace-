@@ -40,7 +40,7 @@ from app.models.enums import (
     WritebackReadiness,
     WritebackStatus,
 )
-from app.models.evidence import EvidenceSafeProjection
+from app.models.evidence import EvidenceConflict, EvidenceSafeProjection
 from app.models.report import InvestigationReport, ReportSection
 
 # EventListItem / EventSummary live in app.models.security_event (ISSUE-094 §2)
@@ -123,6 +123,33 @@ class EventCloseRequest(_StrictRequest):
     final_verdict: FinalVerdict | None = None
     need_investigation: bool | None = None
     force_local_close: bool = False
+
+
+class EventFinalVerdictRequest(_StrictRequest):
+    """Analyst terminal verdict while VERIFYING is held for manual resolution."""
+
+    final_verdict: FinalVerdict
+    reason: str
+    resume: bool = True
+    operation_id: str | None = Field(
+        default=None,
+        description="Optional idempotency key for graph resume after the verdict write.",
+    )
+
+    @field_validator("final_verdict")
+    @classmethod
+    def _require_terminal_verdict(cls, value: FinalVerdict) -> FinalVerdict:
+        if value not in {FinalVerdict.FALSE_POSITIVE, FinalVerdict.CONFIRMED_THREAT}:
+            raise ValueError("final_verdict must be false_positive or confirmed_threat")
+        return value
+
+
+class EventFinalVerdictResponse(BaseModel):
+    event_id: str
+    status: EventStatus
+    final_verdict: FinalVerdict
+    execution_substate: str | None = None
+    resume_status: Literal["queued", "not_held", "skipped"] = "skipped"
 
 
 class ActionApproveRequest(_StrictRequest):
@@ -474,6 +501,7 @@ class EventEvidenceResponse(BaseModel):
 
     event_id: str
     evidence_list: list[EvidenceSafeProjection] = Field(default_factory=list)
+    conflicts: list[EvidenceConflict] = Field(default_factory=list)
     gaps: list[EvidenceGapResponse] = Field(default_factory=list)
     collection_status: CollectionStatus
     success_sources: list[str] = Field(default_factory=list)
@@ -511,7 +539,7 @@ class ActionOperationResponse(BaseModel):
     status: str
     decision_id: str | None = None
     message: str = ""
-    resume_status: Literal["ok", "failed", "skipped"] | None = None
+    resume_status: Literal["ok", "failed", "skipped", "deferred"] | None = None
     degraded: bool | None = None
 
 

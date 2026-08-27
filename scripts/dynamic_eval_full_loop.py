@@ -51,13 +51,6 @@ from dynamic_eval_approve import (  # noqa: E402
     select_pending_actions,
     unwrap_event_detail_payload,
 )
-from strict_closed_acceptance import (  # noqa: E402
-    STRICT_ASSERT_POLL_S as _STRICT_ASSERT_POLL_S,
-    assert_strict_closed_acceptance,
-    get_event_detail,
-    list_all_event_actions,
-    strict_assert_budget as _strict_assert_budget,
-)
 from dynamic_eval_diagnostics import (  # noqa: E402
     collect_event_diagnostics,
     format_eval_failure_message,
@@ -65,6 +58,16 @@ from dynamic_eval_diagnostics import (  # noqa: E402
 from dynamic_eval_profiles import (  # noqa: E402
     profile_for_scenario,
     scenario_requires_demo_baseline,
+)
+from strict_closed_acceptance import (  # noqa: E402
+    STRICT_ASSERT_POLL_S as _STRICT_ASSERT_POLL_S,
+)
+from strict_closed_acceptance import (  # noqa: E402
+    assert_strict_closed_acceptance,
+    list_all_event_actions,  # noqa: F401  # re-export for gold-path tests
+)
+from strict_closed_acceptance import (  # noqa: E402
+    strict_assert_budget as _strict_assert_budget,
 )
 
 # Demo scenarios from bootstrap / ISSUE-088. Gold path uses one at a time by default.
@@ -199,7 +202,7 @@ def seed_via_compose(
         "--instance",
         str(instance),
     ]
-    print(f"[dynamic-eval] seeding via compose: scenario={scenario}")
+    print(f"[dynamic-eval] seeding via compose: scenario={scenario}", file=sys.stderr, flush=True)
     proc = subprocess.run(cmd, cwd=_ROOT_DIR, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise RuntimeError(
@@ -249,6 +252,23 @@ def parse_seed_stdout(stdout: str) -> dict[str, Any]:
     return objects[-1]
 
 
+def parse_full_loop_stdout(stdout: str) -> dict[str, Any] | None:
+    """Prefer the last gold-path result (has ``final_statuses``); else last object."""
+    objects = extract_json_objects(stdout)
+    if not objects:
+        return None
+    for obj in reversed(objects):
+        if "final_statuses" in obj:
+            return obj
+    last = objects[-1]
+    return last if isinstance(last, dict) else None
+
+
+def _progress(message: str) -> None:
+    """Progress logs must never share stdout with ``--json`` payloads."""
+    print(message, file=sys.stderr, flush=True)
+
+
 def unwrap_event_detail(payload: dict[str, Any]) -> dict[str, Any]:
     """Normalize GET /events/{id} — flat SecurityEvent or EventDetailResponse envelope."""
     return unwrap_event_detail_payload(payload)
@@ -257,6 +277,54 @@ def unwrap_event_detail(payload: dict[str, Any]) -> dict[str, Any]:
 def get_event(client: DynamicEvalClient, event_id: str) -> dict[str, Any]:
     payload = client.get_json(f"/api/v1/events/{event_id}")
     return unwrap_event_detail_payload(payload, expected_event_id=event_id)
+
+
+_TERMINAL_ANALYST_VERDICTS = frozenset({"false_positive", "confirmed_threat"})
+
+
+def map_gold_final_verdict(*, decision: str) -> str:
+    """Map scripted approve/reject to a terminal analyst verdict.
+
+    Approved L2/L3 containment means the gold path treated the case as a
+    confirmed threat. Never map to ``none`` — that cannot activate deferred
+    terminal writeback.
+    """
+    return "confirmed_threat" if decision == "approve" else "false_positive"
+
+
+def maybe_submit_analyst_final_verdict(
+    client: DynamicEvalClient,
+    event_id: str,
+    *,
+    require_closed: bool,
+    decision: str,
+    submitted: set[str],
+) -> bool:
+    """Unblock VERIFYING + manual_resolution holds that need a terminal verdict."""
+    if not require_closed or event_id in submitted:
+        return False
+    payload = client.get_json(f"/api/v1/events/{event_id}")
+    if not isinstance(payload, dict):
+        return False
+    event = unwrap_event_detail_payload(payload, expected_event_id=event_id)
+    status = str(event.get("status") or "")
+    substate = str(payload.get("execution_substate") or "")
+    verdict = str(payload.get("final_verdict") or event.get("final_verdict") or "")
+    if status != "verifying" or substate != "manual_resolution":
+        return False
+    if verdict in _TERMINAL_ANALYST_VERDICTS:
+        return False
+    mapped = map_gold_final_verdict(decision=decision)
+    client.post_json(
+        f"/api/v1/events/{event_id}/final-verdict",
+        {
+            "final_verdict": mapped,
+            "reason": "gold_eval_analyst_terminal_verdict",
+            "resume": True,
+        },
+    )
+    submitted.add(event_id)
+    return True
 
 
 def list_events(client: DynamicEvalClient, *, page_size: int = 50) -> list[dict[str, Any]]:
@@ -485,6 +553,14 @@ def _terminal_enough(status: str, *, require_closed: bool) -> bool:
     return status in SUCCESSISH_EVENT_STATUSES
 
 
+def scenario_expected_verdict(scenario_id: str) -> str:
+    """Return fixture ``expected_outcome.expected_verdict`` for a gold scenario."""
+    from app.data_generators.scenarios import build_scenario
+
+    outcome = build_scenario(scenario_id).expected_outcome or {}
+    return str(outcome.get("expected_verdict") or "")
+
+
 def assert_fp_semantic_gate(client: DynamicEvalClient, event_id: str) -> dict[str, Any]:
     """Analysis-only FP semantic gate: CLOSED + false_positive verdict."""
     event = get_event(client, event_id)
@@ -524,17 +600,74 @@ def assert_fp_semantic_gate(client: DynamicEvalClient, event_id: str) -> dict[st
     }
 
 
-def assert_domain_semantic_gate(client: DynamicEvalClient, event_id: str) -> dict[str, Any]:
-    """Analysis-only domain semantic gate: CLOSED without response pressure."""
+_ENTITY_RESPONSE_STATUSES = frozenset(
+    {
+        "planning_response",
+        "waiting_approval",
+        "executing_response",
+        "verifying",
+    }
+)
+
+
+def assert_fp_full_loop_gate(
+    client: DynamicEvalClient,
+    event_id: str,
+    *,
+    status_trace: list[str] | None = None,
+    decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """FP full-loop pressure: close without entity-response statuses.
+
+    Confirmed false_positive + not_required must not enter PLANNING_RESPONSE.
+    """
     event = get_event(client, event_id)
     status = str(event.get("status") or "")
     verdict = str(event.get("final_verdict") or "")
-    if status != "closed":
+    trace = list(status_trace or [])
+    illegal = [step for step in trace if step in _ENTITY_RESPONSE_STATUSES]
+    if status != "closed" or verdict != "false_positive" or illegal or decisions:
         diagnostics = collect_event_diagnostics(client, event_id)
         raise EvalFailure(
             format_eval_failure_message(
                 headline=(
-                    f"domain semantic gate requires status=closed, got {status!r} "
+                    "FP full-loop gate requires closed false_positive without "
+                    f"entity-response statuses, got status={status!r} "
+                    f"verdict={verdict!r} illegal_trace={illegal!r} "
+                    f"decisions={len(decisions or [])}"
+                ),
+                event_id=event_id,
+                diagnostics=diagnostics,
+            ),
+            event_id=event_id,
+            diagnostics=diagnostics,
+        )
+    return {
+        "status": status,
+        "final_verdict": verdict,
+        "disposition_policy": event.get("disposition_policy"),
+        "status_trace": trace,
+        "decision_count": 0,
+    }
+
+
+def assert_domain_semantic_gate(
+    client: DynamicEvalClient,
+    event_id: str,
+    *,
+    expected_verdict: str,
+) -> dict[str, Any]:
+    """Analysis-only domain gate: CLOSED + fixture expected_verdict."""
+    event = get_event(client, event_id)
+    status = str(event.get("status") or "")
+    verdict = str(event.get("final_verdict") or "")
+    if status != "closed" or verdict != expected_verdict:
+        diagnostics = collect_event_diagnostics(client, event_id)
+        raise EvalFailure(
+            format_eval_failure_message(
+                headline=(
+                    "domain semantic gate requires status=closed and "
+                    f"final_verdict={expected_verdict!r}, got status={status!r} "
                     f"(final_verdict={verdict!r})"
                 ),
                 event_id=event_id,
@@ -547,6 +680,7 @@ def assert_domain_semantic_gate(client: DynamicEvalClient, event_id: str) -> dic
         "status": status,
         "final_verdict": verdict,
         "disposition_policy": event.get("disposition_policy"),
+        "expected_verdict": expected_verdict,
     }
 
 
@@ -558,6 +692,7 @@ def run_analysis_only_loop(
     poll_interval_s: float,
     max_wait_s: float,
     semantic_profile: str,
+    scenario: str | None = None,
 ) -> dict[str, Any]:
     """Drive analysis-only investigate until semantic terminal acceptance."""
     started = time.monotonic()
@@ -571,7 +706,7 @@ def run_analysis_only_loop(
             generate_report=generate_report,
         )
         triggered.append({"event_id": event_id, "investigate": inv})
-        print(
+        _progress(
             f"[dynamic-eval] triggered analysis_only event_id={event_id} "
             f"generate_report={generate_report}"
         )
@@ -629,7 +764,16 @@ def run_analysis_only_loop(
         if semantic_profile == "analysis_only_fp":
             semantic_assertions[event_id] = assert_fp_semantic_gate(client, event_id)
         elif semantic_profile == "analysis_only_domain":
-            semantic_assertions[event_id] = assert_domain_semantic_gate(client, event_id)
+            expected = (
+                scenario_expected_verdict(scenario)
+                if scenario
+                else "none"
+            )
+            semantic_assertions[event_id] = assert_domain_semantic_gate(
+                client,
+                event_id,
+                expected_verdict=expected,
+            )
         else:
             raise EvalFailure(
                 f"unsupported analysis-only semantic profile: {semantic_profile!r}",
@@ -670,13 +814,14 @@ def run_gold_loop(
     for event_id in event_ids:
         inv = trigger_full_loop(client, event_id, generate_report=generate_report)
         triggered.append({"event_id": event_id, "investigate": inv})
-        print(
+        _progress(
             f"[dynamic-eval] triggered full_loop event_id={event_id} "
             f"generate_report={generate_report}"
         )
 
     decisions: dict[str, list[dict[str, Any]]] = {eid: [] for eid in event_ids}
     decided_ids: set[str] = set()
+    verdict_submitted: set[str] = set()
     finals: dict[str, str] = {}
     evidence_statuses: dict[str, str] = {}
     waiting_stall: dict[str, int] = {eid: 0 for eid in event_ids}
@@ -760,10 +905,23 @@ def run_gold_loop(
                     for row in outcomes:
                         decided_ids.add(str(row["action_id"]))
                     decisions[event_id].extend(outcomes)
-                    print(
+                    _progress(
                         f"[dynamic-eval] scripted {decision} on {event_id}: "
                         f"{len(outcomes)} action(s)"
                     )
+
+            if maybe_submit_analyst_final_verdict(
+                client,
+                event_id,
+                require_closed=require_closed,
+                decision=decision,
+                submitted=verdict_submitted,
+            ):
+                all_done = False
+                _progress(
+                    f"[dynamic-eval] scripted final-verdict on {event_id} "
+                    f"({map_gold_final_verdict(decision=decision)})"
+                )
 
             if _terminal_enough(status, require_closed=require_closed) and not pending:
                 continue
@@ -1054,13 +1212,13 @@ def main(argv: list[str] | None = None) -> int:
                 "Do not use hand-crafted POST /events as the gold fixture."
             )
 
-    print(
+    _progress(
         f"[dynamic-eval] gold path events={event_ids} "
         f"(fixture=seed_mock_xdr_and_ingest, "
         f"include_response_execution={not args.analysis_only})"
     )
     if len(event_ids) > 2 and not args.analysis_only:
-        print(
+        _progress(
             "[dynamic-eval] NOTE: compose worker uses celery -c 2; "
             f"{len(event_ids)} parallel investigations will queue (R2-017)."
         )
@@ -1073,6 +1231,7 @@ def main(argv: list[str] | None = None) -> int:
             poll_interval_s=float(args.poll_interval_s),
             max_wait_s=float(args.max_wait_s),
             semantic_profile=str(semantic_profile),
+            scenario=str(args.scenario),
         )
     else:
         result = run_gold_loop(
@@ -1084,6 +1243,16 @@ def main(argv: list[str] | None = None) -> int:
             max_wait_s=float(args.max_wait_s),
             require_closed=bool(args.require_closed),
         )
+        if str(args.scenario) == "account_anomaly_fp":
+            pressure_assertions: dict[str, Any] = {}
+            for event_id in event_ids:
+                pressure_assertions[event_id] = assert_fp_full_loop_gate(
+                    client,
+                    event_id,
+                    status_trace=result.get("status_trace", {}).get(event_id),
+                    decisions=result.get("decisions", {}).get(event_id),
+                )
+            result["pressure_assertions"] = pressure_assertions
     result["seed_summary"] = seed_summary
     result["scenario"] = args.scenario
     result["event_ids"] = event_ids

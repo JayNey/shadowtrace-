@@ -5,6 +5,7 @@ import { getTimeline } from "../../services/eventApi";
 import type {
   AttackStoryline,
   Evidence,
+  EvidenceConflict,
   StorylinePhase,
   StorylinePhaseName,
 } from "../../types/event";
@@ -65,11 +66,13 @@ function timestampValue(value: string | null): number {
 export default function StorylineTimeline({
   eventId,
   evidence = [],
+  conflicts = [],
   storyline: controlledStoryline,
   refreshToken,
 }: {
   eventId?: string;
   evidence?: Evidence[];
+  conflicts?: EvidenceConflict[];
   storyline?: AttackStoryline | null;
   refreshToken?: string | null;
 }) {
@@ -155,7 +158,7 @@ export default function StorylineTimeline({
           message="故事线未生成"
           description="当前按时间顺序展示已收集证据，故事线生成后将自动切换为分阶段视图。"
         />
-        <EvidenceList evidence={fallbackEvidence} conflicts={[]} />
+        <EvidenceList evidence={fallbackEvidence} conflicts={conflicts} />
       </Space>
     );
   }

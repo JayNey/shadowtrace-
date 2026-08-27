@@ -39,6 +39,10 @@ class EmbeddingService:
         """True when real embeddings can support cross-lingual vector recall (ISSUE-522)."""
         return self._mode in {EmbeddingProviderMode.REMOTE, EmbeddingProviderMode.LOCAL}
 
+    @property
+    def max_batch_size(self) -> int:
+        return self._settings.embedding_max_batch_size
+
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts; enforce batch limits and release dimension."""
         if not texts:

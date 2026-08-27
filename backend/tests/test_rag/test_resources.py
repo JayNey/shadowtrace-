@@ -298,7 +298,12 @@ async def test_hybrid_retriever_passes_tenant_to_store() -> None:
         trace_id="trace-42",
     )
 
-    await retriever.retrieve(["query"], ["attack_kb"], top_k=2, context=context)
+    await retriever.retrieve(
+        ["Event type: data_exfiltration"],
+        ["attack_kb"],
+        top_k=2,
+        context=context,
+    )
 
     store.vector_search.assert_awaited()
     store.keyword_search.assert_awaited()
@@ -306,6 +311,58 @@ async def test_hybrid_retriever_passes_tenant_to_store() -> None:
         assert call.kwargs.get("tenant_id") == "tenant-beta"
     for call in store.keyword_search.await_args_list:
         assert call.kwargs.get("tenant_id") == "tenant-beta"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retriever_runs_vector_once_and_two_keyword_queries() -> None:
+    store = MagicMock(spec=KnowledgeStore)
+    store.vector_search = AsyncMock(return_value=[])
+    store.keyword_search = AsyncMock(return_value=[])
+    embed = MagicMock()
+    embed.embed_query = AsyncMock(return_value=[0.1, 0.2])
+    retriever = HybridRetriever(store, embed)
+    context = RetrievalContext(
+        tenant_id="local",
+        principal="investigation:rag_agent",
+        event_id="evt-kw",
+        trace_id="trace-kw",
+    )
+    query = (
+        "Event type: data_exfiltration. Alert severity: critical. "
+        "Behavior evidence: 7z.exe a finance_report.zip"
+    )
+
+    await retriever.retrieve([query], ["attack_kb"], top_k=2, context=context)
+
+    assert store.vector_search.await_count == 1
+    keyword_queries = [call.args[1] for call in store.keyword_search.await_args_list]
+    assert keyword_queries == ["exfiltration", "archive"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retriever_skips_empty_keyword_reduction() -> None:
+    store = MagicMock(spec=KnowledgeStore)
+    store.vector_search = AsyncMock(return_value=[])
+    store.keyword_search = AsyncMock(return_value=[])
+    embed = MagicMock()
+    embed.embed_query = AsyncMock(return_value=[0.1, 0.2])
+    retriever = HybridRetriever(store, embed)
+    context = RetrievalContext(
+        tenant_id="local",
+        principal="investigation:rag_agent",
+        event_id="evt-empty-kw",
+        trace_id="trace-empty-kw",
+    )
+
+    await retriever.retrieve(
+        ["generic SOAR response notes"],
+        ["playbook_kb"],
+        top_k=2,
+        context=context,
+    )
+
+    store.vector_search.assert_awaited_once()
+    store.keyword_search.assert_not_awaited()
 
 
 @pytest.mark.asyncio

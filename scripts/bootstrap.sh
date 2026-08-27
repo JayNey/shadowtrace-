@@ -272,7 +272,7 @@ PYTHON_SCRIPT
 if [ "${LOAD_KB:-false}" = "true" ]; then
   echo "[bootstrap] LOAD_KB=true — loading attack/case knowledge bases ..."
   kb_failed=0
-  for loader in load_attack_kb load_case_kb; do
+  for loader in load_attack_kb load_case_kb load_org_context_kb; do
     if ! ${COMPOSE_CMD} exec -T backend bash -c "cd /app/backend && python3 -m scripts.${loader}"; then
       echo -e "${RED}[bootstrap] ERROR: ${loader} failed${NC}" >&2
       kb_failed=1

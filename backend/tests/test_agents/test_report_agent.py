@@ -16,6 +16,7 @@ import pytest
 from app.agents.report_agent import (
     GENERATED_BY_LLM,
     GENERATED_BY_TEMPLATE,
+    MIN_REPORT_LLM_TIMEOUT_SECONDS,
     ReportAgent,
     generate_report_action_fingerprint,
 )
@@ -39,15 +40,21 @@ from app.core.llm.mock_client import MockLLMClient
 from app.models.action import Action
 from app.models.agent_io import (
     CollectionStatus,
+    EffectStatus,
     EvidenceOutput,
     LlmAdmissibility,
     ReportAgentInput,
+    ReportPhaseStatus,
     ResponsePlan,
     ResponsePlanGeneratedBy,
     RiskAssessment,
     RiskFactor,
     ScoringMode,
     TriageResult,
+    VerificationActionResult,
+    VerificationOverallStatus,
+    VerificationPhase,
+    VerificationResult,
 )
 from app.models.detection_context_snapshot import (
     DetectionContextAttackRef,
@@ -583,21 +590,85 @@ async def test_report_agent_passes_llm_timeout_to_client(
         working_memory=wm,
         event_service=event_service,
     )
-    report = await agent.execute(
-        ReportAgentInput(
-            event_id=event_id,
-            evidence_output=_main_evidence(event_id),
-            risk_assessment=_high_risk(),
+    with pytest.raises(LLMTimeoutError):
+        await agent.execute(
+            ReportAgentInput(
+                event_id=event_id,
+                evidence_output=_main_evidence(event_id),
+                risk_assessment=_high_risk(),
+            )
         )
-    )
 
     assert _TimeoutCapturingLLM.last_timeout == 30.0
-    assert report.generated_by == GENERATED_BY_TEMPLATE
-    assert report.report_quality.value == "degraded_template"
 
 
 @pytest.mark.asyncio
-async def test_llm_timeout_records_audit_and_falls_back_to_template(
+async def test_report_agent_default_timeout_follows_settings(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DI-omitted timeout uses settings, floored for 15-chapter reports."""
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "90")
+    get_settings.cache_clear()
+    try:
+        event_id = f"evt-report-timeout-settings-{uuid4().hex[:8]}"
+        await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
+        agent = ReportAgent(
+            llm_client=_TimeoutCapturingLLM(),
+            working_memory=wm,
+            event_service=event_service,
+        )
+        with pytest.raises(LLMTimeoutError):
+            await agent.execute(
+                ReportAgentInput(
+                    event_id=event_id,
+                    evidence_output=_main_evidence(event_id),
+                    risk_assessment=_high_risk(),
+                )
+            )
+        assert agent.llm_timeout_seconds == MIN_REPORT_LLM_TIMEOUT_SECONDS
+        assert _TimeoutCapturingLLM.last_timeout == MIN_REPORT_LLM_TIMEOUT_SECONDS
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_report_agent_default_timeout_keeps_settings_above_floor(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "240")
+    get_settings.cache_clear()
+    try:
+        event_id = f"evt-report-timeout-above-floor-{uuid4().hex[:8]}"
+        await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
+        agent = ReportAgent(
+            llm_client=_TimeoutCapturingLLM(),
+            working_memory=wm,
+            event_service=event_service,
+        )
+        with pytest.raises(LLMTimeoutError):
+            await agent.execute(
+                ReportAgentInput(
+                    event_id=event_id,
+                    evidence_output=_main_evidence(event_id),
+                    risk_assessment=_high_risk(),
+                )
+            )
+        assert agent.llm_timeout_seconds == 240.0
+        assert _TimeoutCapturingLLM.last_timeout == 240.0
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_llm_timeout_records_audit_and_does_not_template_fallback(
     wm: _FakeWorkingMemory,
     event_service: _FakeEventService,
     event_bus: _FakeEventBus,
@@ -636,14 +707,16 @@ async def test_llm_timeout_records_audit_and_falls_back_to_template(
             event_service=event_service,
             event_bus=event_bus,
         )
-        report = await agent.execute(
-            ReportAgentInput(
-                event_id=event_id,
-                evidence_output=_main_evidence(event_id),
-                risk_assessment=_high_risk(),
+        with pytest.raises(LLMTimeoutError) as raised:
+            await agent.execute(
+                ReportAgentInput(
+                    event_id=event_id,
+                    evidence_output=_main_evidence(event_id),
+                    risk_assessment=_high_risk(),
+                )
             )
-        )
 
+    assert llm_failure_metadata(raised.value)["error_code"] == "llm_timeout"
     assert len(audit.entries) == 1
     timeout_rows = [
         entry
@@ -655,10 +728,7 @@ async def test_llm_timeout_records_audit_and_falls_back_to_template(
     assert len(timeout_rows) == 1
     assert timeout_rows[0].error_detail is not None
     assert len(timeout_rows[0].error_detail or "") <= 256
-    assert report.generated_by == GENERATED_BY_TEMPLATE
-    assert report.report_quality.value == "degraded_template"
-    assert report.degraded is True
-    assert report.warnings == ["report_llm_fallback:llm_timeout"]
+    assert [e for e in event_bus.events if e[1] == "report_generated"] == []
 
 
 @pytest.mark.asyncio
@@ -701,13 +771,14 @@ async def test_report_agent_timeout_single_audit_with_fallback_models(
             event_service=event_service,
             event_bus=event_bus,
         )
-        report = await agent.execute(
-            ReportAgentInput(
-                event_id=event_id,
-                evidence_output=_main_evidence(event_id),
-                risk_assessment=_high_risk(),
+        with pytest.raises(LLMTimeoutError):
+            await agent.execute(
+                ReportAgentInput(
+                    event_id=event_id,
+                    evidence_output=_main_evidence(event_id),
+                    risk_assessment=_high_risk(),
+                )
             )
-        )
 
     timeout_rows = [
         entry
@@ -718,8 +789,7 @@ async def test_report_agent_timeout_single_audit_with_fallback_models(
     ]
     assert len(audit.entries) == 1
     assert len(timeout_rows) == 1
-    assert report.generated_by == GENERATED_BY_TEMPLATE
-    assert report.warnings == ["report_llm_fallback:llm_timeout"]
+    assert [e for e in event_bus.events if e[1] == "report_generated"] == []
 
 
 @pytest.mark.asyncio
@@ -937,6 +1007,71 @@ async def test_llm_incomplete_sections_falls_back_to_template(
 ) -> None:
     event_id = f"evt-report-partial-llm-{uuid4().hex[:8]}"
     await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
+    response_plan = ResponsePlan(
+        plan_id="plan-partial",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+        actions=[
+            Action(
+                action_id="act-partial-block",
+                event_id=event_id,
+                plan_revision=1,
+                action_fingerprint="fp-partial-block",
+                action_category=ActionCategory.RESPONSE,
+                action_name="Block IP",
+                tool_name="block_ip",
+                action_level=ActionLevel.L3,
+                execution_owner=ExecutionOwner.DIRECT_TOOL,
+                target="203.0.113.88",
+                status=ActionStatus.SUCCESS,
+            )
+        ],
+    )
+    verification_result = VerificationResult(
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.EFFECT,
+        results=[
+            VerificationActionResult(
+                action_id="act-partial-block",
+                effect_status=EffectStatus.VERIFIED,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            )
+        ],
+    )
+    agent = ReportAgent(
+        llm_client=_PartialLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    report = await agent.execute(
+        ReportAgentInput(
+            event_id=event_id,
+            evidence_output=_main_evidence(event_id),
+            risk_assessment=_high_risk(),
+            response_plan=response_plan,
+            verification_result=verification_result,
+            response_phase_status=ReportPhaseStatus.EXECUTED,
+            verification_phase_status=ReportPhaseStatus.EXECUTED,
+        )
+    )
+    assert report.generated_by == GENERATED_BY_TEMPLATE
+    assert "report_llm_fallback:partial_sections" in report.warnings
+    assert report.error_detail is None
+    assert report.report_quality.value == "degraded_template"
+    assert report.degraded is True
+    assert len(report.sections) == 15
+    overview = next(s for s in report.sections if s.key == "overview")
+    assert overview.content.startswith("only one")
+
+
+@pytest.mark.asyncio
+async def test_analysis_only_overview_llm_is_not_partial_sections(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    """Unexecuted response/verify chapters must not force template fallback."""
+    event_id = f"evt-report-ao-overview-{uuid4().hex[:8]}"
+    await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
     agent = ReportAgent(
         llm_client=_PartialLLM(),
         working_memory=wm,
@@ -949,14 +1084,9 @@ async def test_llm_incomplete_sections_falls_back_to_template(
             risk_assessment=_high_risk(),
         )
     )
-    assert report.generated_by == GENERATED_BY_TEMPLATE
-    assert "report_llm_fallback:partial_sections" in report.warnings
-    assert report.error_detail is None
-    assert report.report_quality.value == "degraded_template"
-    assert report.degraded is True
-    assert len(report.sections) == 15
-    overview = next(s for s in report.sections if s.key == "overview")
-    assert overview.content.startswith("only one")
+    assert report.generated_by == GENERATED_BY_LLM
+    assert "report_llm_fallback:partial_sections" not in report.warnings
+    assert report.report_quality.value == "complete"
 
 
 @pytest.mark.asyncio

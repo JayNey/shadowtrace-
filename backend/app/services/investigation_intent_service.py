@@ -43,6 +43,7 @@ from app.services.auto_response_policy import (
     AutoResponsePolicyService,
     format_auto_response_audit_reason,
 )
+from app.services.cmu_scheduler import priority_order_columns
 from app.services.degraded_flag_service import DegradedFlagService
 
 logger = logging.getLogger(__name__)
@@ -1127,7 +1128,6 @@ class InvestigationIntentService:
                         row,
                         status=status,
                         now=now,
-                        lease_seconds=lease_seconds,
                         started_stale_s=started_stale_s,
                     ):
                         continue
@@ -1167,14 +1167,14 @@ class InvestigationIntentService:
         *,
         status: InvestigationIntentStatus,
         now: datetime,
-        lease_seconds: int,
         started_stale_s: int,
     ) -> bool:
         if row.claim_expires_at is not None and row.claim_expires_at < now:
             return True
-        if status is InvestigationIntentStatus.ENQUEUED:
-            return (now - row.updated_at) > timedelta(seconds=lease_seconds * 4)
-        if status is InvestigationIntentStatus.STARTED:
+        if status in (
+            InvestigationIntentStatus.ENQUEUED,
+            InvestigationIntentStatus.STARTED,
+        ):
             return (now - row.updated_at) > timedelta(seconds=started_stale_s)
         return False
 
@@ -1259,6 +1259,10 @@ class InvestigationIntentService:
                 rows = (
                     await session.scalars(
                         select(orm.InvestigationIntent)
+                        .outerjoin(
+                            orm.SecurityEvent,
+                            orm.SecurityEvent.event_id == orm.InvestigationIntent.event_id,
+                        )
                         .where(
                             or_(
                                 orm.InvestigationIntent.status.in_(
@@ -1275,9 +1279,9 @@ class InvestigationIntentService:
                                 ),
                             )
                         )
-                        .order_by(orm.InvestigationIntent.created_at.asc())
+                        .order_by(*priority_order_columns(now))
                         .limit(limit)
-                        .with_for_update(skip_locked=True)
+                        .with_for_update(of=orm.InvestigationIntent, skip_locked=True)
                     )
                 ).all()
                 for row in rows:

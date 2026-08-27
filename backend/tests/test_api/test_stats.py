@@ -136,6 +136,11 @@ async def _seed_action(
     writeback_applicable: bool | None = None,
     writeback_status: str | None = None,
     action_id: str | None = None,
+    action_category: ActionCategory = ActionCategory.RESPONSE,
+    execution_phase: ActionExecutionPhase = ActionExecutionPhase.IMMEDIATE,
+    tool_name: str = "block_ip",
+    action_name: str = "block_ip",
+    action_level: str = "l2",
 ) -> str:
     aid = action_id or f"act-{_sfx()}"
     # Default applicable mirrors required so happy-path fixtures enter the
@@ -149,11 +154,11 @@ async def _seed_action(
                     event_id=event_id,
                     plan_revision=1,
                     action_fingerprint=f"fp-{aid}",
-                    action_category=ActionCategory.RESPONSE.value,
-                    action_name="block_ip",
-                    tool_name="block_ip",
-                    action_level="l2",
-                    execution_phase=ActionExecutionPhase.IMMEDIATE.value,
+                    action_category=action_category.value,
+                    action_name=action_name,
+                    tool_name=tool_name,
+                    action_level=action_level,
+                    execution_phase=execution_phase.value,
                     target_type="ip",
                     target="203.0.113.10",
                     parameters={"ip": "203.0.113.10"},
@@ -678,3 +683,64 @@ async def test_persist_skips_pending_skipped_statuses(
     assert efr["numerator"] == 0
     assert efr["denominator"] == 0
     assert efr["rate"] is None
+
+
+@pytest.mark.asyncio
+async def test_stats_effect_rate_excludes_system_verification_and_post_verify(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Report / check_* / disposition writeback must not enter effect den."""
+    eid = await _seed_event(session_factory, title="mixed-effect-categories")
+    await _seed_action(
+        session_factory,
+        event_id=eid,
+        status=ActionStatus.SUCCESS,
+        effect_verification_status="verified",
+        tool_name="block_ip",
+        action_name="block_ip",
+    )
+    await _seed_action(
+        session_factory,
+        event_id=eid,
+        status=ActionStatus.SUCCESS,
+        effect_verification_status=None,
+        action_category=ActionCategory.SYSTEM,
+        tool_name="generate_report",
+        action_name="generate_report",
+        action_level="l0",
+    )
+    await _seed_action(
+        session_factory,
+        event_id=eid,
+        status=ActionStatus.SUCCESS,
+        effect_verification_status=None,
+        action_category=ActionCategory.VERIFICATION,
+        tool_name="check_ip_block_status",
+        action_name="verify_block_ip",
+        action_level="l2",
+    )
+    await _seed_action(
+        session_factory,
+        event_id=eid,
+        status=ActionStatus.SUCCESS,
+        effect_verification_status=None,
+        execution_phase=ActionExecutionPhase.POST_VERIFY,
+        tool_name="update_source_event_disposition",
+        action_name="update_source_event_disposition",
+        writeback_required=True,
+        writeback_applicable=True,
+        writeback_status=WritebackStatus.CONFIRMED.value,
+    )
+
+    body = client.get("/api/v1/stats", headers=_hdr()).json()
+
+    aes = body["action_execution_success_rate"]
+    assert aes["numerator"] == 4
+    assert aes["denominator"] == 4
+    assert aes["rate"] == pytest.approx(1.0)
+
+    efr = body["effect_verification_rate"]
+    assert efr["numerator"] == 1
+    assert efr["denominator"] == 1
+    assert efr["rate"] == pytest.approx(1.0)

@@ -238,6 +238,24 @@ def test_risk_storyline_response_wire_models_and_prompts() -> None:
     assert risk.factors["asset_impact"].reason == "asset critical"
     assert "data_sensitivity" in risk.factors
 
+    rubric_only = RiskScoreLLMResponse.model_validate(
+        {
+            "factors": {
+                "asset_impact": {"rubric_id": "finance_or_prod", "lean": "high", "reason": "fin"},
+                "behavior_anomaly": {"rubric_id": "archive_upload_chain", "lean": "mid"},
+                "evidence_confidence": {"rubric_id": "completed_consistent"},
+                "attack_stage": {
+                    "rubric_id": "exfil_over_c2",
+                    "secondary_rubric_id": "impact_ransom",
+                },
+                "data_sensitivity": {"rubric_id": "restricted_pii"},
+                "threat_intel": {"rubric_id": "matched_technique", "lean": "low"},
+            }
+        }
+    )
+    assert rubric_only.factors["attack_stage"].rubric_id == "exfil_over_c2"
+    assert rubric_only.factors["attack_stage"].secondary_rubric_id == "impact_ransom"
+
     with pytest.raises(ValidationError):
         RiskScoreLLMResponse.model_validate(
             {

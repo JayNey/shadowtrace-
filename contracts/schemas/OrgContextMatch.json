@@ -1,0 +1,56 @@
+{
+  "additionalProperties": false,
+  "description": "Exact org-context hit. Evidence only — never auto-closes or sets verdict.",
+  "properties": {
+    "kind": {
+      "enum": [
+        "allowed_destination",
+        "allowed_source",
+        "time_window",
+        "account_role",
+        "person_status",
+        "data_handling",
+        "security_product"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "matched_value": {
+      "title": "Matched Value",
+      "type": "string"
+    },
+    "explanation": {
+      "title": "Explanation",
+      "type": "string"
+    },
+    "citation_id": {
+      "title": "Citation Id",
+      "type": "string"
+    },
+    "chunk_id": {
+      "title": "Chunk Id",
+      "type": "string"
+    },
+    "match_type": {
+      "default": "exact",
+      "title": "Match Type",
+      "type": "string"
+    },
+    "match_confidence": {
+      "default": 1.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Match Confidence",
+      "type": "number"
+    }
+  },
+  "required": [
+    "kind",
+    "matched_value",
+    "explanation",
+    "citation_id",
+    "chunk_id"
+  ],
+  "title": "OrgContextMatch",
+  "type": "object"
+}

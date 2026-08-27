@@ -25,7 +25,15 @@ from app.models.verification_readiness import (
 SkippedReason = Literal[
     "terminal_not_in_approved_set",
     "capability_blocked",
+    "verdict_not_terminal",
 ]
+
+_NON_TERMINAL_VERDICTS = frozenset(
+    {
+        FinalVerdict.NONE,
+        FinalVerdict.POSSIBLE_FALSE_POSITIVE,
+    }
+)
 
 _THREAT_NON_BLOCKING_SKIPPED_DETAILS = frozenset(
     {
@@ -71,6 +79,11 @@ class TerminalDispositionResolver:
         approved_set = set(approved_terminal_dispositions)
         if disposition_only:
             if final_verdict is not FinalVerdict.FALSE_POSITIVE:
+                if final_verdict in _NON_TERMINAL_VERDICTS:
+                    return TerminalDispositionResolveResult(
+                        skipped_reason="verdict_not_terminal",
+                        need_manual_resolution=True,
+                    )
                 return TerminalDispositionResolveResult(need_manual_resolution=True)
             ignored = SourceDisposition.IGNORED
             if ignored not in approved_set:
@@ -91,7 +104,10 @@ class TerminalDispositionResolver:
             if resolved is None:
                 return TerminalDispositionResolveResult(need_manual_resolution=True)
         else:
-            return TerminalDispositionResolveResult(need_manual_resolution=True)
+            return TerminalDispositionResolveResult(
+                skipped_reason="verdict_not_terminal",
+                need_manual_resolution=True,
+            )
 
         if resolved not in approved_set:
             return TerminalDispositionResolveResult(skipped_reason="terminal_not_in_approved_set")

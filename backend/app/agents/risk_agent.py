@@ -16,6 +16,7 @@ from app.agents.prompts.risk_prompt import (
     build_risk_messages,
 )
 from app.agents.risk_llm_admissibility import classify_llm_risk_response
+from app.agents.risk_rubric import LlmFactorChoice, land_factor_score, resolve_factor_choice
 from app.agents.risk_scoring_engine import (
     FACTOR_WEIGHTS,
     RiskScoringEngine,
@@ -43,9 +44,6 @@ if TYPE_CHECKING:
     from app.services.agent_publication_service import AgentPublicationService
 
 logger = logging.getLogger(__name__)
-
-LLM_WEIGHT = 0.6
-RULE_WEIGHT = 0.4
 
 
 class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
@@ -117,7 +115,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             graph_output=input.graph_output,
         )
 
-        llm_scores: dict[str, tuple[float, str]] | None = None
+        llm_choices: dict[str, LlmFactorChoice] | None = None
         raw_confidence = float(input.evidence_output.overall_confidence)
         scoring_mode = ScoringMode.RULE_ONLY
         llm_admissibility = (
@@ -126,15 +124,15 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
 
         if self.llm_client is not None:
             try:
-                llm_scores, llm_confidence, llm_admissibility = await self._score_with_llm(
+                llm_choices, llm_confidence, llm_admissibility = await self._score_with_llm(
                     input,
                     source_snapshot=source_snapshot,
                 )
-                if llm_admissibility is LlmAdmissibility.VALID and llm_scores is not None:
+                if llm_admissibility is LlmAdmissibility.VALID and llm_choices is not None:
                     scoring_mode = ScoringMode.LLM_AND_RULE
                     raw_confidence = max(raw_confidence, llm_confidence)
                 else:
-                    llm_scores = None
+                    llm_choices = None
                     scoring_mode = ScoringMode.RULE_ONLY
             except SoftTimeLimitExceeded:
                 # ISSUE-314: soft-limit must not fall back to rule_only "success".
@@ -145,11 +143,11 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
                     input.event_id,
                     exc,
                 )
-                llm_scores = None
+                llm_choices = None
                 llm_admissibility = LlmAdmissibility.INVALID
                 scoring_mode = ScoringMode.RULE_ONLY
 
-        factors = self._merge_factors(rule_scores, llm_scores, scoring_mode)
+        factors = self._merge_factors(rule_scores, llm_choices, scoring_mode)
         risk_score = int(round(sum(factor.weighted_score for factor in factors)))
         risk_score = max(0, min(100, risk_score))
         severity = severity_from_score(risk_score)
@@ -304,7 +302,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         input: RiskAgentInput,
         *,
         source_snapshot: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, tuple[float, str]] | None, float, LlmAdmissibility]:
+    ) -> tuple[dict[str, LlmFactorChoice] | None, float, LlmAdmissibility]:
         assert self.llm_client is not None
         rag_summary = None
         if input.rag_output is not None:
@@ -368,19 +366,20 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
                 raise LLMError("risk_score LLM response is not an object")
             wire = RiskScoreLLMResponse.model_validate(data)
 
-        scores: dict[str, tuple[float, str]] = {}
+        choices: dict[str, LlmFactorChoice] = {}
         for name in FACTOR_NAMES:
             entry = wire.factors.get(name)
-            if entry is None or entry.score is None:
+            if entry is None:
                 continue
-            score = max(0.0, min(100.0, float(entry.score)))
-            reason = entry.reason or "llm"
-            scores[name] = (score, reason)
+            choice = resolve_factor_choice(name, entry.model_dump())
+            if choice is None:
+                continue
+            choices[name] = choice
 
-        if len(scores) < len(FACTOR_NAMES):
+        if len(choices) < len(FACTOR_NAMES):
             raise LLMError(
                 "risk_score LLM response missing required factors",
-                details={"present": sorted(scores)},
+                details={"present": sorted(choices)},
             )
 
         conf = max(0.0, min(1.0, float(wire.raw_confidence)))
@@ -392,24 +391,21 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
                 admissibility.value,
             )
             return None, conf, admissibility
-        return scores, conf, admissibility
+        return choices, conf, admissibility
 
     def _merge_factors(
         self,
         rule_scores: dict[str, tuple[float, str]],
-        llm_scores: dict[str, tuple[float, str]] | None,
+        llm_choices: dict[str, LlmFactorChoice] | None,
         scoring_mode: ScoringMode,
     ) -> list[RiskFactor]:
         factors: list[RiskFactor] = []
         for name in FACTOR_NAMES:
             weight = FACTOR_WEIGHTS[name]
             rule_score, rule_reason = rule_scores[name]
-            if scoring_mode is ScoringMode.LLM_AND_RULE and llm_scores is not None:
-                llm_score, llm_reason = llm_scores[name]
-                merged = LLM_WEIGHT * llm_score + RULE_WEIGHT * rule_score
-                reasoning = (
-                    f"llm({llm_score:.0f}): {llm_reason}; rule({rule_score:.0f}): {rule_reason}"
-                )
+            if scoring_mode is ScoringMode.LLM_AND_RULE and llm_choices is not None:
+                merged, reasoning = land_factor_score(rule_score, llm_choices[name])
+                reasoning = f"{reasoning}; {rule_reason}"
             else:
                 merged = rule_score
                 reasoning = f"rule({rule_score:.0f}): {rule_reason}"

@@ -535,6 +535,53 @@ async def test_schedule_memory_skipped_when_event_not_closed() -> None:
     assert context_store.refresh_count == 0
 
 
+@pytest.mark.asyncio
+async def test_investigate_skips_memory_after_close_when_graph_wired() -> None:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    context = _context(FinalVerdict.CONFIRMED_THREAT)
+    scheduled: list[str] = []
+
+    async def _capture_schedule(event_id: str, _ctx: EventContext) -> None:
+        scheduled.append(event_id)
+
+    super_agent = SuperAgent(
+        triage_agent=MagicMock(),
+        evidence_agent=MagicMock(),
+        planner_agent=MagicMock(),
+        risk_agent=MagicMock(),
+        report_agent=MagicMock(),
+        context_store=_ContextStore(context),
+        investigation_graph=object(),
+        memory_agent=_SuccessfulMemoryAgent(),
+    )
+    super_agent._load_event_context = AsyncMock(return_value=context)  # type: ignore[method-assign]
+    super_agent._freeze_source_snapshot = AsyncMock()  # type: ignore[method-assign]
+    super_agent._finalize_analysis_artifacts = AsyncMock(return_value=context)  # type: ignore[method-assign]
+    super_agent._run_quality_evaluation_step = AsyncMock()  # type: ignore[method-assign]
+    super_agent._persist_event_context = AsyncMock()  # type: ignore[method-assign]
+    super_agent._schedule_memory_after_close = _capture_schedule  # type: ignore[method-assign]
+
+    with (
+        patch(
+            "app.orchestration.workflow_graph.build_initial_investigation_state",
+            new_callable=AsyncMock,
+            return_value={},
+        ),
+        patch(
+            "app.orchestration.workflow_graph.invoke_investigation_graph",
+            new_callable=AsyncMock,
+        ),
+    ):
+        await super_agent.investigate(
+            EVENT_ID,
+            include_response_execution=True,
+            publish_lifecycle=False,
+        )
+
+    assert scheduled == []
+
+
 class _RefreshFailAfterFirstContextStore(_ContextStore):
     async def refresh_closed_snapshot(self, event_id: str) -> EventContext:
         self.refresh_count += 1

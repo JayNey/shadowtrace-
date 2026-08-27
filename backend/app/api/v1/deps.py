@@ -20,6 +20,7 @@ from app.core.redis_client import RedisClient
 from app.db.session_provider import get_session_provider, reset_session_provider
 
 if TYPE_CHECKING:
+    from app.orchestration.graph_resume_observability import ResumeStatus
     from app.services.execution_job_query_service import ExecutionJobQueryService
 
 logger = logging.getLogger(__name__)
@@ -271,6 +272,7 @@ async def get_approval_engine() -> Any:
             context_store=_get_context_store(),
             resume_investigation=_resume_investigation,
             impact_assessment_service=_get_impact_assessment_service(),
+            manual_resolution=await get_manual_resolution_service(),
         )
     return _approval_engine
 
@@ -466,15 +468,15 @@ async def get_workflow_runtime() -> Any:
     return await _get_workflow_runtime()
 
 
-async def _resume_investigation(event_id: str) -> None:
+async def _resume_investigation(event_id: str) -> ResumeStatus:
     """Resume graph orchestration after approval or writeback (ISSUE-059 / #613)."""
     settings = get_settings()
     mode = (settings.orchestration_mode or "graph").strip().lower()
     if mode != "graph":
-        return
+        return "skipped"
     from app.orchestration.graph_resume_observability import execute_graph_resume_with_retry
 
-    await execute_graph_resume_with_retry(
+    return await execute_graph_resume_with_retry(
         event_id,
         session_factory=_get_session_factory(),
         get_super_agent=get_super_agent,
@@ -593,6 +595,7 @@ async def _build_production_investigation_graph(
         "verify_agent": verify_agent,
         "rag_agent": stack["rag"],
         "graph_agent": stack["graph_agent"],
+        "memory_agent": stack["memory"],
     }
     services = {
         "state_machine": stack["state_machine"],
@@ -611,6 +614,7 @@ async def _build_production_investigation_graph(
         "agent_task_service": _get_agent_task_service(),
         "agent_artifact_service": _get_agent_artifact_service(),
         "content_projection_service": _get_content_projection_service(),
+        "knowledge_store": stack.get("knowledge_store"),
     }
     # ISSUE-218: fail fast on production miswiring — if a key service/agent
     # is missing the graph would previously "succeed" through stub nodes
@@ -1075,6 +1079,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         "tool_executor": tool_executor,
         "evidence_tool_executor": evidence_tool_executor,
         "react_executor_factory": react_executor_factory,
+        "knowledge_store": knowledge_store,
     }
 
 
@@ -1117,6 +1122,7 @@ async def get_pipeline() -> Any:
             # behind for re-investigations of the same event.
             convergence_guard=stack["convergence_guard"],
             output_quality_evaluator=stack["output_quality_evaluator"],
+            knowledge_store=stack.get("knowledge_store"),
         )
     return _pipeline
 

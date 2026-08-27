@@ -92,8 +92,15 @@ class KnowledgeStore:
                 "tenant_id": tenant_id,
                 "global_tenant_id": GLOBAL_KB_TENANT_ID,
             }
-        clause = " AND (metadata->>'tenant_id' IS NULL OR metadata->>'tenant_id' = :tenant_id)"
-        return clause, {"tenant_id": tenant_id}
+        clause = (
+            " AND (metadata->>'tenant_id' IS NULL"
+            " OR metadata->>'tenant_id' = :tenant_id"
+            " OR metadata->>'tenant_id' = :global_tenant_id)"
+        )
+        return clause, {
+            "tenant_id": tenant_id,
+            "global_tenant_id": GLOBAL_KB_TENANT_ID,
+        }
 
     @staticmethod
     def _release_filter_clause(release_id: str | None) -> tuple[str, dict[str, str]]:
@@ -187,7 +194,10 @@ class KnowledgeStore:
             if c.kb_name != kb_name:
                 raise ValueError(f"chunk {c.chunk_id} kb_name={c.kb_name} != {kb_name}")
             contents.append(c.content)
-        vectors = await self._embed.embed_texts(contents)
+        max_batch = max(1, int(self._embed.max_batch_size))
+        vectors: list[list[float]] = []
+        for start in range(0, len(contents), max_batch):
+            vectors.extend(await self._embed.embed_texts(contents[start : start + max_batch]))
         if session is not None:
             await self._execute_upserts(session, kb_name, chunks, vectors)
             return
@@ -289,11 +299,20 @@ class KnowledgeStore:
         query_text: str,
         top_k: int = 10,
         *,
+        tenant_id: str | None = None,
         release_id: str | None = None,
+        embedding_release_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """Embed *query_text* and run cosine-similarity search (ISSUE-522)."""
         query_vec = await self._embed.embed_query(query_text)
-        return await self.vector_search(kb_name, query_vec, top_k=top_k, release_id=release_id)
+        return await self.vector_search(
+            kb_name,
+            query_vec,
+            top_k=top_k,
+            tenant_id=tenant_id,
+            release_id=release_id,
+            embedding_release_id=embedding_release_id,
+        )
 
     async def keyword_search(
         self,
@@ -359,6 +378,7 @@ class KnowledgeStore:
         top_k: int = 10,
         tenant_id: str | None = None,
         release_id: str | None = None,
+        embedding_release_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """Vector search plus keyword fallback, merged by chunk_id."""
         query_vec = await self._embed.embed_query(query_text)
@@ -368,6 +388,7 @@ class KnowledgeStore:
             top_k=top_k,
             tenant_id=tenant_id,
             release_id=release_id,
+            embedding_release_id=embedding_release_id,
         )
         keyword_hits = await self.keyword_search(
             kb_name,
@@ -375,6 +396,7 @@ class KnowledgeStore:
             top_k=top_k,
             tenant_id=tenant_id,
             release_id=release_id,
+            embedding_release_id=embedding_release_id,
         )
         return _merge_hybrid_results(vector_hits, keyword_hits, top_k)
 

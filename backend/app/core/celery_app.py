@@ -36,7 +36,7 @@ def init_worker_telemetry(**kwargs: object) -> None:
     setup_telemetry(engine=provider.engine())
     settings = get_settings()
     beat = check_investigation_intent_beat_schedule(task_mode=settings.task_mode)
-    if settings.task_mode is TaskMode.CELERY and beat.get("status") == "degraded":
+    if settings.task_mode is TaskMode.CELERY and beat.get("reason") == "schedule_incomplete":
         logger.warning(
             "investigation intent beat schedule incomplete in worker process: %s",
             beat,

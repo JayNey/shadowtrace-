@@ -34,7 +34,7 @@ SCENARIO_EVAL_PROFILES: dict[str, ScenarioEvalProfile] = {
     "account_anomaly_fp": ScenarioEvalProfile(
         scenario="account_anomaly_fp",
         semantic="analysis_only_fp",
-        pressure="full_loop_compat",
+        pressure="none",
         pressure_blocks_pass=False,
     ),
     "suspicious_domain_access": ScenarioEvalProfile(

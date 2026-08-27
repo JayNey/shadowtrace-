@@ -1601,11 +1601,11 @@ def test_run_analysis_only_eager_executes_task(
 @pytest.mark.parametrize(
     "status",
     [
-        EventStatus.WAITING_APPROVAL,
         EventStatus.TRIAGING,
         EventStatus.COLLECTING_EVIDENCE,
         EventStatus.ANALYZING,
         EventStatus.SCORING,
+        EventStatus.PLANNING_RESPONSE,
         EventStatus.EXECUTING_RESPONSE,
         EventStatus.VERIFYING,
         EventStatus.REPLANNING,

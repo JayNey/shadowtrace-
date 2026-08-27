@@ -90,7 +90,7 @@ export function triggerInvestigation(
     `/events/${eventId}/investigate`,
     {
       include_response_execution: options?.includeResponseExecution ?? false,
-      generate_report: options?.generateReport ?? false,
+      generate_report: options?.generateReport ?? true,
     },
     { skipGlobalErrorToast: true },
   );
@@ -120,12 +120,16 @@ export function closeEvent(eventId: string, body: EventCloseRequest) {
 // ------------------------------------------------------------------ //
 
 export function getReport(eventId: string) {
-  return apiClient.get<{ report: InvestigationReport }>(`/events/${eventId}/report`);
+  return apiClient.get<{ report: InvestigationReport }>(`/events/${eventId}/report`, {
+    skipGlobalErrorToast: true,
+  });
 }
 
 /** POST /events/{id}/report — on-demand generation with ISSUE-212 quality gate.
  * 422 report_quality_incomplete → force=true archives a degraded report;
  * 409 report_quality_conflict → confirm_downgrade=true overwrites a complete one. */
+export const REPORT_REQUEST_TIMEOUT_MS = 300_000;
+
 export function generateReport(
   eventId: string,
   params?: { force?: boolean; confirm_downgrade?: boolean },
@@ -137,6 +141,7 @@ export function generateReport(
       params,
       // Quality-gate errors are handled locally by the report tab.
       skipGlobalErrorToast: true,
+      timeout: REPORT_REQUEST_TIMEOUT_MS,
     },
   );
 }
@@ -208,7 +213,9 @@ export function listConnectors() {
 // ------------------------------------------------------------------ //
 
 export function getExecutionJob(jobId: string) {
-  return apiClient.get<ExecutionJobResponse>(`/execution-jobs/${jobId}`);
+  return apiClient.get<ExecutionJobResponse>(`/execution-jobs/${jobId}`, {
+    skipGlobalErrorToast: true,
+  });
 }
 
 // ------------------------------------------------------------------ //

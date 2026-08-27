@@ -2,26 +2,38 @@
   "content": {
     "factors": {
       "asset_impact": {
+        "rubric_id": "standard_workstation",
+        "lean": "mid",
         "score": 38,
         "reason": "Asset impact unclear without enriched investigation context"
       },
       "behavior_anomaly": {
+        "rubric_id": "mild_irregular",
+        "lean": "mid",
         "score": 42,
         "reason": "Behavioral baseline not established from alert text alone"
       },
       "evidence_confidence": {
+        "rubric_id": "partial_single_source",
+        "lean": "mid",
         "score": 40,
         "reason": "Evidence collection may be incomplete for default mock path"
       },
       "attack_stage": {
+        "rubric_id": "valid_account_exec",
+        "lean": "mid",
         "score": 35,
         "reason": "Attack stage undetermined pending correlated telemetry"
       },
       "data_sensitivity": {
+        "rubric_id": "internal_routine",
+        "lean": "mid",
         "score": 36,
         "reason": "Data sensitivity unknown without asset or DLP context"
       },
       "threat_intel": {
+        "rubric_id": "weak_uncorroborated",
+        "lean": "mid",
         "score": 34,
         "reason": "No corroborating threat-intelligence signal in default mock path"
       }

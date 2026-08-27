@@ -504,6 +504,69 @@
         }
       }
     },
+    "/api/v1/events/{event_id}/final-verdict": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Set Event Final Verdict",
+        "description": "Write a terminal final_verdict without auto-closing from VERIFYING.\n\nWhen the event is held in ``manual_resolution``, optionally enqueue a graph\nresume so Verify phase 2 can activate the deferred terminal writeback.\n``none`` / ``possible_false_positive`` are rejected — they cannot unblock\nrequired-disposition activation.",
+        "operationId": "set_event_final_verdict_api_v1_events__event_id__final_verdict_post",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventFinalVerdictRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventFinalVerdictResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller lacks analyst (or admin) role.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Verdict is not terminal, or illegal for the current status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/events/{event_id}/close": {
       "post": {
         "tags": [
@@ -3501,7 +3564,8 @@
                 "enum": [
                   "ok",
                   "failed",
-                  "skipped"
+                  "skipped",
+                  "deferred"
                 ]
               },
               {
@@ -5661,6 +5725,13 @@
             "type": "array",
             "title": "Evidence List"
           },
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceConflict"
+            },
+            "type": "array",
+            "title": "Conflicts"
+          },
           "gaps": {
             "items": {
               "$ref": "#/components/schemas/EvidenceGapResponse"
@@ -5718,6 +5789,84 @@
         ],
         "title": "EventEvidenceResponse",
         "description": "GET /events/{event_id}/evidence payload (ISSUE-101)."
+      },
+      "EventFinalVerdictRequest": {
+        "properties": {
+          "final_verdict": {
+            "$ref": "#/components/schemas/FinalVerdict"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "resume": {
+            "type": "boolean",
+            "title": "Resume",
+            "default": true
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Id",
+            "description": "Optional idempotency key for graph resume after the verdict write."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "final_verdict",
+          "reason"
+        ],
+        "title": "EventFinalVerdictRequest",
+        "description": "Analyst terminal verdict while VERIFYING is held for manual resolution."
+      },
+      "EventFinalVerdictResponse": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/EventStatus"
+          },
+          "final_verdict": {
+            "$ref": "#/components/schemas/FinalVerdict"
+          },
+          "execution_substate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution Substate"
+          },
+          "resume_status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "not_held",
+              "skipped"
+            ],
+            "title": "Resume Status",
+            "default": "skipped"
+          }
+        },
+        "type": "object",
+        "required": [
+          "event_id",
+          "status",
+          "final_verdict"
+        ],
+        "title": "EventFinalVerdictResponse"
       },
       "EventListItem": {
         "properties": {
@@ -6051,6 +6200,50 @@
         "title": "EventType",
         "description": "Supported security event types (intro §1); extensible via scenario packs."
       },
+      "EvidenceConflict": {
+        "properties": {
+          "conflict_id": {
+            "type": "string",
+            "title": "Conflict Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "evidence_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Ids"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceSource"
+            },
+            "type": "array",
+            "title": "Sources"
+          },
+          "detail": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Detail"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "conflict_id",
+          "event_id",
+          "description"
+        ],
+        "title": "EvidenceConflict",
+        "description": "A detected contradiction between two or more pieces of evidence."
+      },
       "EvidenceGapResponse": {
         "properties": {
           "event_id": {
@@ -6227,6 +6420,13 @@
             "type": "boolean",
             "title": "Is Conflicting",
             "default": false
+          },
+          "observation_fields": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Observation Fields"
           }
         },
         "additionalProperties": false,
