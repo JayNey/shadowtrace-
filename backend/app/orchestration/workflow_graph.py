@@ -567,19 +567,28 @@ def _inflight_action_ids_from_summary(summary: Any) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
+def _pending_execution_action_ids(
+    verification_result: VerificationResult | None,
+) -> list[str]:
+    """Action ids Verify marked pending_execution — not plan/state fallback."""
+    if verification_result is None:
+        return []
+    return list(
+        dict.fromkeys(
+            item.action_id
+            for item in verification_result.results
+            if item.detail in _PENDING_EXECUTION_DETAILS
+        )
+    )
+
+
 def _inflight_action_ids_from_verify(
     state: InvestigationState,
     verification_result: VerificationResult | None,
 ) -> list[str]:
-    ids: list[str] = []
-    if verification_result is not None:
-        ids = [
-            item.action_id
-            for item in verification_result.results
-            if item.detail in _PENDING_EXECUTION_DETAILS
-        ]
+    ids = _pending_execution_action_ids(verification_result)
     if ids:
-        return list(dict.fromkeys(ids))
+        return ids
     plan = state.get("response_plan") or {}
     actions = plan.get("actions") if isinstance(plan, dict) else None
     if not isinstance(actions, list):
@@ -1977,10 +1986,9 @@ def build_investigation_graph(
             )
             kind = _classify_execution_summary(summary)
             execution_ok = kind in {"succeeded", "empty"}
-            execution_inflight = kind == "inflight"
-            inflight_ids = (
-                _inflight_action_ids_from_summary(summary) if execution_inflight else []
-            )
+            # Sibling FAILED must not hide EXECUTING ids from Verify WAIT.
+            inflight_ids = _inflight_action_ids_from_summary(summary)
+            execution_inflight = bool(inflight_ids)
         except SoftTimeLimitExceeded:
             # ISSUE-314: side-effect phase soft-limit must reach task owner.
             raise
@@ -2253,6 +2261,7 @@ def build_investigation_graph(
 
         # Extract routing flags from VerificationResult.
         update = _verification_result_state_update(verification_result)
+        pending_from_verify = _pending_execution_action_ids(verification_result)
         pending_inflight_ids = _inflight_action_ids_from_verify(state, verification_result)
         if not pending_inflight_ids:
             pending_inflight_ids = [
@@ -2266,22 +2275,33 @@ def build_investigation_graph(
             or verification_result.need_writeback_recovery
             or verification_result.need_manual_resolution
         )
+        # REQUIRED + ACCEPTED still emits pending_execution; phase-2 skip
+        # keeps need_manual false. WAIT even if a sibling asked for replan.
+        wait_for_pending_execution = bool(pending_from_verify) and not (
+            verification_result.need_manual_resolution
+        )
 
         # In-flight EXECUTING/ACCEPTED must WAIT/recovery — never collapse into
         # execution_failed_unverified (which forces MANUAL_RESOLUTION).
         # Nested wakeup is only for the WAIT/halt branch. Routing to
-        # manual/writeback/replan already has its own waiter; persisting here
-        # would re-enter the graph and bump a manual hold generation.
-        if execution_inflight:
-            if not agent_routed:
-                defer_nested_graph_resume(state["event_id"])
-                await persist_nested_graph_wakeup(
-                    state["event_id"],
-                    "execution_inflight_wait",
+        # true manual / writeback recovery (no pending_execution) already has
+        # its own waiter; persisting here would re-enter the graph and bump
+        # a manual hold generation.
+        if wait_for_pending_execution or (execution_inflight and not agent_routed):
+            persisted = await persist_nested_graph_wakeup(
+                state["event_id"],
+                "execution_inflight_wait",
+            )
+            if not persisted:
+                flags = await _persist_degraded_flag(
+                    state,
+                    "nested_wakeup_persist_failed",
+                    event_id=state["event_id"],
+                    degraded_flags=degraded_flags,
                 )
                 await runtime.set_execution_substate(
                     state["event_id"],
-                    ExecutionSubstate.WAITING_WRITEBACK,
+                    ExecutionSubstate.MANUAL_RESOLUTION,
                     event_status=EventStatus.VERIFYING,
                 )
                 return _patch_state(
@@ -2289,15 +2309,34 @@ def build_investigation_graph(
                     plan_patch,
                     {
                         **update,
-                        "execution_inflight": True,
-                        "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
-                        "halted": True,
+                        "degraded_flags": flags,
+                        "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+                        "halted": False,
                         "verify_need_action_replan": False,
-                        "verify_need_writeback_recovery": True,
-                        "verify_need_manual_resolution": False,
-                        "verify_pending_writeback_action_ids": pending_inflight_ids,
+                        "verify_need_writeback_recovery": False,
+                        "verify_need_manual_resolution": True,
                     },
                 )
+            defer_nested_graph_resume(state["event_id"])
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.WAITING_WRITEBACK,
+                event_status=EventStatus.VERIFYING,
+            )
+            return _patch_state(
+                _trace(NODE_VERIFY),
+                plan_patch,
+                {
+                    **update,
+                    "execution_inflight": True,
+                    "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+                    "halted": True,
+                    "verify_need_action_replan": False,
+                    "verify_need_writeback_recovery": True,
+                    "verify_need_manual_resolution": False,
+                    "verify_pending_writeback_action_ids": pending_inflight_ids,
+                },
+            )
 
         # True execute failure (FAILED / missing summary) with no VerifyAgent
         # routing signal — fail closed to MANUAL_RESOLUTION.

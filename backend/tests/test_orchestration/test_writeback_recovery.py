@@ -37,6 +37,24 @@ from app.orchestration.writeback_recovery_handler import (
     writeback_recovery_graph_node,
 )
 
+
+@pytest.fixture(autouse=True)
+def _nested_wakeup_writer() -> Any:
+    """Unit tests do not install the production durability writer."""
+    from app.orchestration.graph_invocation import (
+        get_nested_resume_durability_writer,
+        set_nested_resume_durability_writer,
+    )
+
+    async def _writer(_event_id: str, _reason: str) -> None:
+        return None
+
+    previous = get_nested_resume_durability_writer()
+    set_nested_resume_durability_writer(_writer)
+    yield
+    set_nested_resume_durability_writer(previous)
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -1401,3 +1419,30 @@ async def test_writeback_accepted_wait_enqueues_nested_wakeup(
     assert result["halted"] is True
     assert result["verify_need_writeback_recovery"] is True
     persist_wakeup.assert_awaited_once_with("evt-test-wb-001", "waiting_accepted")
+
+
+@pytest.mark.asyncio
+async def test_writeback_wait_persist_failure_does_not_halt_without_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persist_wakeup = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        "app.orchestration.graph_invocation.persist_nested_graph_wakeup",
+        persist_wakeup,
+    )
+    handler = WritebackRecoveryHandler(
+        state_machine=FakeStateMachine(),
+        runtime=FakeRuntime(),
+    )
+    state = _base_state(
+        verify_failed_writebacks=["wbk-accepted-wait"],
+        verify_recoverable_writeback_ids=["wbk-accepted-wait"],
+        verify_writeback_status="accepted",
+    )
+    result = await writeback_recovery_graph_node(state, handler=handler)
+    persist_wakeup.assert_awaited_once_with("evt-test-wb-001", "waiting_accepted")
+    assert result.get("halted") is not True
+    assert result["verify_need_manual_resolution"] is True
+    assert result["verify_need_writeback_recovery"] is False
+    assert result["execution_substate"] == ExecutionSubstate.MANUAL_RESOLUTION.value
+    assert result["error"] == "nested_wakeup_persist_failed"

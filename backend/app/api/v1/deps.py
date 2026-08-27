@@ -619,7 +619,11 @@ async def _on_nested_resume_flush_failure(
 
 async def _persist_nested_graph_wakeup(event_id: str, reason: str) -> None:
     service = await get_manual_resolution_service()
-    await service.enqueue_nested_wakeup(event_id, reason=reason)
+    record = await service.enqueue_nested_wakeup(event_id, reason=reason)
+    if record is None:
+        raise RuntimeError(
+            f"nested wakeup not persisted event={event_id} reason={reason}"
+        )
 
 
 async def _event_lease_is_held(event_id: str) -> bool:

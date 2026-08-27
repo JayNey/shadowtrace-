@@ -913,15 +913,41 @@ def _recovery_invariant_failure_patch(event_id: str) -> InvestigationState:
     )
 
 
-async def _persist_writeback_wait_wakeup(event_id: str, reason: str) -> None:
+def _wakeup_persist_failure_patch(event_id: str) -> InvestigationState:
+    """Fail-close when WAIT would halt without a durable nested wakeup."""
+    logger.error(
+        "writeback_recovery_node: nested wakeup persist failed event=%s",
+        event_id,
+    )
+    return cast(
+        InvestigationState,
+        {
+            "verify_need_writeback_recovery": False,
+            "verify_need_action_replan": False,
+            "verify_need_manual_resolution": True,
+            "verify_recoverable_writeback_ids": [],
+            "verify_pending_writeback_action_ids": [],
+            "verify_failed_writebacks": [],
+            "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+            "error": "nested_wakeup_persist_failed",
+            "halted": False,
+            "writeback_lookup_count": 0,
+            "writeback_retry_count": 0,
+        },
+    )
+
+
+async def _persist_writeback_wait_wakeup(event_id: str, reason: str) -> bool:
     """Durable nested wakeup so WAIT halt is not a silent stall."""
     from app.orchestration.graph_invocation import (
         defer_nested_graph_resume,
         persist_nested_graph_wakeup,
     )
 
-    defer_nested_graph_resume(event_id)
-    await persist_nested_graph_wakeup(event_id, reason or "writeback_wait")
+    persisted = await persist_nested_graph_wakeup(event_id, reason or "writeback_wait")
+    if persisted:
+        defer_nested_graph_resume(event_id)
+    return persisted
 
 
 def _pending_action_wait_patch(
@@ -995,7 +1021,9 @@ async def writeback_recovery_graph_node(
                 pending_actions,
                 event_id,
             )
-            await _persist_writeback_wait_wakeup(event_id, "writeback_wait")
+            persisted = await _persist_writeback_wait_wakeup(event_id, "writeback_wait")
+            if not persisted:
+                return _wakeup_persist_failure_patch(event_id)
             return _pending_action_wait_patch(pending_actions=pending_actions)
         if need_recovery:
             logger.error(
@@ -1103,10 +1131,12 @@ async def writeback_recovery_graph_node(
         # resume can re-evaluate the same real outbox ID. Nested wakeup is required
         # because the graph node sets halted=True and ACCEPTED reclaim is skipped.
         remaining_recoverable = failed_writebacks
-        await _persist_writeback_wait_wakeup(
+        persisted = await _persist_writeback_wait_wakeup(
             event_id,
             result.reason or "writeback_wait",
         )
+        if not persisted:
+            return _wakeup_persist_failure_patch(event_id)
         return cast(
             InvestigationState,
             {

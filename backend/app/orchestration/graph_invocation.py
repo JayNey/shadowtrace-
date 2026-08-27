@@ -201,9 +201,21 @@ async def persist_nested_graph_wakeup(
         return False
 
 
-async def _persist_pending_nested_wakeups(pending: list[str], reason: str) -> None:
+async def _persist_pending_nested_wakeups(pending: list[str], reason: str) -> bool:
+    ok = True
     for resume_event_id in pending:
-        await persist_nested_graph_wakeup(resume_event_id, reason)
+        if not await persist_nested_graph_wakeup(resume_event_id, reason):
+            ok = False
+    return ok
+
+
+def _nested_wakeup_persist_error(event_id: str, pending: list[str]) -> NestedGraphResumeError:
+    return NestedGraphResumeError(
+        "nested graph wakeup persist failed",
+        event_id=event_id,
+        pending=pending,
+        error_type="nested_wakeup_persist_failed",
+    )
 
 
 async def _notify_nested_resume_failure(
@@ -284,7 +296,9 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
             event_id,
             pending,
         )
-        await _persist_pending_nested_wakeups(pending, "nested_resume_no_runner")
+        persisted = await _persist_pending_nested_wakeups(
+            pending, "nested_resume_no_runner"
+        )
         error = NestedGraphResumeError(
             "nested graph resume deferred with no runner",
             event_id=event_id,
@@ -292,6 +306,8 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
         )
         for resume_event_id in pending:
             await _notify_nested_resume_failure(resume_event_id, error, [resume_event_id])
+        if not persisted:
+            raise _nested_wakeup_persist_error(event_id, pending)
         return
     for resume_event_id in pending:
         if await investigation_lease_is_held(resume_event_id):
@@ -299,10 +315,12 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
                 "persist nested graph resume without flush; event lease held event=%s",
                 resume_event_id,
             )
-            await persist_nested_graph_wakeup(
+            persisted = await persist_nested_graph_wakeup(
                 resume_event_id,
                 "investigation_in_progress",
             )
+            if not persisted:
+                raise _nested_wakeup_persist_error(resume_event_id, [resume_event_id])
             continue
         try:
             await runner(resume_event_id)
@@ -315,14 +333,26 @@ async def _flush_deferred_graph_resumes(event_id: str, pending: list[str]) -> No
                     resume_event_id,
                     exc.error_type,
                 )
-                await persist_nested_graph_wakeup(resume_event_id, exc.error_type)
+                persisted = await persist_nested_graph_wakeup(
+                    resume_event_id, exc.error_type
+                )
+                if not persisted:
+                    raise _nested_wakeup_persist_error(
+                        resume_event_id, [resume_event_id]
+                    ) from exc
                 continue
             logger.exception(
                 "deferred nested graph resume failed event=%s",
                 resume_event_id,
             )
-            await persist_nested_graph_wakeup(resume_event_id, "nested_resume_flush_failed")
+            persisted = await persist_nested_graph_wakeup(
+                resume_event_id, "nested_resume_flush_failed"
+            )
             await _notify_nested_resume_failure(resume_event_id, exc, [resume_event_id])
+            if not persisted:
+                raise _nested_wakeup_persist_error(
+                    resume_event_id, [resume_event_id]
+                ) from exc
         except BaseException:
             remaining = pending[pending.index(resume_event_id) :]
             logger.warning(
@@ -376,6 +406,8 @@ async def bind_investigation_graph(event_id: str) -> AsyncIterator[None]:
                         _persist_pending_nested_wakeups(pending, flush_persist)
                     )
                 if not isinstance(flush_error, Exception):
+                    raise
+                if isinstance(flush_error, NestedGraphResumeError) and yield_error is None:
                     raise
                 logger.exception(
                     "nested graph resume flush failed event=%s parent_graph_error=%s",

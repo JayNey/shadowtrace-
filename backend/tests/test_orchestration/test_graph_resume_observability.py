@@ -461,6 +461,50 @@ async def test_bind_persists_when_nested_resume_flush_fails() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bind_raises_when_nested_resume_persist_fails_after_flush_error() -> None:
+    from app.orchestration.graph_invocation import (
+        NestedGraphResumeError,
+        bind_investigation_graph,
+        defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
+        get_nested_resume_failure_handler,
+        get_nested_resume_runner,
+        set_nested_resume_durability_writer,
+        set_nested_resume_failure_handler,
+        set_nested_resume_runner,
+    )
+
+    notified: list[str] = []
+
+    async def _boom(_event_id: str) -> None:
+        raise RuntimeError("flush failed")
+
+    async def _writer(_event_id: str, _reason: str) -> None:
+        raise RuntimeError("persist failed")
+
+    async def _handler(event_id: str, exc: BaseException, pending: list[str]) -> None:
+        del event_id, pending
+        notified.append(type(exc).__name__)
+
+    previous = get_nested_resume_runner()
+    previous_writer = get_nested_resume_durability_writer()
+    previous_handler = get_nested_resume_failure_handler()
+    set_nested_resume_runner(_boom)
+    set_nested_resume_durability_writer(_writer)
+    set_nested_resume_failure_handler(_handler)
+    try:
+        with pytest.raises(NestedGraphResumeError) as exc_info:
+            async with bind_investigation_graph("evt-persist-fail"):
+                assert defer_nested_graph_resume("evt-persist-fail") is True
+        assert exc_info.value.error_type == "nested_wakeup_persist_failed"
+        assert notified == ["RuntimeError"]
+    finally:
+        set_nested_resume_runner(previous)
+        set_nested_resume_durability_writer(previous_writer)
+        set_nested_resume_failure_handler(previous_handler)
+
+
+@pytest.mark.asyncio
 async def test_bind_does_not_fail_parent_when_nested_resume_plan_advance_fails() -> None:
     from app.orchestration.graph_invocation import (
         bind_investigation_graph,
@@ -503,8 +547,10 @@ async def test_bind_notifies_failure_handler_when_nested_resume_has_no_runner() 
         NestedGraphResumeError,
         bind_investigation_graph,
         defer_nested_graph_resume,
+        get_nested_resume_durability_writer,
         get_nested_resume_failure_handler,
         get_nested_resume_runner,
+        set_nested_resume_durability_writer,
         set_nested_resume_failure_handler,
         set_nested_resume_runner,
     )
@@ -514,16 +560,22 @@ async def test_bind_notifies_failure_handler_when_nested_resume_has_no_runner() 
     async def _handler(event_id: str, exc: BaseException, pending: list[str]) -> None:
         notified.append((event_id, type(exc).__name__, list(pending)))
 
+    async def _writer(_event_id: str, _reason: str) -> None:
+        return None
+
     previous_runner = get_nested_resume_runner()
     previous_handler = get_nested_resume_failure_handler()
+    previous_writer = get_nested_resume_durability_writer()
     set_nested_resume_runner(None)
     set_nested_resume_failure_handler(_handler)
+    set_nested_resume_durability_writer(_writer)
     try:
         async with bind_investigation_graph("evt-no-runner-obs"):
             assert defer_nested_graph_resume("evt-no-runner-obs") is True
     finally:
         set_nested_resume_runner(previous_runner)
         set_nested_resume_failure_handler(previous_handler)
+        set_nested_resume_durability_writer(previous_writer)
 
     assert notified == [
         ("evt-no-runner-obs", "NestedGraphResumeError", ["evt-no-runner-obs"])

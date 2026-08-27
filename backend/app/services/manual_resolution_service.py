@@ -342,10 +342,10 @@ class ManualResolutionService:
                     "nested graph wakeup race lookup failed event=%s",
                     event_id,
                 )
-                return None
+                raise
         except Exception:
             logger.exception("failed to enqueue nested graph wakeup event=%s", event_id)
-            return None
+            raise
 
     async def _dispatch_nested_wakeup_if_unbound(
         self,

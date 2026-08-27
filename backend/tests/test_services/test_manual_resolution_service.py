@@ -1748,3 +1748,17 @@ async def test_kick_nested_wakeup_after_lease_release_hook_dispatches() -> None:
     finally:
         set_nested_wakeup_lease_release_kicker(previous)
 
+
+@pytest.mark.asyncio
+async def test_enqueue_nested_wakeup_reraises_generic_failures() -> None:
+    class _BoomSession:
+        async def __aenter__(self) -> None:
+            raise RuntimeError("db down")
+
+        async def __aexit__(self, *_args: object) -> bool:
+            return False
+
+    service = ManualResolutionService(lambda: _BoomSession())  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="db down"):
+        await service.enqueue_nested_wakeup("evt-wakeup-boom", reason="execution_inflight_wait")
+

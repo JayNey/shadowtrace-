@@ -62,7 +62,10 @@ from app.models.enums import (
 )
 from app.models.execution import ActionExecutionJob
 from app.models.tool_meta import ToolResult, ToolResultStatus
-from app.models.verification_readiness import has_immediate_effect_pending
+from app.models.verification_readiness import (
+    IMMEDIATE_PENDING_SKIP_DETAILS,
+    has_immediate_effect_pending,
+)
 from app.models.workflow import CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE
 from app.services.event_disposition_service import DispositionActivationResult
 from app.services.execution_job_persistence import job_from_row, load_target_results_by_job_ids
@@ -391,6 +394,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             disposition_policy=disposition_policy,
             phase1_need_replan=phase1_need_replan,
             phase1_need_manual=phase1_need_manual,
+            phase1_results=phase1_results,
             actions=actions,
             jobs_map=jobs_map,
             outbox_map=outbox_map,
@@ -895,6 +899,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         disposition_policy: DispositionPolicy | None,
         phase1_need_replan: bool,
         phase1_need_manual: bool,
+        phase1_results: list[VerificationActionResult],
         actions: list[Action],
         jobs_map: dict[str, ActionExecutionJob],
         outbox_map: dict[str, list[Any]],
@@ -950,6 +955,30 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 overall_status,
                 need_wb_recovery,
                 need_manual,
+            )
+
+        # IMMEDIATE EXECUTING/ACCEPTED is not effect-ready. Calling EDS here
+        # returns skipped_reason=effect_not_ready, which this method used to
+        # map to need_manual=True and skip the graph WAIT fence.
+        if has_immediate_effect_pending(None, results=phase1_results):
+            logger.info(
+                "Phase 2 skipped: IMMEDIATE effects still pending event=%s",
+                event_id,
+            )
+            pending_action_ids = {
+                item.action_id
+                for item in phase1_results
+                if item.detail in IMMEDIATE_PENDING_SKIP_DETAILS
+            }
+            overall_status = VerificationOverallStatus.WAITING
+            return (
+                results,
+                recoverable_wb,
+                pending_action_ids,
+                blocked_wb,
+                overall_status,
+                False,
+                False,
             )
 
         # If disposition is not required, no writeback to verify.
@@ -2195,14 +2224,20 @@ def _action_has_accepted_writeback(
     action: Action,
     outbox_map: dict[str, list[Any]],
 ) -> bool:
-    """True when the action or its delivered outbox is provider-ACCEPTED."""
-    if action.writeback_status is WritebackStatus.ACCEPTED:
+    """True when the live outbox (or empty outbox + Action) is still ACCEPTED.
+
+    Stale ``Action.writeback_status=ACCEPTED`` must not keep the 1800s clock
+    after every outbox has already moved to CONFIRMED/FAILED.
+    """
+    records = outbox_map.get(action.action_id, [])
+    if any(
+        getattr(record, "latest_writeback_status", None) is WritebackStatus.ACCEPTED
+        or getattr(record, "latest_writeback_status", None)
+        == WritebackStatus.ACCEPTED.value
+        for record in records
+    ):
         return True
-    for record in outbox_map.get(action.action_id, []):
-        raw = getattr(record, "latest_writeback_status", None)
-        if raw is WritebackStatus.ACCEPTED or raw == WritebackStatus.ACCEPTED.value:
-            return True
-    return False
+    return action.writeback_status is WritebackStatus.ACCEPTED and not records
 
 
 _ACCEPTED_CLOCK_ATTRS = ("delivered_at", "observed_at", "submitted_at")
