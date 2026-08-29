@@ -30,7 +30,6 @@ from app.adapters.sangfor.disposition import (
     UNBLOCK_PATH,
     UNISOLATE_PATH,
     VIRUS_SCAN_CREATE_PATH,
-    VIRUS_SCAN_STATUS_PATH,
     SangforBlockConfig,
     SangforDispositionAdapter,
     block_status_would_verify,
@@ -655,7 +654,7 @@ def test_scan_task_completed_without_host_failure_verifies() -> None:
 
 
 @pytest.mark.asyncio
-async def test_wire_scan_empty_code_accepted_and_sending_is_not_verified() -> None:
+async def test_wire_scan_empty_code_is_failed() -> None:
     command = _entity_command(
         entity_action_code=SCAN_ACTION,
         canonical_target="host:PC-FIN-023",
@@ -665,22 +664,12 @@ async def test_wire_scan_empty_code_accepted_and_sending_is_not_verified() -> No
         submitted = await adapter.submit(command)
         completion = await adapter.read_entity_effect_completion(command, submitted)
 
-    assert submitted.status is WritebackStatus.ACCEPTED
-    assert submitted.simulated is False
-    assert submitted.confirmation_evidence is None
-    assert submitted.raw_result.get("taskId") == "626664a025d603db019fd84c"
-    assert completion is not None
-    assert completion.verified is False
-    assert completion.provider_code == "effect_not_applied"
-    assert completion.applied_status == "completed"
-    assert completion.provider_record_id == "626664a025d603db019fd84c"
+    assert submitted.status is WritebackStatus.FAILED
+    assert completion is None
 
     paths = _paths(transport)
     assert VIRUS_SCAN_CREATE_PATH in paths
-    status_path = f"/api/xdr/v1/responses/virusscantask/{submitted.raw_result['taskId']}"
-    assert status_path in paths
-    assert all(":taskId" not in path for path in paths)
-    assert VIRUS_SCAN_STATUS_PATH not in paths
+    assert all("/virusscantask/" not in path or path.endswith("/virusscantask") for path in paths)
     assert _ISOLATE_CREATE_INVENTED not in paths
     assert BLOCK_NETWORK_PATH not in paths
 
@@ -694,8 +683,6 @@ async def test_wire_scan_empty_code_accepted_and_sending_is_not_verified() -> No
     assert body["scanMode"] == "adaptive"
     assert body["devices"]
     assert body["devices"][0]["devId"] == "edr-1"
-    get_req = _request_for(transport, status_path)
-    assert get_req.method == "GET"
 
 
 @pytest.mark.asyncio
@@ -714,6 +701,34 @@ async def test_scan_missing_device_identity_sends_zero_http() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scan_empty_create_code_is_failed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path.endswith("/virusscantask"):
+            return httpx.Response(
+                200,
+                json={"code": "", "message": "", "data": {"taskId": "task-empty"}},
+            )
+        raise AssertionError(f"unexpected {request.method} {path}")
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://xdr.example.com",
+    )
+    adapter = SangforDispositionAdapter(
+        _client(http),
+        block_config=SangforBlockConfig(devices=(_EDR_DEVICE,)),
+    )
+    command = _entity_command(
+        entity_action_code=SCAN_ACTION,
+        canonical_target="host:PC-FIN-023",
+    )
+    submitted = await adapter.submit(command)
+    await http.aclose()
+    assert submitted.status is WritebackStatus.FAILED
+
+
+@pytest.mark.asyncio
 async def test_scan_completed_without_host_failure_verifies() -> None:
     captured: list[httpx.Request] = []
 
@@ -723,7 +738,7 @@ async def test_scan_completed_without_host_failure_verifies() -> None:
         if request.method == "POST" and path.endswith("/virusscantask"):
             return httpx.Response(
                 200,
-                json={"code": "", "message": "", "data": {"taskId": "task-ok-1"}},
+                json={"code": "Success", "message": "", "data": {"taskId": "task-ok-1"}},
             )
         if request.method == "GET" and path.endswith("/virusscantask/task-ok-1"):
             return httpx.Response(
@@ -771,7 +786,7 @@ async def test_scan_completed_with_host_failure_is_not_verified() -> None:
         if request.method == "POST" and path.endswith("/virusscantask"):
             return httpx.Response(
                 200,
-                json={"code": "", "data": {"taskId": "task-host-fail"}},
+                json={"code": "Success", "data": {"taskId": "task-host-fail"}},
             )
         return httpx.Response(
             200,
@@ -813,7 +828,7 @@ async def test_scan_partial_completed_is_not_verified() -> None:
         if request.method == "POST" and path.endswith("/virusscantask"):
             return httpx.Response(
                 200,
-                json={"code": "", "data": {"taskId": "task-partial"}},
+                json={"code": "Success", "data": {"taskId": "task-partial"}},
             )
         return httpx.Response(
             200,
@@ -920,7 +935,8 @@ async def _run_ticket(
 def _ticket_create_ok_handler(
     *,
     list_status: str = "unfinished",
-    list_code: str = "",
+    list_code: str = "Success",
+    list_order_id: int | str | None = None,
 ) -> Any:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -940,19 +956,18 @@ def _ticket_create_ok_handler(
                 },
             )
         if request.method == "POST" and path.endswith("/orders/list"):
+            item: dict[str, Any] = {
+                "workflowId": _TICKET_WORKFLOW_ID,
+                "orderStatus": list_status,
+            }
+            if list_order_id is not None:
+                item["orderId"] = list_order_id
             return httpx.Response(
                 200,
                 json={
                     "code": list_code,
                     "message": "",
-                    "data": {
-                        "item": [
-                            {
-                                "workflowId": _TICKET_WORKFLOW_ID,
-                                "orderStatus": list_status,
-                            }
-                        ]
-                    },
+                    "data": {"item": [item]},
                 },
             )
         raise AssertionError(f"unexpected {request.method} {path}")
@@ -961,20 +976,18 @@ def _ticket_create_ok_handler(
 
 
 @pytest.mark.asyncio
-async def test_ticket_success_order_id_accepted_and_list_mismatch_still_verified() -> None:
+async def test_ticket_success_order_id_accepted_and_list_mismatch_is_unverified() -> None:
     submitted, completion, captured = await _run_ticket(_ticket_create_ok_handler())
     assert submitted.status is WritebackStatus.ACCEPTED
     assert submitted.simulated is False
     assert submitted.confirmation_evidence is None
     assert submitted.raw_result.get("orderId") == 212
     assert completion is not None
-    assert completion.verified is True
+    assert completion.verified is False
     assert completion.applied_status == "created"
     assert completion.target_type == "ticket"
     assert completion.target == "incident-wire-001"
     assert completion.provider_record_id == "212"
-    assert completion.provider_code == "Success"
-    assert completion.provider_code != "effect_not_applied"
 
     paths = [httpx.URL(item.url).path for item in captured]
     assert TICKET_CREATE_PATH in paths
@@ -1002,13 +1015,24 @@ async def test_ticket_success_order_id_accepted_and_list_mismatch_still_verified
 
 
 @pytest.mark.asyncio
+async def test_ticket_list_containing_order_id_is_verified() -> None:
+    submitted, completion, captured = await _run_ticket(
+        _ticket_create_ok_handler(list_order_id=212),
+    )
+    assert submitted.status is WritebackStatus.ACCEPTED
+    assert completion is not None
+    assert completion.verified is True
+    assert any(item.url.path == TICKET_LIST_PATH for item in captured)
+
+
+@pytest.mark.asyncio
 async def test_ticket_list_unfinished_does_not_wait_for_resolved() -> None:
     submitted, completion, _captured = await _run_ticket(
         _ticket_create_ok_handler(list_status="unfinished", list_code=""),
     )
     assert submitted.status is WritebackStatus.ACCEPTED
     assert completion is not None
-    assert completion.verified is True
+    assert completion.verified is False
     assert completion.applied_status == "created"
 
 
@@ -1020,7 +1044,7 @@ async def test_ticket_lowercase_incident_type_accepted() -> None:
     )
     assert submitted.status is WritebackStatus.ACCEPTED
     assert completion is not None
-    assert completion.verified is True
+    assert completion.verified is False
     create = next(item for item in captured if item.url.path == TICKET_CREATE_PATH)
     assert _json_body(create)["businessData"]["type"] == "incident"
 
@@ -1091,7 +1115,7 @@ async def test_ticket_invalid_parameter_is_failed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ticket_list_failure_still_verified_from_create() -> None:
+async def test_ticket_list_failure_is_not_verified() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if request.method == "POST" and path.endswith("/orders") and not path.endswith(
@@ -1108,7 +1132,7 @@ async def test_ticket_list_failure_still_verified_from_create() -> None:
     submitted, completion, captured = await _run_ticket(handler)
     assert submitted.status is WritebackStatus.ACCEPTED
     assert completion is not None
-    assert completion.verified is True
+    assert completion.verified is False
     assert any(item.url.path == TICKET_LIST_PATH for item in captured)
 
 

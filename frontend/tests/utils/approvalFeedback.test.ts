@@ -50,4 +50,18 @@ describe("showResumeFeedback", () => {
       "动作 act-3 已拒绝，但调查流程继续失败，请查看事件状态（降级模式运行）",
     );
   });
+
+  it("warns when resume is deferred", () => {
+    const warning = vi.spyOn(message, "warning").mockImplementation(() => undefined as never);
+    showResumeFeedback("act-4", "approve", {
+      action_id: "act-4",
+      status: "approved",
+      message: "approved",
+      resume_status: "deferred",
+      degraded: false,
+    });
+    expect(warning).toHaveBeenCalledWith(
+      "动作 act-4 已批准，调查流程暂未继续（租约占用，将自动重试）",
+    );
+  });
 });

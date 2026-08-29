@@ -191,12 +191,8 @@ def _owner_decisions(
     )
     decisions["scan_host_for_virus"] = _xdr_only_if(scan_ready)
 
-    ticket_ready = (
-        roles.get("orders_create") == "write"
-        and bool((config.ticket_template_id or "").strip())
-        and any(item.strip() for item in config.ticket_assignee_ids)
-    )
-    decisions["create_ticket"] = _xdr_only_if(ticket_ready)
+    # Tickets stay DIRECT_TOOL; AES has no create_ticket entity submit.
+    decisions.pop("create_ticket", None)
 
     if roles.get("incidents_dealstatus") == "write":
         decisions[TERMINAL_DISPOSITION_TOOL] = [ExecutionOwner.XDR_MANAGED]

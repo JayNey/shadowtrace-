@@ -284,7 +284,7 @@ describe("EventListPage", () => {
     });
   });
 
-  it("updates writeback badge on writeback_updated", async () => {
+  it("does not rewrite overall writeback status from a single writeback_updated", async () => {
     const item = makeItem({
       writeback_required: true,
       writeback_overall_status: "pending",
@@ -304,10 +304,11 @@ describe("EventListPage", () => {
       },
     });
 
-    // After CONFIRMED with no readback evidence -> "已同步（弱证据）"
+    // A single writeback_updated is not event-level overall status.
     await waitFor(() => {
-      expect(screen.getByText("已同步（弱证据）")).toBeInTheDocument();
+      expect(screen.getByText("待发送")).toBeInTheDocument();
     });
+    expect(screen.queryByText("已同步（弱证据）")).not.toBeInTheDocument();
   });
 
   it("calls triggerInvestigation and moves row to TRIAGING", async () => {
@@ -834,6 +835,7 @@ describe("EventListPage", () => {
 
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     await user.click(screen.getByTestId("trigger-investigation-evt-1"));
+    expect(await screen.findByTestId("investigate-mode-full-loop")).toBeDisabled();
     await user.click(screen.getByText("开始调查"));
 
     await waitFor(() => expect(mockTriggerInvestigation).toHaveBeenCalled());

@@ -33,6 +33,11 @@ export function showResumeFeedback(
     case "skipped":
       message.info(`动作 ${actionId} ${verb}（当前无待继续的调查流程）${degradedSuffix}`);
       break;
+    case "deferred":
+      message.warning(
+        `动作 ${actionId} ${verb}，调查流程暂未继续（租约占用，将自动重试）${degradedSuffix}`,
+      );
+      break;
     case "failed":
       message.error(
         `动作 ${actionId} ${verb}，但调查流程继续失败，请查看事件状态${resumeFailureDetail(result)}${degradedSuffix}`,

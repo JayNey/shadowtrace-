@@ -10,7 +10,8 @@ from typing import Any
 REDACTED = "[REDACTED]"
 
 _SENSITIVE_KEY_RE = re.compile(
-    r"(?:password|passwd|pwd|secret|token|authorization|api[_-]?key|cookie|"
+    r"(?:password|passwd|pwd|secret|token|authorization|api[_-]?key|"
+    r"access[_-]?key|auth[_-]?code|cookie|"
     r"credential|private[_-]?key|session[_-]?id|raw[_-]?(?:result|payload))",
     re.IGNORECASE,
 )
@@ -25,7 +26,7 @@ _SENSITIVE_HEADER_RE = re.compile(
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?P<prefix>\b(?:password|passwd|pwd|secret|token|access[_-]?token|"
-    r"refresh[_-]?token|api[_-]?key|credential|session[_-]?id)"
+    r"refresh[_-]?token|api[_-]?key|access[_-]?key|auth[_-]?code|credential|session[_-]?id)"
     r"\b[\"']?\s*[:=]\s*)"
     r"(?P<secret>\"[^\"]*\"|'[^']*'|[^\s,;&}]+)",
     re.IGNORECASE,

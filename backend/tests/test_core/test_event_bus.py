@@ -48,6 +48,8 @@ def test_sanitize_redacts_secrets_and_raw_result() -> None:
             "diagnostic": 'password="value with spaces" cookie=session-secret; Path=/',
             "jwt_note": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTEifQ.signature123",
             "endpoint": "https://user:password@example.test/api",
+            "access_key": "ak-should-redact",
+            "auth_code": "code-should-redact",
         }
     )
     assert cleaned["status"] == "closed"
@@ -62,6 +64,8 @@ def test_sanitize_redacts_secrets_and_raw_result() -> None:
     assert "session-secret" not in cleaned["diagnostic"]
     assert "eyJhbGci" not in cleaned["jwt_note"]
     assert "password" not in cleaned["endpoint"]
+    assert cleaned["access_key"] == "[REDACTED]"
+    assert cleaned["auth_code"] == "[REDACTED]"
 
 
 def test_redacting_log_formatter_removes_credential_values() -> None:

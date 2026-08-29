@@ -414,8 +414,15 @@ def _structured_identity_texts(chunk: RetrievedChunk) -> list[str]:
 
 
 def _field_parse_haystacks(chunk: RetrievedChunk) -> list[str]:
-    """§1.2.1 (1): parse host=/account=/process=/domain= from content + metadata."""
-    texts = [chunk.content or "", *_structured_identity_texts(chunk)]
+    """§1.2.1 (1): parse host=/account=/process=/domain= from identity fields.
+
+    ``fp_case_kb`` identity lives in ``entity_pattern`` / ``key_entities``.
+    Flattened ``content`` / ``fp_reason`` often name counter-IOCs.
+    """
+    texts = list(_structured_identity_texts(chunk))
+    if chunk.kb_name == "fp_case_kb":
+        return texts
+    texts.append(chunk.content or "")
     for value in (chunk.metadata or {}).values():
         if isinstance(value, str) and value.strip():
             texts.append(value)

@@ -475,6 +475,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                         get_super_agent=_self_agent,
                         get_workflow_runtime=get_workflow_runtime,
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     logger.warning(
                         "SuperAgent: same-lease approval catchup failed event=%s",

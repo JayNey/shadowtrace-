@@ -407,7 +407,7 @@ async def execute_redelivery_resume(
             lease_acquired=lease_acquired,
         )
 
-    await execute_graph_resume_with_retry(
+    outcome = await execute_graph_resume_with_retry(
         event_id,
         session_factory=_get_session_factory(),
         get_super_agent=get_super_agent,
@@ -415,6 +415,26 @@ async def execute_redelivery_resume(
         degraded_flags=_get_degraded_flags(),
         lease_acquired=lease_acquired,
     )
+    if outcome == "deferred":
+        return {
+            "status": "skipped",
+            "event_id": event_id,
+            "reason": "lease_deferred",
+        }
+    if lease_acquired:
+        from app.api.v1.deps import get_event_lease
+
+        try:
+            await get_event_lease().release(event_id, owner_id)
+        except SoftTimeLimitExceeded:
+            raise
+        except Exception:
+            logger.warning(
+                "redelivery resume lease release failed event=%s owner=%s",
+                event_id,
+                owner_id,
+                exc_info=True,
+            )
     return {"status": "completed", "event_id": event_id}
 
 
@@ -485,7 +505,8 @@ async def _handle_redelivered_investigation(
         event_id,
         owner_id=owner_id,
         event_status=event_status,
-        lease_acquired=lease_acquired or handoff.reason == "lease_acquired",
+        lease_acquired=lease_acquired
+        or handoff.reason in {"lease_acquired", "lease_owned_by_delivery"},
         analysis_only=analysis_only,
         generate_report=generate_report,
     )
@@ -508,6 +529,7 @@ async def _finalize_intent_from_result(
             "investigation_in_progress",
             "investigation_lease_lost",
             "waiting_approval",
+            "lease_deferred",
         }:
             # Lease contention / loss before this delivery owns execution — keep
             # the durable intent recoverable instead of a terminal SKIPPED hole.

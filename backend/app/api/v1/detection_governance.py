@@ -10,6 +10,7 @@ from fastapi import APIRouter, Query
 from app.api.v1 import schemas as s
 from app.api.v1.deps import DetectionGovernanceDep
 from app.core.auth import ROLE_ANALYST, ROLE_APPROVER, Principal, require_roles
+from app.evaluation.threshold import confine_threshold_manifest_path
 from app.models.detection_evaluation import DetectionEvaluationArtifact
 from app.models.detection_governance import (
     DetectionGovernanceDecisionKind,
@@ -18,6 +19,13 @@ from app.models.detection_governance import (
 )
 
 router = APIRouter(tags=["detection-governance"])
+
+
+def _confined_manifest_path(raw: str | None) -> Path | None:
+    stripped = (raw or "").strip()
+    if not stripped:
+        return None
+    return confine_threshold_manifest_path(Path(stripped))
 
 
 @router.post(
@@ -32,9 +40,7 @@ async def assess_detection_governance_eligibility(
     artifact = DetectionEvaluationArtifact.model_validate(body.artifact)
     assessment = await governance.assess_eligibility(
         artifact,
-        threshold_manifest_path=Path(body.threshold_manifest_path)
-        if body.threshold_manifest_path
-        else None,
+        threshold_manifest_path=_confined_manifest_path(body.threshold_manifest_path),
         principal=principal,
     )
     return s.DetectionGovernanceEligibilityResponse.model_validate(assessment.model_dump())
@@ -59,9 +65,7 @@ async def record_detection_governance_decision(
         principal,
         artifact,
         request,
-        threshold_manifest_path=Path(body.threshold_manifest_path)
-        if body.threshold_manifest_path
-        else None,
+        threshold_manifest_path=_confined_manifest_path(body.threshold_manifest_path),
     )
     return s.DetectionGovernanceDecisionResponse.model_validate(decision.model_dump())
 

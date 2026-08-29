@@ -13,6 +13,7 @@ from app.adapters.factory import (
     SANGFOR_PROVIDER,
     build_disposition_adapter_registry,
     build_source_adapter,
+    disposition_kind,
     disposition_provider_name,
     live_auth_failed,
     probe_sangfor_auth,
@@ -101,6 +102,17 @@ def test_factory_rejects_unknown_kind() -> None:
 def test_factory_rejects_disposition_mode_live() -> None:
     with pytest.raises(ConfigurationError, match="disposition_mode=live"):
         Settings(APP_ENV="development", DISPOSITION_MODE="live")
+
+
+def test_disposition_kind_rejects_live_xdr_mock() -> None:
+    probe = object.__new__(Settings)
+    object.__setattr__(probe, "disposition_mode", "live_xdr")
+    object.__setattr__(probe, "disposition_adapter_kind", "mock")
+    with pytest.raises(ConfigurationError, match="live_xdr"):
+        disposition_kind(probe)
+    object.__setattr__(probe, "disposition_adapter_kind", "")
+    with pytest.raises(ConfigurationError, match="live_xdr"):
+        disposition_kind(probe)
 
 
 def test_factory_rejects_sangfor_kind_with_mock_disposition_mode() -> None:

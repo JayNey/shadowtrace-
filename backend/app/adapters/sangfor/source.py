@@ -21,6 +21,7 @@ from app.adapters.source.base import (
     SourceEvidencePage,
     SourcePage,
 )
+from app.core.errors import DependencyUnavailableError
 from app.models.enums import (
     CapabilityState,
     ConnectorCapability,
@@ -757,7 +758,10 @@ class SangforSourceAdapter(BaseSourceAdapter):
                 error_category="transport_failure",
                 detail={"type": type(exc).__name__},
             )
-            return None, self._empty_page(kind, scope, server_time, malformed=1)
+            raise DependencyUnavailableError(
+                "sangfor source list transport failure",
+                details={"path": path, "type": type(exc).__name__},
+            ) from exc
         http_ok = 200 <= result.http_status < 300
         if not http_ok or result.business_code != "Success":
             self._record_list_failure(
@@ -768,7 +772,14 @@ class SangforSourceAdapter(BaseSourceAdapter):
                     "business_code": result.business_code,
                 },
             )
-            return None, self._empty_page(kind, scope, server_time, malformed=1)
+            raise DependencyUnavailableError(
+                "sangfor source list business failure",
+                details={
+                    "path": path,
+                    "http_status": result.http_status,
+                    "business_code": result.business_code,
+                },
+            )
         data = result.data if isinstance(result.data, dict) else None
         if data is None or not isinstance(data.get("item"), list):
             self._record_list_failure(
@@ -837,12 +848,23 @@ class SangforSourceAdapter(BaseSourceAdapter):
             return self._empty_page(SourceObjectKind.INCIDENT, scope, server_time, malformed=1)
 
         body = self._list_body(window)
-        result = await self._client.request(
-            "POST",
-            INCIDENTS_LIST_PATH,
-            json_body=body,
-            headers={"content-type": "application/json"},
-        )
+        try:
+            result = await self._client.request(
+                "POST",
+                INCIDENTS_LIST_PATH,
+                json_body=body,
+                headers={"content-type": "application/json"},
+            )
+        except Exception as exc:  # noqa: BLE001 — poll must not crash on vendor IO
+            self._quality.record(
+                stage="source_list",
+                error_category="transport_failure",
+                detail={"type": type(exc).__name__, "path": INCIDENTS_LIST_PATH},
+            )
+            raise DependencyUnavailableError(
+                "sangfor incident list transport failure",
+                details={"path": INCIDENTS_LIST_PATH, "type": type(exc).__name__},
+            ) from exc
         http_ok = 200 <= result.http_status < 300
         if not http_ok or result.business_code != "Success":
             self._quality.record(
@@ -854,7 +876,14 @@ class SangforSourceAdapter(BaseSourceAdapter):
                     "path": INCIDENTS_LIST_PATH,
                 },
             )
-            return self._empty_page(SourceObjectKind.INCIDENT, scope, server_time, malformed=1)
+            raise DependencyUnavailableError(
+                "sangfor incident list business failure",
+                details={
+                    "http_status": result.http_status,
+                    "business_code": result.business_code,
+                    "path": INCIDENTS_LIST_PATH,
+                },
+            )
         data = result.data if isinstance(result.data, dict) else None
         if data is None or not isinstance(data.get("item"), list):
             self._quality.record(

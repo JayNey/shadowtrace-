@@ -122,3 +122,21 @@ def test_fp_labeled_account_host_and_is_first_keyword_road() -> None:
     assert "ops-change-bot" in roads[0]
     assert "PC-OPS-JUMP-01" in roads[0]
     assert "net.exe" not in roads[0]
+
+
+def test_fp_and_fallback_strips_trailing_period_and_skips_process() -> None:
+    roads = keyword_queries_for_kb(
+        "fp_case_kb",
+        "severity low. 7z.exe packed files.corp.internal",
+        limit=2,
+    )
+    first = roads[0] if roads else ""
+    assert "7z.exe" not in first
+    assert "low" not in first.split()
+    labeled = keyword_queries_for_kb(
+        "fp_case_kb",
+        "Account:ops-change-bot Host:PC-OPS-JUMP-01 Process:7z.exe",
+        limit=1,
+    )
+    assert labeled
+    assert "7z.exe" not in labeled[0]

@@ -258,6 +258,8 @@ class RetrievalPipeline:
         retrieve_ms = _elapsed_ms(retrieve_started)
         if getattr(self._retriever, "vector_unavailable", False):
             degraded.append("vector_unavailable")
+        if getattr(self._retriever, "keyword_unavailable", False):
+            degraded.append("keyword_unavailable")
 
         extra_blocked = blocked_domains_from_constraints(active_context.org_constraints)
         entity_kb = kb_names[0] if len(kb_names) == 1 else ""

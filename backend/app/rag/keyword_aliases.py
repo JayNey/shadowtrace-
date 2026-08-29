@@ -226,8 +226,17 @@ def _fp_entity_and(query: str) -> str:
             break
     if labeled_and:
         return " ".join(labeled_and)
+    process_labeled = {
+        match.group("value").lower()
+        for match in _LABELED_ENTITY.finditer(query)
+        if match.group("label").lower() == "process"
+    }
     tokens = _entity_tokens(query)
-    entity_like = [token for token in tokens if _fp_and_fallback_token(token)]
+    entity_like = [
+        token
+        for token in tokens
+        if _fp_and_fallback_token(token) and token.lower() not in process_labeled
+    ]
     if entity_like:
         return " ".join(entity_like[:2])
     return ""
@@ -237,6 +246,9 @@ def _entity_tokens(query: str) -> list[str]:
     labeled = [match.group("value") for match in _LABELED_ENTITY.finditer(query)]
     leftover: list[str] = []
     for token in _TOKEN.findall(query):
+        token = token.rstrip(".")
+        if not token:
+            continue
         lowered = token.lower()
         if lowered in _STOPWORDS or lowered in _EVENT_TYPE_FTS:
             continue
@@ -264,7 +276,8 @@ def _looks_like_entity(token: str) -> bool:
 
 def _fp_and_fallback_token(token: str) -> bool:
     """Account/host-like only. Process and dotted domains never occupy AND slots."""
-    if not _looks_like_entity(token):
+    token = token.rstrip(".")
+    if not token or not _looks_like_entity(token):
         return False
     lowered = token.lower()
     suffix = lowered.rsplit(".", 1)[-1]

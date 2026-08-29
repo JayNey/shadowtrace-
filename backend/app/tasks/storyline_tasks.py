@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.core.celery_app import celery_app
 from app.services.storyline_service import STORYLINE_REFINE_TASK
 
@@ -41,6 +43,8 @@ def refine_storyline(event_id: str) -> dict[str, str]:
     """Replace the rule storyline with an LLM version when the provider is up."""
     try:
         asyncio.run(_refine_storyline(event_id))
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         logger.warning("storyline refine failed event=%s", event_id, exc_info=True)
         return {"event_id": event_id, "status": "failed"}

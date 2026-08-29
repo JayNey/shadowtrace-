@@ -457,6 +457,25 @@ async def prepare_graph_resume_state(
     }:
         return True
 
+    if status_value == EventStatus.CONTAINED.value:
+        needs_patch = bool(
+            values.get("halted")
+            or values.get("needs_approval_wait")
+            or values.get("execution_substate") == ExecutionSubstate.WAITING_APPROVAL.value
+        )
+        if needs_patch:
+            await graph.aupdate_state(
+                config,
+                {
+                    "halted": False,
+                    "needs_approval_wait": False,
+                    "execution_substate": ExecutionSubstate.NONE.value,
+                    "event_status": EventStatus.CONTAINED.value,
+                },
+                as_node=NODE_REPORT,
+            )
+        return True
+
     if status_value != EventStatus.EXECUTING_RESPONSE.value:
         logger.warning(
             "prepare_graph_resume: unexpected DB status=%s event=%s; skipping checkpoint patch",
@@ -709,6 +728,7 @@ async def resume_investigation_from_checkpoint(
     lease = None
     owner_id: str | None = None
     owns_lease = False
+    soft_limited = False
     if not lease_acquired:
         lease = get_event_lease()
         owner_id = generate_owner_id()
@@ -725,10 +745,16 @@ async def resume_investigation_from_checkpoint(
             get_workflow_runtime=get_workflow_runtime,
         )
         return "ok"
+    except SoftTimeLimitExceeded:
+        # ISSUE-314: keep the lease until the task-layer outcome handler runs.
+        soft_limited = True
+        raise
     finally:
-        if owns_lease and lease is not None and owner_id is not None:
+        if owns_lease and not soft_limited and lease is not None and owner_id is not None:
             try:
                 await lease.release(event_id, owner_id)
+            except SoftTimeLimitExceeded:
+                raise
             except Exception:
                 logger.debug(
                     "graph resume lease release failed event=%s",

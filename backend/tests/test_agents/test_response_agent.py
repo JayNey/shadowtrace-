@@ -19,6 +19,7 @@ from app.agents.response_agent import (
     _enforce_execution_owner_consistency,
     _entities_summary,
     approval_confidence_for_disposition_only,
+    approved_terminal_for_context,
     build_mock_capability_manifest,
     compute_action_fingerprint,
     derive_stable_action_id,
@@ -489,6 +490,17 @@ async def test_deferred_approved_terminal_subset_only() -> None:
         SourceDisposition.IGNORED,
     }
     assert deferred.approved_terminal_dispositions == [SourceDisposition.IGNORED]
+
+
+def test_approved_terminal_coerces_string_false_positive() -> None:
+    assert approved_terminal_for_context(
+        disposition_only=False,
+        final_verdict="false_positive",
+    ) == [SourceDisposition.IGNORED]
+    assert approved_terminal_for_context(
+        disposition_only=False,
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+    ) == [SourceDisposition.CONTAINED, SourceDisposition.COMPLETED]
 
 
 @pytest.mark.asyncio

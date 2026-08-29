@@ -671,9 +671,15 @@ def candidates_from_playbook(
 def approved_terminal_for_context(
     *,
     disposition_only: bool,
-    final_verdict: FinalVerdict | None,
+    final_verdict: FinalVerdict | str | None,
 ) -> list[SourceDisposition]:
-    if disposition_only or final_verdict is FinalVerdict.FALSE_POSITIVE:
+    verdict = final_verdict
+    if isinstance(verdict, str):
+        try:
+            verdict = FinalVerdict(verdict)
+        except ValueError:
+            verdict = None
+    if disposition_only or verdict == FinalVerdict.FALSE_POSITIVE:
         return [SourceDisposition.IGNORED]
     return [SourceDisposition.CONTAINED, SourceDisposition.COMPLETED]
 
@@ -1413,10 +1419,9 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                 try:
                     event = await getter(input.event_id)
                     if event is not None:
-                        ctx.setdefault(
-                            "disposition_policy",
-                            getattr(event, "disposition_policy", None),
-                        )
+                        policy = getattr(event, "disposition_policy", None)
+                        if policy is not None:
+                            ctx["disposition_policy"] = policy
                         verdict = getattr(event, "final_verdict", None)
                         if verdict is not None and not isinstance(verdict, FinalVerdict):
                             ctx["final_verdict"] = FinalVerdict(verdict)

@@ -183,7 +183,7 @@ def assess_governance_eligibility(
                 threshold_manifest_validated = True
         except Exception as exc:  # noqa: BLE001 — surface as fail-closed eligibility
             reason_codes.append(DetectionGovernanceReasonCode.THRESHOLD_MANIFEST_MISMATCH)
-            messages.append(f"threshold manifest validation failed: {exc}")
+            messages.append("threshold manifest validation failed")
 
     eligible = not reason_codes
     return DetectionGovernanceEligibilityAssessment(

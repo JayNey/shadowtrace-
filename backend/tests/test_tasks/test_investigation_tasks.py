@@ -1649,6 +1649,101 @@ async def test_execute_redelivery_resume_calls_checkpoint_resume_with_public_di(
 
 
 @pytest.mark.asyncio
+async def test_execute_redelivery_resume_deferred_is_skipped_not_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.v1 import deps
+
+    resume_mock = AsyncMock(return_value="deferred")
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.execute_graph_resume_with_retry",
+        resume_mock,
+    )
+    monkeypatch.setattr(deps, "_get_degraded_flags", lambda: object())
+
+    result = await tasks.execute_redelivery_resume(
+        "evt-redelivery-deferred",
+        owner_id="owner-redelivery",
+        event_status=EventStatus.EXECUTING_RESPONSE,
+    )
+
+    assert result == {
+        "status": "skipped",
+        "event_id": "evt-redelivery-deferred",
+        "reason": "lease_deferred",
+    }
+
+
+@pytest.mark.asyncio
+async def test_handle_redelivered_inherits_lease_owned_by_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.celery_delivery import (
+        RedeliveryDecision,
+        RedeliveryHandoffAction,
+        RedeliveryHandoffVerdict,
+    )
+
+    resume_mock = AsyncMock(return_value={"status": "completed", "event_id": "evt-owned"})
+    monkeypatch.setattr(tasks, "execute_redelivery_resume", resume_mock)
+    monkeypatch.setattr(
+        tasks,
+        "evaluate_redelivered_investigation_decision",
+        AsyncMock(
+            return_value=(
+                RedeliveryDecision.RESUME_OR_DEFER,
+                EventStatus.EXECUTING_RESPONSE,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "evaluate_redelivery_handoff",
+        AsyncMock(
+            return_value=RedeliveryHandoffVerdict(
+                action=RedeliveryHandoffAction.RESUME,
+                reason="lease_owned_by_delivery",
+            )
+        ),
+    )
+
+    result = await tasks._handle_redelivered_investigation(
+        "evt-owned",
+        task_id="task-owned",
+        owner_id="celery-task-owned",
+        request_headers=None,
+        lease_acquired=False,
+    )
+
+    assert result == {"status": "completed", "event_id": "evt-owned"}
+    resume_mock.assert_awaited_once()
+    assert resume_mock.await_args.kwargs["lease_acquired"] is True
+
+
+@pytest.mark.asyncio
+async def test_finalize_lease_deferred_marks_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = MagicMock()
+    service.mark_retry = AsyncMock()
+    service.mark_skipped = AsyncMock()
+    service.mark_terminal = AsyncMock()
+    monkeypatch.setattr("app.db.session.get_session_factory", lambda: object())
+    monkeypatch.setattr(
+        "app.services.investigation_intent_service.InvestigationIntentService",
+        lambda _sf: service,
+    )
+    await tasks._finalize_intent_from_result(
+        "iin-deferred",
+        {"status": "skipped", "reason": "lease_deferred", "event_id": "evt-x"},
+        broker_task_id="task-1",
+    )
+    service.mark_retry.assert_awaited_once()
+    service.mark_skipped.assert_not_called()
+    service.mark_terminal.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_analysis_only_soft_limit_does_not_mark_failed_before_outcome(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

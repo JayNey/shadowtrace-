@@ -512,6 +512,33 @@ class TestVectorUnavailable:
         assert any(c.chunk_id == "chk-k" for c in result.chunks)
 
 
+class TestKeywordUnavailable:
+    @pytest.mark.asyncio
+    async def test_keyword_search_failure_tags_keyword_unavailable(self) -> None:
+        store = MagicMock()
+        store.vector_search = AsyncMock(
+            return_value=[_make_chunk("chk-v", "attack_kb", "vector hit")]
+        )
+        store.keyword_search = AsyncMock(side_effect=RuntimeError("fts down"))
+        embed = MagicMock()
+        embed.embed_query = AsyncMock(return_value=[0.0, 0.1])
+        retriever = HybridRetriever(store, embed)  # type: ignore[arg-type]
+        pipeline = RetrievalPipeline(
+            rewriter=_EchoRewriter(),  # type: ignore[arg-type]
+            retriever=retriever,
+            reranker=MockReranker(),
+            settings=Settings(EMBEDDING_MODE="mock", RERANK_MODE="off"),
+        )
+        result = await pipeline.retrieve(
+            "data_exfiltration",
+            ["attack_kb"],
+            top_k=2,
+            context=_ctx(),
+        )
+        assert "keyword_unavailable" in result.degraded_steps
+        assert any(c.chunk_id == "chk-v" for c in result.chunks)
+
+
 class TestRemoteReranker:
     def test_mock_embedding_coerces_remote_rerank_mode(self) -> None:
         settings = Settings(EMBEDDING_MODE="mock", RERANK_MODE="remote")

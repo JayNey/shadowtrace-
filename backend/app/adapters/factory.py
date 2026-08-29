@@ -39,7 +39,18 @@ def _normalize(value: str) -> str:
 
 
 def disposition_kind(settings: Settings) -> str:
-    return _normalize(settings.disposition_adapter_kind) or KIND_MOCK
+    kind = _normalize(settings.disposition_adapter_kind)
+    mode = _normalize(settings.disposition_mode)
+    if mode == "live_xdr" and (not kind or kind == KIND_MOCK):
+        raise ConfigurationError(
+            "DISPOSITION_MODE=live_xdr forbids DISPOSITION_ADAPTER_KIND=mock",
+            error_code="configuration_error",
+            details={
+                "disposition_mode": settings.disposition_mode,
+                "disposition_adapter_kind": settings.disposition_adapter_kind,
+            },
+        )
+    return kind or KIND_MOCK
 
 
 def disposition_provider_name(settings: Settings) -> str:

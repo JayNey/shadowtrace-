@@ -77,6 +77,7 @@ const socketHandlers = new Set<SocketHandler>();
 /** @deprecated keep for tests that emit via the last-registered handler name */
 let socketHandler: SocketHandler | undefined;
 const mockSocketSubscribe = vi.fn();
+const mockForgetEvent = vi.fn();
 
 const MockIntersectionObserver = vi.fn(() => ({
   observe: vi.fn(),
@@ -103,7 +104,7 @@ vi.mock("../../src/services/socketClient", () => ({
   socketClient: {
     connect: vi.fn(),
     subscribe: (eventId: string) => mockSocketSubscribe(eventId),
-    forgetEvent: vi.fn(),
+    forgetEvent: (...args: unknown[]) => mockForgetEvent(...args),
     get isConnected() {
       return true;
     },
@@ -410,7 +411,14 @@ describe("EventDetailPage", () => {
     });
     mockGetExecutionJob.mockResolvedValue({ data: {} });
     mockGetWriteback.mockResolvedValue({ data: {} });
-    mockCloseEvent.mockResolvedValue({ data: { event_id: "evt-70", status: "closed" } });
+    mockCloseEvent.mockResolvedValue({
+      data: {
+        event_id: "evt-70",
+        status: "closed",
+        background_side_effects_pending: false,
+        outstanding_side_effect_count: 0,
+      },
+    });
     mockResolveUnknownAction.mockResolvedValue({ data: {} });
     mockGenerateReport.mockResolvedValue({ data: { report: {} } });
     mockGetReport.mockRejectedValue(
@@ -489,6 +497,13 @@ describe("EventDetailPage", () => {
     expect(screen.getByText(/资产影响/)).toBeInTheDocument();
     expect(screen.getByText("Mock XDR（online）")).toBeInTheDocument();
     expect(mockSocketSubscribe).toHaveBeenCalledWith("evt-70");
+  });
+
+  it("forgets the socket event room on unmount", async () => {
+    const { unmount } = renderPage();
+    expect(await screen.findByText("异常管理员登录")).toBeInTheDocument();
+    unmount();
+    expect(mockForgetEvent).toHaveBeenCalledWith("evt-70");
   });
 
   it("syncs tab changes to the URL hash", async () => {

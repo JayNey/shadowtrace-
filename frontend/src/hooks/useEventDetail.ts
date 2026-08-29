@@ -308,7 +308,10 @@ export function useEventDetail(eventId: string | undefined) {
         void refresh("event");
       }
     });
-    return unsubscribe;
+    return () => {
+      unsubscribe();
+      socketClient.forgetEvent(eventId);
+    };
   }, [eventId, refresh]);
 
   return {

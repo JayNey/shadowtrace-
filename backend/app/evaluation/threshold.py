@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.errors import ValidationError
+from app.evaluation.paths import REPO_ROOT
 from app.evaluation.scorers.registry import ScorerRegistry
 from app.models.evaluation_run import (
     EvaluationAggregateMetrics,
@@ -21,6 +22,27 @@ from app.models.evaluation_run import (
     GateVerdict,
     ScorerOutcome,
 )
+
+
+EVALUATION_MANIFEST_ROOT = (REPO_ROOT / "data" / "evaluation").resolve()
+
+
+def confine_threshold_manifest_path(path: Path) -> Path:
+    """Resolve *path* under ``data/evaluation``; reject escapes and absolute escapes."""
+    raw = Path(str(path).strip())
+    if raw.as_posix() in {"", "."}:
+        raise ValidationError("threshold manifest path is required")
+    root = EVALUATION_MANIFEST_ROOT
+    candidate = raw if raw.is_absolute() else (root / raw)
+    try:
+        resolved = candidate.resolve(strict=False)
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValidationError(
+            "threshold manifest path is outside the evaluation directory",
+            details={"path": raw.name},
+        ) from exc
+    return resolved
 
 
 def load_threshold_manifest(path: Path) -> EvaluationThresholdManifest:
@@ -401,6 +423,7 @@ def evaluate_gate(
 
 
 __all__ = [
+    "confine_threshold_manifest_path",
     "evaluate_gate",
     "load_threshold_manifest",
     "validate_threshold_manifest_for_run",

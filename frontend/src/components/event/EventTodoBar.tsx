@@ -115,8 +115,18 @@ export default function EventTodoBar({
     }
     setClosing(true);
     try {
-      await closeEvent(detail.event.event_id, { reason });
-      message.success("事件已结案");
+      const res = await closeEvent(detail.event.event_id, { reason });
+      const closed = res.data;
+      if (closed.external_unsynced) {
+        message.warning("事件已结案，但外部状态尚未同步");
+      } else if (
+        closed.background_side_effects_pending === undefined &&
+        closed.outstanding_side_effect_count === undefined
+      ) {
+        message.warning("事件已结案，副作用状态未知，请刷新确认");
+      } else {
+        message.success("事件已结案");
+      }
       setCloseOpen(false);
       await onRefresh();
     } catch (err: unknown) {

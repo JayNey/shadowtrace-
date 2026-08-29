@@ -190,6 +190,11 @@ def test_matrix_eventtype8_allows_eight_ids_and_rejects_profile_by_scenario(
         )
 
 
+def test_matrix_refuses_max_wait_at_approval_timeout(matrix_mod) -> None:
+    with pytest.raises(SystemExit, match="APPROVAL_TIMEOUT"):
+        matrix_mod.main(["--max-wait-s", "300", "--no-build"])
+
+
 def test_parse_args_profile_by_scenario(matrix_mod) -> None:
     args = matrix_mod.parse_args(["--scenarios", "account_anomaly_fp", "--profile-by-scenario"])
     assert args.profile_by_scenario is True
@@ -333,6 +338,50 @@ def test_run_scenario_finally_compose_down_with_volumes(matrix_mod, tmp_path: Pa
         )
     assert manifest["status"] == "passed"
     assert down_calls == [True]
+
+
+def test_run_scenario_eventtype8_fresh_volumes_loads_kb_once(
+    matrix_mod, tmp_path: Path
+) -> None:
+    load_calls: list[str] = []
+
+    def _fake_load(project: str, _files: list[Path]) -> None:
+        load_calls.append(project)
+
+    with (
+        patch.object(matrix_mod, "_compose_down"),
+        patch.object(matrix_mod, "_wait_stack_healthy"),
+        patch.object(matrix_mod, "_load_kb_once", side_effect=_fake_load),
+        patch.object(
+            matrix_mod,
+            "_seed_scenario",
+            return_value={"accepted": 1, "event_ids": ["evt-a"]},
+        ),
+        patch.object(
+            matrix_mod,
+            "_run_full_loop_via_exec",
+            return_value={"final_statuses": {"evt-a": "closed"}},
+        ),
+        patch.object(matrix_mod, "_run", return_value=_mock_subprocess_result()),
+    ):
+        matrix_mod.run_scenario(
+            scenario="host_compromise",
+            run_id="run-kb",
+            artifact_root=tmp_path,
+            token="bootstrap-token",
+            seed=42,
+            mock_xdr_url="http://mock-xdr:8100",
+            require_closed=True,
+            profile_by_scenario=False,
+            fresh_volumes=True,
+            stack_timeout_s=10.0,
+            max_wait_s=10.0,
+            poll_interval_s=1.0,
+            max_events=1,
+            build=False,
+            suite="eventtype8",
+        )
+    assert len(load_calls) == 1
 
 
 def test_run_scenario_cleanup_failure_after_pass_raises(matrix_mod, tmp_path: Path) -> None:

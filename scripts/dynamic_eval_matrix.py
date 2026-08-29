@@ -343,6 +343,42 @@ def _wait_stack_healthy(project: str, compose_files: list[Path], timeout_s: floa
     )
 
 
+_KB_LOADERS = (
+    "load_attack_kb",
+    "load_attack_stix_release",
+    "load_case_kb",
+    "load_org_context_kb",
+    "load_playbook_release",
+)
+
+# Eval overlay APPROVAL_TIMEOUT_MINUTES=5; waiting past it is not a substitute
+# for scripted approve.
+_EVAL_APPROVAL_TIMEOUT_S = 5 * 60
+
+
+def _load_kb_once(project: str, compose_files: list[Path]) -> None:
+    """Load attack/case/org/playbook KB once after a fresh eventtype8 stack."""
+    for loader in _KB_LOADERS:
+        cmd = _compose_cmd(
+            project,
+            compose_files,
+            "exec",
+            "-T",
+            "backend",
+            "bash",
+            "-c",
+            f"cd /app/backend && python3 -m scripts.{loader}",
+        )
+        print(f"[dynamic-eval-matrix] load-kb {loader} project={project}")
+        proc = _run(cmd, capture=True, check=False)
+        if proc.returncode != 0:
+            raise MatrixError(
+                f"load-kb {loader} failed (exit={proc.returncode}): "
+                f"{_sanitize_error_text(proc.stdout or '')} "
+                f"{_sanitize_error_text(proc.stderr or '')}"
+            )
+
+
 def _seed_scenario(
     project: str,
     compose_files: list[Path],
@@ -587,6 +623,8 @@ def run_scenario(
                 f"{_sanitize_error_text(proc.stderr)}"
             )
         _wait_stack_healthy(project, compose_files, stack_timeout_s)
+        if fresh_volumes and suite == "eventtype8":
+            _load_kb_once(project, compose_files)
 
         seed_summary = _seed_scenario(
             project,
@@ -883,9 +921,10 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
     args = parse_args(argv)
-    if args.max_wait_s >= 30 * 60:
+    if args.max_wait_s >= _EVAL_APPROVAL_TIMEOUT_S:
         raise SystemExit(
-            "Refusing max-wait-s >= 30 minutes — use scripted approve, not timeout."
+            "Refusing max-wait-s >= 5 minutes (APPROVAL_TIMEOUT) — "
+            "use scripted approve, not timeout."
         )
 
     suite = str(args.suite)

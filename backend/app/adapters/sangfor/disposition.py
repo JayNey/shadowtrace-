@@ -345,6 +345,18 @@ def _http_ok(status: int) -> bool:
     return 200 <= status < 300
 
 
+def _ticket_list_contains(data: Any, order_id: str) -> bool:
+    if not isinstance(data, dict):
+        return False
+    items = data.get("item") or data.get("list") or []
+    if not isinstance(items, list):
+        return False
+    for item in items:
+        if isinstance(item, dict) and _as_text(item.get("orderId")) == order_id:
+            return True
+    return False
+
+
 def _task_id_from(data: Any) -> str | None:
     if not isinstance(data, dict):
         return None
@@ -791,7 +803,7 @@ class SangforDispositionAdapter(BaseDispositionAdapter):
             )
         create_ok = (
             _http_ok(result.http_status)
-            and not _explicit_business_failure(result.business_code)
+            and result.business_code == "Success"
             and task_id is not None
         )
         if not create_ok:
@@ -1155,6 +1167,7 @@ class SangforDispositionAdapter(BaseDispositionAdapter):
         if record_id is None:
             return None
         list_message: str | None = None
+        listed_ok = False
         try:
             listed = await self._client.request(
                 "POST",
@@ -1162,13 +1175,18 @@ class SangforDispositionAdapter(BaseDispositionAdapter):
                 json_body={"page": 1, "pageSize": TICKET_LIST_PAGE_SIZE},
             )
             list_message = listed.message
+            listed_ok = (
+                _http_ok(listed.http_status)
+                and listed.business_code == "Success"
+                and _ticket_list_contains(listed.data, record_id)
+            )
         except (httpx.TimeoutException, httpx.TransportError):
-            pass
+            listed_ok = False
         provider_writeback_id = receipt.raw_result.get("provider_writeback_id")
         if not isinstance(provider_writeback_id, str) or not provider_writeback_id:
             provider_writeback_id = receipt.writeback_id
         return EntityEffectCompletion(
-            verified=True,
+            verified=listed_ok,
             disposition_id=command.disposition_id,
             writeback_id=receipt.writeback_id,
             provider_writeback_id=provider_writeback_id,

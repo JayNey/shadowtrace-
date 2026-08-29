@@ -8,11 +8,14 @@ starting.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from app.core.config import Settings, TaskMode, is_mock_disposition_mode, is_mock_source_mode
-from app.core.errors import ConfigurationError
+from app.core.errors import ConfigurationError, ValidationError
+from app.evaluation.threshold import confine_threshold_manifest_path
 from tests.test_support.production_settings import production_settings_kwargs
 
 
@@ -48,6 +51,30 @@ def test_development_allows_mock_and_simulation() -> None:
     )
     assert settings.production_fail_closed_violations() == []
     assert settings.runtime_adapter_fail_closed_violations() == []
+
+
+def test_staging_live_xdr_rejects_empty_and_mock_kind() -> None:
+    with pytest.raises(ConfigurationError, match="disposition_adapter_kind=mock"):
+        Settings(
+            APP_ENV="staging",
+            DISPOSITION_MODE="live_xdr",
+            DISPOSITION_ADAPTER_KIND="",
+            SIMULATION_ENABLED=False,
+        )
+    with pytest.raises(ConfigurationError, match="disposition_adapter_kind=mock"):
+        Settings(
+            APP_ENV="staging",
+            DISPOSITION_MODE="live_xdr",
+            DISPOSITION_ADAPTER_KIND="mock",
+            SIMULATION_ENABLED=False,
+        )
+
+
+def test_confine_threshold_manifest_path_rejects_escape() -> None:
+    with pytest.raises(ValidationError, match="outside"):
+        confine_threshold_manifest_path(Path("/etc/passwd"))
+    with pytest.raises(ValidationError, match="outside"):
+        confine_threshold_manifest_path(Path("../passwd"))
 
 
 def test_development_rejects_disposition_mode_live_without_xdr_suffix() -> None:

@@ -138,7 +138,9 @@ def test_scan_and_ticket_require_config() -> None:
         SangforOverlayConfig(adapter_kind=SANGFOR_ADAPTER_KIND, devices=())
     )
     assert list(incomplete["scan_host_for_virus"].supported_execution_owners) == []
-    assert list(incomplete["create_ticket"].supported_execution_owners) == []
+    assert list(incomplete["create_ticket"].supported_execution_owners) == [
+        ExecutionOwner.DIRECT_TOOL
+    ]
 
     ready = _overlay(
         SangforOverlayConfig(
@@ -150,8 +152,8 @@ def test_scan_and_ticket_require_config() -> None:
     )
     assert ExecutionOwner.XDR_MANAGED in ready["scan_host_for_virus"].supported_execution_owners
     ticket = ready["create_ticket"]
-    assert ExecutionOwner.XDR_MANAGED in ticket.supported_execution_owners
-    assert ExecutionOwner.DIRECT_TOOL not in ticket.supported_execution_owners
+    assert ExecutionOwner.DIRECT_TOOL in ticket.supported_execution_owners
+    assert ExecutionOwner.XDR_MANAGED not in ticket.supported_execution_owners
     assert ticket.executable is True
 
 

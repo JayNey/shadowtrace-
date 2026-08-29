@@ -30,6 +30,7 @@ from app.adapters.sangfor.wire_mock import create_sangfor_wire_app
 from app.adapters.source.base import InMemoryDataQualityRecorder
 from app.api.v1 import deps
 from app.core.config import Settings
+from app.core.errors import DependencyUnavailableError
 from app.ingestion import ingestion_scheduler
 from app.ingestion.source_ingester import source_to_ingestable
 from app.models.enums import Severity, SourceDisposition, SourceObjectKind
@@ -287,10 +288,9 @@ async def test_invalid_parameter_does_not_emit_incidents() -> None:
     )
     quality = InMemoryDataQualityRecorder()
     adapter = SangforSourceAdapter(_client(http), quality=quality, now_fn=lambda: _NOW)
-    page = await adapter.list_objects([SourceObjectKind.INCIDENT], limit=5)
+    with pytest.raises(DependencyUnavailableError, match="business failure"):
+        await adapter.list_objects([SourceObjectKind.INCIDENT], limit=5)
     await http.aclose()
-    assert page.items == []
-    assert page.malformed_items >= 1
     assert any(row["error_category"] == "business_failure" for row in quality.rows)
 
 
@@ -747,12 +747,11 @@ async def test_wire_assets_invalid_parameter_is_empty_and_does_not_crash() -> No
         quality=quality,
         now_fn=lambda: _NOW,
     )
-    page = await adapter.list_objects([SourceObjectKind.ASSET], limit=25)
+    with pytest.raises(DependencyUnavailableError, match="business failure"):
+        await adapter.list_objects([SourceObjectKind.ASSET], limit=25)
     await http.aclose()
     assert captured == ["POST /api/xdr/v1/assets/list"]
     assert all(not row.startswith("DELETE") and not row.startswith("PUT") for row in captured)
-    assert page.items == []
-    assert page.malformed_items >= 1
     assert any(row["error_category"] == "business_failure" for row in quality.rows)
 
 

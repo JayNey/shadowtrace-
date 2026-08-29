@@ -1351,6 +1351,35 @@ class DispositionSyncService:
                 adapter = self._resolve_adapter(outbox)
                 adapter.validate_command(command)
                 adapter_label = adapter.name
+                existing_status = (
+                    WritebackStatus(outbox.latest_writeback_status)
+                    if outbox.latest_writeback_status
+                    else None
+                )
+                if existing_status in {
+                    WritebackStatus.ACCEPTED,
+                    WritebackStatus.CONFIRMED,
+                    WritebackStatus.FAILED,
+                    WritebackStatus.CONFLICT,
+                    WritebackStatus.UNKNOWN,
+                }:
+                    logger.info(
+                        "outbox delivery skipped: writeback already %s outbox=%s",
+                        existing_status.value if existing_status else None,
+                        outbox_id,
+                    )
+                    return
+                existing_receipt_id = await session.scalar(
+                    select(orm.DispositionReceipt.writeback_id)
+                    .where(orm.DispositionReceipt.writeback_id == outbox.writeback_id)
+                    .limit(1)
+                )
+                if existing_receipt_id is not None:
+                    logger.info(
+                        "outbox delivery skipped: receipt already stored outbox=%s",
+                        outbox_id,
+                    )
+                    return
                 with disposition_span(
                     "disposition.submit",
                     event_id=outbox.event_id,

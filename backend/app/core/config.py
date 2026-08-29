@@ -741,6 +741,13 @@ class Settings(BaseSettings):
             self.tool_mode, "tool_mode"
         ):
             violations.append("source_mode=sangfor_xdr forbids tool_mode=mock")
+        if _normalize_mode_value(self.disposition_mode) == "live_xdr" and (
+            not _normalize_mode_value(self.disposition_adapter_kind)
+            or _looks_mock(self.disposition_adapter_kind, "disposition_adapter_kind")
+        ):
+            violations.append(
+                "disposition_mode=live_xdr forbids disposition_adapter_kind=mock"
+            )
         return violations
 
     def production_fail_closed_violations(self) -> list[str]:

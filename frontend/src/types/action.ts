@@ -45,7 +45,7 @@ export interface ActionOperationResponse {
   decision_id?: string | null;
   message: string;
   /** Graph resume outcome after approval (backend ISSUE-193). */
-  resume_status?: "ok" | "failed" | "skipped" | null;
+  resume_status?: "ok" | "failed" | "skipped" | "deferred" | null;
   /** Backend operated in degraded (LLM/partial) mode. */
   degraded?: boolean | null;
 }

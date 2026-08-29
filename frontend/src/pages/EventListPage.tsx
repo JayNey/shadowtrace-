@@ -5,7 +5,7 @@
      Filter & page params are synced to URL query (refresh-preserving).
   2. Socket subscription (global): event_created inserts a new row at top,
      state_change updates the row's local status in place,
-     writeback_updated updates the writeback badge in place.
+     writeback_updated does not rewrite event-level overall writeback status.
   3. "触发研判" button calls triggerInvestigation; on 409 shows a hint toast.
   4. Falls back to polling when socket is unavailable (ISSUE-067 mechanism).
 */
@@ -51,7 +51,6 @@ import {
   STATUS_FILTER_OPTIONS,
   EVENT_TYPE_OPTIONS,
 } from "../components/event/constants";
-import { mapSocketWritebackStatus } from "../types/socket";
 
 const DEFAULT_PAGE_SIZE = 20;
 
@@ -210,15 +209,6 @@ export default function EventListPage() {
               : it,
           ),
         );
-      } else if (evt.type === "writeback_updated") {
-        const wbStatus = mapSocketWritebackStatus(String(evt.payload.status));
-        setItems((prev) =>
-          prev.map((it) =>
-            it.event_id === evt.event_id
-              ? { ...it, writeback_overall_status: wbStatus }
-              : it,
-          ),
-        );
       }
     });
 
@@ -285,7 +275,7 @@ export default function EventListPage() {
         setInvestigationHealthFailed(false);
       } catch {
         setInvestigationHealth(null);
-        setFullLoopAvailable(true);
+        setFullLoopAvailable(false);
         setInvestigationHealthFailed(true);
       } finally {
         setInvestigationHealthLoaded(true);

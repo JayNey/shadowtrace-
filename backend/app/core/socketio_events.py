@@ -298,6 +298,14 @@ def register_handlers(
         room = _event_room(event_id)
         await sio.leave_room(sid, GLOBAL_ROOM, namespace=SOCKETIO_NAMESPACE)
         sessions.untrack_room(sid, GLOBAL_ROOM)
+        try:
+            rooms = sio.rooms(sid, namespace=SOCKETIO_NAMESPACE)
+        except KeyError:
+            rooms = []
+        for prior in list(rooms):
+            if isinstance(prior, str) and prior.startswith(EVENT_ROOM_PREFIX) and prior != room:
+                await sio.leave_room(sid, prior, namespace=SOCKETIO_NAMESPACE)
+                sessions.untrack_room(sid, prior)
         await sio.enter_room(sid, room, namespace=SOCKETIO_NAMESPACE)
         sessions.track_room(sid, room)
         logger.debug(

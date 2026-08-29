@@ -44,6 +44,7 @@ class HybridRetriever:
         self._store = store
         self._embed = embed_service
         self.vector_unavailable = False
+        self.keyword_unavailable = False
 
     async def retrieve(
         self,
@@ -59,6 +60,7 @@ class HybridRetriever:
         Empty keyword reductions are skipped (no ``plainto_tsquery``).
         """
         self.vector_unavailable = False
+        self.keyword_unavailable = False
         tenant_id = context.tenant_id
         logger.debug(
             "HybridRetriever tenant=%s event=%s kb_count=%d query_count=%d",
@@ -131,18 +133,28 @@ class HybridRetriever:
                     release_id, embedding_release_id, typed_filters = (
                         context.storage_filters_for_kb(kb)
                     )
-                    return await self._store.keyword_search(
-                        kb,
-                        keyword_query,
-                        top_k=fetch_k,
-                        tenant_id=tenant_id,
-                        release_id=release_id,
-                        embedding_release_id=embedding_release_id,
-                        typed_filters=typed_filters,
-                        event_type_equals=storage_event_type_equals(
-                            kb, context.event_type
-                        ),
-                    )
+                    try:
+                        return await self._store.keyword_search(
+                            kb,
+                            keyword_query,
+                            top_k=fetch_k,
+                            tenant_id=tenant_id,
+                            release_id=release_id,
+                            embedding_release_id=embedding_release_id,
+                            typed_filters=typed_filters,
+                            event_type_equals=storage_event_type_equals(
+                                kb, context.event_type
+                            ),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "keyword search failed kb=%s tenant=%s: %s",
+                            kb,
+                            tenant_id,
+                            exc,
+                        )
+                        self.keyword_unavailable = True
+                        return []
 
                 tasks.append(asyncio.create_task(_vector_search()))
                 for keyword_query in keyword_queries_for_kb(kb, query, limit=2):
@@ -153,5 +165,6 @@ class HybridRetriever:
             try:
                 results.append(await task)
             except Exception:
+                self.keyword_unavailable = True
                 results.append([])
         return results
