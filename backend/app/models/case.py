@@ -56,7 +56,10 @@ def make_chunk_id(kb_name: str, case_id: str) -> str:
 
 def fp_case_to_text(case: FalsePositiveCase) -> str:
     """Flatten an FP case into a single searchable text for embedding."""
-    event_type = case.event_type.value if isinstance(case.event_type, EventType) else str(case.event_type)
+    if isinstance(case.event_type, EventType):
+        event_type = case.event_type.value
+    else:
+        event_type = str(case.event_type)
     return " | ".join(
         [
             case.pattern_summary,
@@ -75,7 +78,10 @@ def history_case_to_text(case: HistoryCase) -> str:
 
 def fp_case_metadata(case: FalsePositiveCase) -> dict[str, Any]:
     """Build metadata dict for an FP case chunk."""
-    event_type = case.event_type.value if isinstance(case.event_type, EventType) else case.event_type
+    if isinstance(case.event_type, EventType):
+        event_type = case.event_type.value
+    else:
+        event_type = case.event_type
     return {
         "case_id": case.case_id,
         "event_type": event_type,

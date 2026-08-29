@@ -128,8 +128,7 @@ class Settings(BaseSettings):
         default="network",
         alias="SANGFOR_BLOCK_CHANNEL",
         description=(
-            "Sangfor block_ip channel: network (AF) or endpoint (EDR). "
-            "Ignored by block_domain."
+            "Sangfor block_ip channel: network (AF) or endpoint (EDR). Ignored by block_domain."
         ),
     )
     sangfor_devices: str = Field(
@@ -751,9 +750,7 @@ class Settings(BaseSettings):
             not _normalize_mode_value(disposition_kind)
             or _looks_mock(disposition_kind, "disposition_adapter_kind")
         ):
-            violations.append(
-                "disposition_mode=live_xdr forbids disposition_adapter_kind=mock"
-            )
+            violations.append("disposition_mode=live_xdr forbids disposition_adapter_kind=mock")
         return violations
 
     def production_fail_closed_violations(self) -> list[str]:

@@ -23,6 +23,20 @@ from contract_export_lib import (  # noqa: E402
 )
 
 
+def test_compare_ignores_hand_maintained_vendor_pack() -> None:
+    with tempfile.TemporaryDirectory() as expected_tmp, tempfile.TemporaryDirectory() as actual_tmp:
+        expected = Path(expected_tmp)
+        actual = Path(actual_tmp)
+        vendor = expected / "vendor" / "sangfor_xdr"
+        vendor.mkdir(parents=True)
+        (vendor / "catalog.json").write_text("{}\n", encoding="utf-8")
+        (expected / "openapi").mkdir()
+        (actual / "openapi").mkdir()
+        (expected / "openapi" / "openapi.json").write_text("{}\n", encoding="utf-8")
+        (actual / "openapi" / "openapi.json").write_text("{}\n", encoding="utf-8")
+        assert compare_contract_trees(expected, actual) == []
+
+
 def _load_check_module():
     spec = importlib.util.spec_from_file_location(
         "check_contract_drift",
@@ -133,6 +147,36 @@ def test_replace_tree_removes_stale_empty_directories(tmp_path: Path) -> None:
 
     export_mod._replace_tree(source, target)
     assert not stale_dir.exists()
+    assert json.loads((target / "openapi" / "openapi.json").read_text()) == {
+        "openapi": "3.1.0",
+    }
+
+
+def test_replace_tree_preserves_vendor_pack(tmp_path: Path) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "export_contracts",
+        _SCRIPTS / "export_contracts.py",
+    )
+    assert spec and spec.loader
+    export_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(export_mod)
+
+    target = tmp_path / "contracts"
+    vendor = target / "vendor" / "sangfor_xdr"
+    vendor.mkdir(parents=True)
+    catalog = vendor / "catalog.json"
+    catalog.write_text('{"keep": true}\n', encoding="utf-8")
+    (target / "openapi").mkdir(parents=True)
+    (target / "openapi" / "openapi.json").write_text("{}\n", encoding="utf-8")
+
+    source = tmp_path / "fresh"
+    (source / "openapi").mkdir(parents=True)
+    (source / "openapi" / "openapi.json").write_text('{"openapi":"3.1.0"}\n', encoding="utf-8")
+
+    export_mod._replace_tree(source, target)
+    assert catalog.read_text(encoding="utf-8") == '{"keep": true}\n'
     assert json.loads((target / "openapi" / "openapi.json").read_text()) == {
         "openapi": "3.1.0",
     }

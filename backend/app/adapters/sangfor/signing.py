@@ -272,7 +272,7 @@ def canonical_path(url: str) -> str:
 
 
 def empty_json_object_is_no_payload(json_body: Any) -> bool:
-    return json_body == {}
+    return bool(json_body == {})
 
 
 def resolve_payload(*, data: str | bytes | None = None, json_body: Any = None) -> str:
@@ -332,16 +332,19 @@ def decode_auth_code(auth_code: str) -> SangforCredentials:
     if len(builders) != AUTH_CODE_PARAMS_NUM:
         raise ValueError("auth code decode error")
     aes_secret = hashlib.sha256(
-        (AUTH_CODE_PARAMS % (
-            builders[0],
-            builders[1],
-            builders[2],
-            builders[3],
-            builders[4],
-            builders[5],
-            builders[6],
-            builders[11],
-        )).encode("utf-8")
+        (
+            AUTH_CODE_PARAMS
+            % (
+                builders[0],
+                builders[1],
+                builders[2],
+                builders[3],
+                builders[4],
+                builders[5],
+                builders[6],
+                builders[11],
+            )
+        ).encode("utf-8")
     ).digest()
     ak_ct = bytes.fromhex(builders[9])
     sk_ct = bytes.fromhex(builders[10])

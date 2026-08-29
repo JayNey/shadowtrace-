@@ -63,9 +63,7 @@ def _triage(
                 if account
                 else []
             ),
-            hosts=(
-                [HostEntity(entity_id="h1", entity_type="host", hostname=host)] if host else []
-            ),
+            hosts=([HostEntity(entity_id="h1", entity_type="host", hostname=host)] if host else []),
             processes=(
                 [ProcessEntity(entity_id="p1", entity_type="process", name=process)]
                 if process
@@ -306,9 +304,7 @@ class TestQueryRewriteAndKeywordQueue:
         triage = _triage()
         query = RAGQueryBuilder.build_queries(triage)["fp_case_kb"]
         roads = keyword_queries_for_kb("fp_case_kb", query, limit=2)
-        assert any(
-            "ops-change-bot" in road and "PC-OPS-JUMP-01" in road for road in roads
-        ), roads
+        assert any("ops-change-bot" in road and "PC-OPS-JUMP-01" in road for road in roads), roads
         first = roads[0]
         assert "ops-change-bot" in first
         assert "PC-OPS-JUMP-01" in first

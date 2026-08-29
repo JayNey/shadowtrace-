@@ -9,6 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 ATTACK_FILE = REPO_ROOT / "data" / "knowledge" / "attack_techniques.json"
 HISTORY_FILE = REPO_ROOT / "data" / "knowledge" / "history_cases.json"
 FP_FILE = REPO_ROOT / "data" / "knowledge" / "fp_cases.json"
+_PLAYBOOKS_JSON = REPO_ROOT / "data" / "knowledge" / "playbooks.json"
 
 
 def test_emotet_history_case_no_longer_reuses_gold_path_host() -> None:
@@ -172,8 +173,7 @@ def test_history_seed_aligns_other_unclassified_host() -> None:
     gen_hits = [
         row
         for row in rows
-        if row.get("event_type") == "other"
-        and "WKS-GEN-099" in row.get("key_entities", "")
+        if row.get("event_type") == "other" and "WKS-GEN-099" in row.get("key_entities", "")
     ]
     assert [row["case_id"] for row in gen_hits] == ["case-10000021"]
 
@@ -329,7 +329,7 @@ def test_attack_seed_p2_count_and_fixture_keywords() -> None:
 
 
 def test_playbook_seed_malicious_process_has_block_and_query() -> None:
-    playbooks = json.loads((REPO_ROOT / "data" / "knowledge" / "playbooks.json").read_text(encoding="utf-8"))
+    playbooks = json.loads(_PLAYBOOKS_JSON.read_text(encoding="utf-8"))
     rows = playbooks.get("playbooks") or []
     mp = [row for row in rows if row.get("event_type") == "malicious_process"]
     assert mp
@@ -340,7 +340,7 @@ def test_playbook_seed_malicious_process_has_block_and_query() -> None:
 
 def test_playbook_seed_insider_high_containment_applies_at_medium() -> None:
     """Privilege-abuse eval can land medium after RiskAgent; still must bind disable_account."""
-    playbooks = json.loads((REPO_ROOT / "data" / "knowledge" / "playbooks.json").read_text(encoding="utf-8"))
+    playbooks = json.loads(_PLAYBOOKS_JSON.read_text(encoding="utf-8"))
     rows = playbooks.get("playbooks") or []
     high = next(row for row in rows if row.get("playbook_id") == "pb-3c4d5e6f")
     assert high["event_type"] == "insider_threat"
@@ -350,7 +350,7 @@ def test_playbook_seed_insider_high_containment_applies_at_medium() -> None:
 
 
 def test_playbook_seed_lateral_containment_starts_with_block_ip() -> None:
-    playbooks = json.loads((REPO_ROOT / "data" / "knowledge" / "playbooks.json").read_text(encoding="utf-8"))
+    playbooks = json.loads(_PLAYBOOKS_JSON.read_text(encoding="utf-8"))
     rows = playbooks.get("playbooks") or []
     containment = next(row for row in rows if row.get("playbook_id") == "pb-2a3b4c5d")
     assert containment["event_type"] == "lateral_movement"
@@ -360,7 +360,7 @@ def test_playbook_seed_lateral_containment_starts_with_block_ip() -> None:
 
 
 def test_playbook_seed_p0_anchors_unchanged_count_and_gold_refs() -> None:
-    playbooks = json.loads((REPO_ROOT / "data" / "knowledge" / "playbooks.json").read_text(encoding="utf-8"))
+    playbooks = json.loads(_PLAYBOOKS_JSON.read_text(encoding="utf-8"))
     rows = playbooks.get("playbooks") or []
     assert len(rows) == 13
     domain = [row for row in rows if row.get("event_type") == "suspicious_domain"]
@@ -399,9 +399,7 @@ def test_org_seed_p0_person_status_and_frozen_allow() -> None:
     assert backup.window_start == "02:00"
     assert backup.window_end == "04:00"
     jump_allow = [
-        row
-        for row in records
-        if row.kind == "allowed_source" and "JUMP-HOST-001" in row.hosts
+        row for row in records if row.kind == "allowed_source" and "JUMP-HOST-001" in row.hosts
     ]
     assert jump_allow == []
     window = by_id["org-window-ops-change"]

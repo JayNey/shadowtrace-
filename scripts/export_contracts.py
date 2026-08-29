@@ -41,17 +41,30 @@ def main() -> None:
 
 
 def _replace_tree(source: Path, target: Path) -> None:
-    """Atomically refresh ``target`` from a fully-built ``source`` tree."""
+    """Atomically refresh ``target`` from a fully-built ``source`` tree.
+
+    Hand-maintained ``vendor/`` packs are preserved; export_all_contracts does
+    not emit them, and wiping them would destroy Sangfor fixtures.
+    """
     import shutil
+
+    def _hand_maintained(rel: str) -> bool:
+        return rel == "vendor" or rel.startswith("vendor/")
 
     for path in sorted(target.rglob("*"), reverse=True):
         if path.is_file() and path.name != ".gitkeep":
+            rel = path.relative_to(target).as_posix()
+            if _hand_maintained(rel):
+                continue
             path.unlink()
     for path in sorted(
         (item for item in target.rglob("*") if item.is_dir()),
         key=lambda item: len(item.parts),
         reverse=True,
     ):
+        rel = path.relative_to(target).as_posix()
+        if _hand_maintained(rel):
+            continue
         try:
             path.rmdir()
         except OSError:

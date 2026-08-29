@@ -18,6 +18,7 @@ GRAFANA_PORT ?= 3001
 COMPOSE_FILE := $(CURDIR)/infra/docker-compose.yml
 CELERY_SIGKILL_COMPOSE_FILE := $(CURDIR)/infra/docker-compose.celery-sigkill.yml
 OBS_COMPOSE_FILE := $(CURDIR)/infra/observability/docker-compose.observability.yml
+WORKER_COMPOSE_FILE := $(CURDIR)/infra/docker-compose.worker.yml
 COMPOSE := COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
 	POSTGRES_PORT="$(POSTGRES_PORT)" REDIS_PORT="$(REDIS_PORT)" \
 	BACKEND_PORT="$(BACKEND_PORT)" FRONTEND_PORT="$(FRONTEND_PORT)" \
@@ -44,13 +45,14 @@ COMPOSE_DEMO := COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
 	TASK_MODE=celery \
 	OBSERVABILITY_CONFIG_DIR="$(CURDIR)/infra/observability" \
 	docker compose --project-name "$(COMPOSE_PROJECT_NAME)" \
-	-f "$(COMPOSE_FILE)" -f "$(OBS_COMPOSE_FILE)" \
+	-f "$(COMPOSE_FILE)" -f "$(WORKER_COMPOSE_FILE)" -f "$(OBS_COMPOSE_FILE)" \
 	--profile demo
 
 # Optional: set WORKER=1 to include the Celery investigation worker (sets TASK_MODE=celery).
 # DB migrations: only the backend container runs alembic; workers use SKIP_DB_MIGRATE (ISSUE-238).
 WORKER ?=
 WORKER_PROFILE = $(if $(WORKER),--profile worker,)
+WORKER_COMPOSE = $(if $(WORKER),-f "$(WORKER_COMPOSE_FILE)",)
 # Optional: set SCHEDULER=1 to include Celery Beat + ingestion worker (ISSUE-107).
 SCHEDULER ?=
 SCHEDULER_PROFILE = $(if $(SCHEDULER),--profile scheduler,)
@@ -69,7 +71,7 @@ CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 .PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo bootstrap-demo-analysis bootstrap-demo-full-loop smoke-demo demo-full-loop demo-guard-test up-observability down-observability llm-smoke test test-ci-lite lint fmt migrate migrate-down load-kb up-embedding-remote integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest autonomous-mock-e2e-worker-sigkill eval-full-loop eval-full-loop-matrix eval-eventtype-8 adversarial-closure-gates test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift check-migration-revisions evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
 
 up:
-	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
+	$(COMPOSE) $(WORKER_COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
 
 down:
 	@demo_running=$$($(COMPOSE_DEMO) ps -q 2>/dev/null | wc -l | tr -d ' '); \
@@ -285,7 +287,7 @@ EMBEDDING_REMOTE_COMPOSE := $(CURDIR)/infra/docker-compose.embedding-remote.yml
 up-embedding-remote:
 	@echo "[embedding-remote] NOT eval-eventtype-8 / eval-full-loop. Canonical Mock KIND unchanged."
 	@echo "[embedding-remote] After up: make load-kb once (same model; EMBEDDING_RELEASE_ID != mock-v1)."
-	$(COMPOSE) -f "$(EMBEDDING_REMOTE_COMPOSE)" $(WORKER_PROFILE) up -d --no-deps backend worker
+	$(COMPOSE) -f "$(EMBEDDING_REMOTE_COMPOSE)" $(WORKER_COMPOSE) $(WORKER_PROFILE) up -d --no-deps backend worker
 
 test:
 	cd backend && $(PYTHON) -m pytest tests/test_infra/test_health.py -v

@@ -49,7 +49,12 @@ def _iter_contract_files(root: Path) -> set[str]:
             continue
         if path.name == ".gitkeep":
             continue
-        files.add(path.relative_to(root).as_posix())
+        relpath = path.relative_to(root).as_posix()
+        # Vendor packs are hand-maintained (check_sangfor_catalog_drift) and are
+        # not produced by export_all_contracts. Do not treat them as stale.
+        if relpath == "vendor" or relpath.startswith("vendor/"):
+            continue
+        files.add(relpath)
     return files
 
 

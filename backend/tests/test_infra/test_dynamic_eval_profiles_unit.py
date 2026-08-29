@@ -75,8 +75,7 @@ def test_eventtype8_profiles_are_full_loop_strict(profiles_mod) -> None:
         "suspicious_domain_access",
     )
     assert (
-        profiles_mod.allowed_scenarios_for_suite("eventtype8")
-        == profiles_mod.EVENTTYPE8_SCENARIOS
+        profiles_mod.allowed_scenarios_for_suite("eventtype8") == profiles_mod.EVENTTYPE8_SCENARIOS
     )
     for scenario in profiles_mod.EVENTTYPE8_SCENARIOS:
         profile = profiles_mod.eventtype8_profile_for_scenario(scenario)

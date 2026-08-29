@@ -110,7 +110,10 @@ def entity_write_would_confirm(*, code: str | None) -> bool:
 
 
 def _load_json(fixtures: Path, name: str) -> dict[str, Any]:
-    return json.loads((fixtures / name).read_text(encoding="utf-8"))
+    payload = json.loads((fixtures / name).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"fixture {name} is not a JSON object")
+    return payload
 
 
 def _match(

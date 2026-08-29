@@ -432,9 +432,7 @@ class KnowledgeStore:
             tenant_isolation_strict=self._tenant_isolation_strict,
         )
         kb_clause = " AND kb_name = :kb_name" if kb_name is not None else ""
-        embedding_clause, embedding_params = embedding_release_filter_clause(
-            embedding_release_id
-        )
+        embedding_clause, embedding_params = embedding_release_filter_clause(embedding_release_id)
         params: dict[str, object] = {**tenant_params, **embedding_params}
         if kb_name is not None:
             params["kb_name"] = kb_name

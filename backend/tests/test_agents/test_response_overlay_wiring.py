@@ -49,9 +49,7 @@ from app.models.enums import (
 from app.models.source import SourceReference
 from app.tools.specs import baseline_tool_index
 
-_RESPONSE_AGENT_SRC = (
-    Path(__file__).resolve().parents[2] / "app" / "agents" / "response_agent.py"
-)
+_RESPONSE_AGENT_SRC = Path(__file__).resolve().parents[2] / "app" / "agents" / "response_agent.py"
 
 
 class _FakeWorkingMemory:

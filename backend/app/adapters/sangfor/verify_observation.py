@@ -241,16 +241,10 @@ async def _observe_block_rule(
     *,
     require_dns: bool,
 ) -> dict[str, Any]:
-    tool_name = (
-        "check_domain_block_status" if require_dns else "check_ip_block_status"
-    )
+    tool_name = "check_domain_block_status" if require_dns else "check_ip_block_status"
     job_id = _job_id(params)
     items = await _fetch_block_items(client, job_id=job_id)
-    matched = [
-        item
-        for item in items
-        if (not require_dns or _rule_type(item) == DNS_RULE_TYPE)
-    ]
+    matched = [item for item in items if (not require_dns or _rule_type(item) == DNS_RULE_TYPE)]
     verified = any(block_status_would_verify(_item_status(item)) for item in matched)
     if verified:
         return _tool_result(

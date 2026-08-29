@@ -152,14 +152,14 @@ def keyword_queries_for_kb(kb_name: str, query: str, *, limit: int = 2) -> list[
 
     if kb_name == "fp_case_kb":
         # 口径 M: first slot is Account+Host AND. extras must not occupy both slots.
-        ordered: list[str] = []
+        fp_ordered: list[str] = []
         entity_and = _fp_entity_and(stripped)
         if entity_and:
-            ordered.append(entity_and)
+            fp_ordered.append(entity_and)
         second = extras[0] if extras else event_fts
         if second:
-            ordered.append(second)
-        return _dedupe(ordered, limit=capped)
+            fp_ordered.append(second)
+        return _dedupe(fp_ordered, limit=capped)
 
     if kb_name == "playbook_kb":
         lowered = stripped.lower()

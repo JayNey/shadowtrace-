@@ -134,9 +134,7 @@ def test_block_ip_endpoint_needs_edr_device() -> None:
 
 
 def test_scan_and_ticket_require_config() -> None:
-    incomplete = _overlay(
-        SangforOverlayConfig(adapter_kind=SANGFOR_ADAPTER_KIND, devices=())
-    )
+    incomplete = _overlay(SangforOverlayConfig(adapter_kind=SANGFOR_ADAPTER_KIND, devices=()))
     assert list(incomplete["scan_host_for_virus"].supported_execution_owners) == []
     assert list(incomplete["create_ticket"].supported_execution_owners) == [
         ExecutionOwner.DIRECT_TOOL

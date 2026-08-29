@@ -37,8 +37,7 @@ def build_sangfor_capability_manifest() -> CapabilityManifest:
     response_ops = sorted(
         name
         for name, meta in index.items()
-        if meta.tool_category.value == "response"
-        and not name.startswith(_QUERY_TOOL_PREFIX)
+        if meta.tool_category.value == "response" and not name.startswith(_QUERY_TOOL_PREFIX)
     )
     return CapabilityManifest(
         provider_name=_SANGFOR_PROVIDER,

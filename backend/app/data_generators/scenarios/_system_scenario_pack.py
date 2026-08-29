@@ -370,11 +370,11 @@ def build_system_scenario(
         updated_at=base,
     )
     alert_normalized: dict[str, Any] = {
-            "event_type": spec.event_type,
-            "alert_type": spec.event_type,
-            "severity": spec.expected_severity.value,
-            "keyword": spec.keyword,
-        }
+        "event_type": spec.event_type,
+        "alert_type": spec.event_type,
+        "severity": spec.expected_severity.value,
+        "keyword": spec.keyword,
+    }
     if spec.scenario_id == "lateral_movement":
         alert_normalized["dst_ip"] = LATERAL_PIVOT_IP
     alert = SourceAlert(

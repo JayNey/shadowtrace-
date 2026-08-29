@@ -62,9 +62,7 @@ def _matrix_rows() -> list[dict[str, Any]]:
 
 def _find_op(catalog: dict[str, Any], method: str, path: str) -> dict[str, Any]:
     matches = [
-        op
-        for op in catalog["operations"]
-        if op.get("method") == method and op.get("path") == path
+        op for op in catalog["operations"] if op.get("method") == method and op.get("path") == path
     ]
     assert matches, f"missing catalog op {method} {path}"
     assert len(matches) == 1, f"duplicate catalog op {method} {path}"
@@ -130,11 +128,7 @@ def test_catalog_includes_v2_vpc_and_no_mock_uri() -> None:
 
 def test_p0_matrix_paths_match_plan() -> None:
     rows = _matrix_rows()
-    p0 = {
-        (row["method"], row["path"])
-        for row in rows
-        if row.get("in_loop") == "p0"
-    }
+    p0 = {(row["method"], row["path"]) for row in rows if row.get("in_loop") == "p0"}
     assert p0 == set(P0_PATHS)
 
 
@@ -149,11 +143,7 @@ def test_dealstatus_list_enum_is_one_through_six() -> None:
     request_keys = {path for path, _node in _iter_param_nodes(op.get("request") or [])}
     assert "ids" in request_keys
     assert "uuIds" not in request_keys
-    nodes = [
-        node
-        for path, node in _response_nodes(op)
-        if path == "data.item.dealStatus"
-    ]
+    nodes = [node for path, node in _response_nodes(op) if path == "data.item.dealStatus"]
     assert nodes, "dealStatus missing from dealstatus/list response"
     node = nodes[0]
     values = [item.get("value") for item in node.get("paramValueList") or []]
@@ -173,12 +163,8 @@ def test_alerts_list_uses_alert_deal_status() -> None:
 
 def test_analysislog_list_has_no_total_and_count_has_total() -> None:
     catalog = _committed_catalog()
-    list_op = _find_op(
-        catalog, "POST", "/api/xdr/v1/analysislog/networksecurity/list"
-    )
-    count_op = _find_op(
-        catalog, "POST", "/api/xdr/v1/analysislog/networksecurity/count"
-    )
+    list_op = _find_op(catalog, "POST", "/api/xdr/v1/analysislog/networksecurity/list")
+    count_op = _find_op(catalog, "POST", "/api/xdr/v1/analysislog/networksecurity/count")
     list_data_keys = {
         path
         for path, _node in _response_nodes(list_op)
@@ -211,11 +197,7 @@ def test_blockdevice_list_response_has_device_id() -> None:
 def test_matrix_covers_every_catalog_operation() -> None:
     catalog = _committed_catalog()
     rows = _matrix_rows()
-    matrix_pairs = {
-        (row["method"], row["path"])
-        for row in rows
-        if row.get("path")
-    }
+    matrix_pairs = {(row["method"], row["path"]) for row in rows if row.get("path")}
     catalog_pairs = {(op["method"], op["path"]) for op in catalog["operations"]}
     missing = catalog_pairs - matrix_pairs
     extra_vendor = matrix_pairs - catalog_pairs

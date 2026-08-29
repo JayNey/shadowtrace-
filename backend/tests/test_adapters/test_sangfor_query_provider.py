@@ -235,8 +235,7 @@ async def test_query_asset_info_succeeds_against_inventory() -> None:
                     url="http://sangfor-wire/api/xdr/v1/assets/list",
                     headers={
                         AUTH_HEADER_KEY: (
-                            "algorithm=HMAC-SHA256, Access=t, "
-                            "SignedHeaders=sign-date, Signature=ab"
+                            "algorithm=HMAC-SHA256, Access=t, SignedHeaders=sign-date, Signature=ab"
                         ),
                         SIGN_DATE_KEY: "20240101T000000Z",
                     },

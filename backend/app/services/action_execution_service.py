@@ -229,7 +229,7 @@ class ActionExecutionService:
                 details={"tool_name": action.tool_name},
             )
         binding = registry.resolve_binding(action.tool_name, action.execution_owner, [])
-        return binding.provider_name
+        return str(binding.provider_name)
 
     async def get_actions_by_event(self, event_id: str) -> list[Action]:
         async with self._session_factory() as session:

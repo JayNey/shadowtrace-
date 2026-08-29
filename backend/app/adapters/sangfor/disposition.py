@@ -1067,6 +1067,7 @@ class SangforDispositionAdapter(BaseDispositionAdapter):
         if not isinstance(provider_writeback_id, str) or not provider_writeback_id:
             provider_writeback_id = receipt.writeback_id
         verified = block_status_would_verify(status)
+        provider_code: str | None
         if status == BLOCK_IN_DEAL_STATUS:
             provider_code = "effect_not_applied"
         elif verified:

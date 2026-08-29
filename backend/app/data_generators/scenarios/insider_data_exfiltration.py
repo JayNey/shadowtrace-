@@ -71,9 +71,7 @@ def build_insider_data_exfiltration(
     log_net_id = f"{LOG_NET_ID}{id_suffix}"
     conn_log = log_only_connector(connector_id=f"conn-log-only{connector_suffix}")
     conn_disp = disposition_connector(connector_id=f"conn-disposition{connector_suffix}")
-    conn_gap = capability_gap_connector(
-        connector_id=f"conn-capability-gap{connector_suffix}"
-    )
+    conn_gap = capability_gap_connector(connector_id=f"conn-capability-gap{connector_suffix}")
 
     asset_primary_ref = make_ref(
         SourceObjectKind.ASSET,

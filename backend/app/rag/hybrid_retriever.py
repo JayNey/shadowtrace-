@@ -111,9 +111,7 @@ class HybridRetriever:
                             release_id=release_id,
                             embedding_release_id=embedding_release_id,
                             typed_filters=typed_filters,
-                            event_type_equals=storage_event_type_equals(
-                                kb, context.event_type
-                            ),
+                            event_type_equals=storage_event_type_equals(kb, context.event_type),
                         )
                     except Exception as exc:
                         logger.warning(
@@ -142,9 +140,7 @@ class HybridRetriever:
                             release_id=release_id,
                             embedding_release_id=embedding_release_id,
                             typed_filters=typed_filters,
-                            event_type_equals=storage_event_type_equals(
-                                kb, context.event_type
-                            ),
+                            event_type_equals=storage_event_type_equals(kb, context.event_type),
                         )
                     except Exception as exc:
                         logger.warning(

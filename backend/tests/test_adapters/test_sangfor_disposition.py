@@ -1118,8 +1118,10 @@ async def test_ticket_invalid_parameter_is_failed() -> None:
 async def test_ticket_list_failure_is_not_verified() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if request.method == "POST" and path.endswith("/orders") and not path.endswith(
-            "/orders/list"
+        if (
+            request.method == "POST"
+            and path.endswith("/orders")
+            and not path.endswith("/orders/list")
         ):
             return httpx.Response(
                 200,

@@ -69,7 +69,9 @@ def _stub_signed(path: str) -> SignedRequest:
         method="POST",
         url=f"http://sangfor-wire{path}",
         headers={
-            AUTH_HEADER_KEY: "algorithm=HMAC-SHA256, Access=test, SignedHeaders=sign-date, Signature=ab",
+            AUTH_HEADER_KEY: (
+                "algorithm=HMAC-SHA256, Access=test, SignedHeaders=sign-date, Signature=ab"
+            ),
             SIGN_DATE_KEY: "20240101T000000Z",
         },
         payload="{}",

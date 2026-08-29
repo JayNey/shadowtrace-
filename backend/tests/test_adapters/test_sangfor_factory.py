@@ -163,16 +163,19 @@ def test_action_execution_provider_name_follows_kind_not_hardcoded_literals() ->
     assert 'provider_name="mock_xdr"' not in xdr_src
     assert "self._direct_tool_job_provider_name" in tool_src
     assert 'provider_name="mock_tool_provider"' not in tool_src
-    assert disposition_provider_name(
-        Settings(
-            APP_ENV="development",
-            SOURCE_MODE="mock_xdr",
-            DISPOSITION_MODE="mock_xdr",
-            DISPOSITION_ADAPTER_KIND="mock",
-            TOOL_MODE="mock",
-            SIMULATION_ENABLED=True,
+    assert (
+        disposition_provider_name(
+            Settings(
+                APP_ENV="development",
+                SOURCE_MODE="mock_xdr",
+                DISPOSITION_MODE="mock_xdr",
+                DISPOSITION_ADAPTER_KIND="mock",
+                TOOL_MODE="mock",
+                SIMULATION_ENABLED=True,
+            )
         )
-    ) == MOCK_XDR_PROVIDER
+        == MOCK_XDR_PROVIDER
+    )
 
 
 def test_production_tool_mode_mock_still_fails() -> None:

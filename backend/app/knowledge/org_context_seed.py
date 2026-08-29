@@ -304,9 +304,7 @@ def mock_org_context_records() -> list[OrgContextRecord]:
         OrgContextRecord(
             record_id="org-person-general-user-099",
             kind="person_status",
-            content=(
-                "general-user-099 是在职无特权账号，在职无特权 ≠ 可忽略、不等于无需观察。"
-            ),
+            content=("general-user-099 是在职无特权账号，在职无特权 ≠ 可忽略、不等于无需观察。"),
             accounts=("general-user-099",),
             status="active",
         ),
@@ -341,8 +339,7 @@ def mock_org_context_records() -> list[OrgContextRecord]:
             record_id="org-data-ransomware-stage-not-approved",
             kind="data_handling",
             content=(
-                "开发机允许编译与包管理；ransomware_stage.exe 不是批准进程，"
-                "不得当作日常开发工具。"
+                "开发机允许编译与包管理；ransomware_stage.exe 不是批准进程，不得当作日常开发工具。"
             ),
         ),
     ]

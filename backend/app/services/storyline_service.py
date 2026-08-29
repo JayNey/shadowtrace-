@@ -66,6 +66,7 @@ def _enqueue_storyline_refine(event_id: str) -> None:
             exc_info=True,
         )
 
+
 _PHASE_ORDER: dict[StorylinePhaseName, int] = {
     StorylinePhaseName.INITIAL_ACCESS: 1,
     StorylinePhaseName.COLLECTION: 2,
@@ -188,15 +189,15 @@ class StorylineService:
         # --- LLM path ---
         if self._llm_client is not None and evidence_list:
             try:
-                storyline = await self._generate_llm(
+                llm_storyline = await self._generate_llm(
                     event_id=event_id,
                     evidence_list=evidence_list,
                     technique_matches=technique_matches,
                     graph_paths=graph_paths,
                     entity_names=entity_names,
                 )
-                if storyline is not None:
-                    finalized = self._finalize_storyline(storyline)
+                if llm_storyline is not None:
+                    finalized = self._finalize_storyline(llm_storyline)
                     await self._write(event_id, finalized)
                     return finalized
             except SoftTimeLimitExceeded:

@@ -34,6 +34,13 @@ SEED_PATH = SCRIPTS / "seed_mock_xdr_and_ingest.py"
 _DEV_TOKENS = json.dumps(
     {"analyst-token": {"subject": "analyst-1", "roles": ["analyst"]}},
 )
+_CELERY_READY_HEALTH = {
+    "playbook_resources": {"status": "ready"},
+    "celery": {
+        "task_mode": "celery",
+        "worker": {"status": "ok", "workers": 1, "worker_ids": ["investigation@host"]},
+    },
+}
 
 
 def _load_module(path: Path, name: str):
@@ -533,7 +540,7 @@ def test_require_closed_seed_missing_event_ids_message(full_loop_mod) -> None:
         def _get_json(path: str) -> dict[str, object]:
             if "/events" in path:
                 return {"items": []}
-            return {"playbook_resources": {"status": "ready"}}
+            return dict(_CELERY_READY_HEALTH)
 
         client.get_json.side_effect = _get_json
         with pytest.raises(SystemExit, match="seed summary missing event_ids"):
@@ -549,10 +556,59 @@ def test_empty_event_id_is_ignored(full_loop_mod) -> None:
     with patch.object(full_loop_mod, "DynamicEvalClient") as client_cls:
         client = client_cls.return_value
         client.get_json.side_effect = lambda path: (
-            {"items": []} if "/events" in path else {"playbook_resources": {"status": "ready"}}
+            {"items": []} if "/events" in path else dict(_CELERY_READY_HEALTH)
         )
         with pytest.raises(SystemExit, match="heuristic DB selection is forbidden"):
             full_loop_mod.main(["--require-closed", "--event-id", ""])
+
+
+def test_require_closed_refuses_background_task_mode(full_loop_mod) -> None:
+    with pytest.raises(SystemExit, match="task_mode=celery"):
+        full_loop_mod.assert_strict_closed_celery_ready(
+            {
+                "celery": {
+                    "task_mode": "background",
+                    "worker": {"status": "not_applicable", "workers": 0},
+                }
+            }
+        )
+
+
+def test_require_closed_refuses_celery_without_workers(full_loop_mod) -> None:
+    with pytest.raises(SystemExit, match="investigation worker"):
+        full_loop_mod.assert_strict_closed_celery_ready(
+            {
+                "celery": {
+                    "task_mode": "celery",
+                    "worker": {"status": "degraded", "workers": 0},
+                }
+            }
+        )
+
+
+def test_require_closed_accepts_celery_with_worker(full_loop_mod) -> None:
+    full_loop_mod.assert_strict_closed_celery_ready(_CELERY_READY_HEALTH)
+
+
+def test_require_closed_main_fail_fast_on_background_health(full_loop_mod) -> None:
+    with patch.object(full_loop_mod, "DynamicEvalClient") as client_cls:
+        client = client_cls.return_value
+        client.get_json.return_value = {
+            "playbook_resources": {"status": "ready"},
+            "celery": {
+                "task_mode": "background",
+                "worker": {"status": "not_applicable", "workers": 0},
+            },
+        }
+        with pytest.raises(SystemExit, match="task_mode=celery"):
+            full_loop_mod.main(
+                [
+                    "--require-closed",
+                    "--event-id",
+                    "evt-x",
+                    "--skip-baseline-preflight",
+                ]
+            )
 
 
 def test_bootstrap_default_generate_report_false_with_opt_in() -> None:
@@ -598,6 +654,8 @@ def test_makefile_eval_full_loop_target() -> None:
     eventtype8_recipe = text[text.index("eval-eventtype-8:") :]
     assert "--suite eventtype8" in eventtype8_recipe
     assert "--require-closed" in eventtype8_recipe
+    assert "docker-compose.worker.yml" in text
+    assert "WORKER_COMPOSE" in text
     assert "--seed-via-compose" in eventtype8_recipe
 
 
@@ -660,9 +718,7 @@ def test_remote_embedding_runbook_locks_gold_mock() -> None:
     env = ENV_EXAMPLE.read_text(encoding="utf-8")
     assert "rag-remote-embedding-demo.md" in env
     active = [
-        line.strip()
-        for line in env.splitlines()
-        if line.strip().startswith("EMBEDDING_MODE=")
+        line.strip() for line in env.splitlines() if line.strip().startswith("EMBEDDING_MODE=")
     ]
     assert "EMBEDDING_MODE=remote" not in active
 
@@ -1306,6 +1362,10 @@ def test_eventtype8_suite_calls_mock_column_gate(full_loop_mod, monkeypatch) -> 
         client.get_json.return_value = {
             "llm": {"mode": "openai"},
             "playbook_resources": {"status": "ready"},
+            "celery": {
+                "task_mode": "celery",
+                "worker": {"status": "ok", "workers": 1},
+            },
         }
         with patch.object(
             full_loop_mod,

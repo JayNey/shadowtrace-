@@ -55,9 +55,7 @@ def test_verify_agent_has_no_vendor_uri() -> None:
 
 
 def test_verify_tools_do_not_import_sangfor_package() -> None:
-    src = (
-        Path(__file__).resolve().parents[2] / "app" / "tools" / "verify" / "_common.py"
-    )
+    src = Path(__file__).resolve().parents[2] / "app" / "tools" / "verify" / "_common.py"
     text = src.read_text(encoding="utf-8")
     assert "adapters.sangfor" not in text
     assert "observe_sangfor_verification" not in text

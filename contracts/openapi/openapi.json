@@ -4290,7 +4290,6 @@
             "title": "References"
           }
         },
-        "additionalProperties": false,
         "type": "object",
         "required": [
           "answer"
