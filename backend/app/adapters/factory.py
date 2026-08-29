@@ -243,7 +243,7 @@ async def observe_disposition_verification(
     if kind != KIND_SANGFOR:
         return None
     try:
-        adapter = _build_sangfor_disposition(settings)  # type: ignore[arg-type]
+        adapter = _build_sangfor_disposition(settings)
         return await adapter.observe_verification(tool_name, params)
     except Exception:
         from app.adapters.sangfor.verify_observation import observe_sangfor_verification
@@ -266,15 +266,15 @@ def build_disposition_adapter_registry(settings: Settings) -> DispositionAdapter
         )
     registry = DispositionAdapterRegistry()
     if kind == KIND_MOCK:
-        adapter = _build_mock_disposition(settings)
-        registry.register(MOCK_XDR_PROVIDER, adapter)
+        mock_adapter = _build_mock_disposition(settings)
+        registry.register(MOCK_XDR_PROVIDER, mock_adapter)
         return registry
     if kind == KIND_HTTP:
-        adapter = _build_http_disposition(settings)
-        registry.register(HTTP_PROVIDER, adapter)
+        http_adapter = _build_http_disposition(settings)
+        registry.register(HTTP_PROVIDER, http_adapter)
         return registry
-    adapter = _build_sangfor_disposition(settings)
-    registry.register(SANGFOR_PROVIDER, adapter)
+    sangfor_adapter = _build_sangfor_disposition(settings)
+    registry.register(SANGFOR_PROVIDER, sangfor_adapter)
     return registry
 
 

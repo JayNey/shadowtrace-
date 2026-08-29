@@ -272,7 +272,7 @@ def canonical_path(url: str) -> str:
 
 
 def empty_json_object_is_no_payload(json_body: Any) -> bool:
-    return json_body == {}
+    return bool(json_body == {})
 
 
 def resolve_payload(*, data: str | bytes | None = None, json_body: Any = None) -> str:

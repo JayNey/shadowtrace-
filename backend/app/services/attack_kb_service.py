@@ -130,7 +130,7 @@ class AttackKBService:
                         "embedding_release_id": embedding_release_id,
                     },
                 )
-                return int(result.rowcount or 0)
+                return int(getattr(result, "rowcount", 0) or 0)
 
     async def get_technique(self, technique_id: str) -> dict[str, Any] | None:
         """Look up a technique by its MITRE ATT&CK technique ID (e.g. T1078)."""
