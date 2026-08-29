@@ -864,6 +864,28 @@ async def test_resume_returns_deferred_when_lease_held(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+async def test_resume_acquires_with_caller_owner_not_generated_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease = MagicMock()
+    lease.acquire = AsyncMock(return_value=False)
+    monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: lease)
+
+    outcome = await resume_investigation_from_checkpoint(
+        _SessionFactory(EventStatus.EXECUTING_RESPONSE.value),
+        "evt-owner-match",
+        get_super_agent=AsyncMock(return_value=MagicMock()),
+        get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+        lease_acquired=False,
+        owner_id="celery-task-abc",
+    )
+
+    assert outcome == "deferred"
+    lease.acquire.assert_awaited_once()
+    assert lease.acquire.await_args.args[1] == "celery-task-abc"
+
+
+@pytest.mark.asyncio
 async def test_catchup_resumes_once_from_approval_wait_halt() -> None:
     graph = MagicMock()
     graph.aget_state = AsyncMock(

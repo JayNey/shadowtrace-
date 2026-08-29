@@ -10,6 +10,7 @@ import pytest
 from app.agents.rag_agent import (
     RAGAgent,
     _aggregate_citations,
+    _aggregate_degraded_steps,
     _aggregate_retrieval_metrics,
     _build_attack_techniques,
     _build_fp_similarity,
@@ -2043,6 +2044,26 @@ class TestRAGOutputSchema:
         assert output.org_context_matches == []
         assert output.citations == []
         assert output.knowledge_query_plan is None
+        assert output.degraded_steps == []
+
+    def test_aggregate_degraded_steps_unique_order(self) -> None:
+        from app.models.knowledge import RetrievalResult
+
+        results = {
+            "attack_kb": RetrievalResult(
+                query="q",
+                degraded_steps=["keyword_unavailable", "reranker"],
+            ),
+            "fp_case_kb": RetrievalResult(
+                query="q",
+                degraded_steps=["keyword_unavailable"],
+            ),
+            "history_case_kb": None,
+        }
+        assert _aggregate_degraded_steps(results) == [
+            "keyword_unavailable",
+            "reranker",
+        ]
 
     def test_fp_similarity_score_bounds(self):
         with pytest.raises(pydantic.ValidationError):

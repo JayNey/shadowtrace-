@@ -713,6 +713,7 @@ async def resume_investigation_from_checkpoint(
     get_super_agent: GetSuperAgent,
     get_workflow_runtime: GetWorkflowRuntime,
     lease_acquired: bool = False,
+    owner_id: str | None = None,
 ) -> GraphResumeOutcome:
     """Resume LangGraph from checkpoint after approval or writeback.
 
@@ -721,18 +722,21 @@ async def resume_investigation_from_checkpoint(
     checkpoint → ``report_node``, or a report-only narrow path when no graph is
     wired. Missing checkpoint on ``REPORTING`` raises ``checkpoint_missing``
     while leaving the event at ``REPORTING`` (caller records degraded flags).
+
+    When *lease_acquired* is False, acquire using *owner_id* (Celery task
+    owner) instead of a fresh ``worker-*`` id so soft-limit release matches.
     """
     from app.api.v1.deps import get_event_lease
     from app.orchestration.lease import generate_owner_id
 
     lease = None
-    owner_id: str | None = None
+    resolved_owner: str | None = None
     owns_lease = False
     soft_limited = False
     if not lease_acquired:
         lease = get_event_lease()
-        owner_id = generate_owner_id()
-        acquired = await lease.acquire(event_id, owner_id)
+        resolved_owner = (owner_id or "").strip() or generate_owner_id()
+        acquired = await lease.acquire(event_id, resolved_owner)
         if not acquired:
             logger.info("graph resume deferred event=%s — lease already held", event_id)
             return "deferred"
@@ -749,9 +753,9 @@ async def resume_investigation_from_checkpoint(
         soft_limited = True
         raise
     finally:
-        if owns_lease and not soft_limited and lease is not None and owner_id is not None:
+        if owns_lease and not soft_limited and lease is not None and resolved_owner is not None:
             try:
-                await lease.release(event_id, owner_id)
+                await lease.release(event_id, resolved_owner)
             except SoftTimeLimitExceeded:
                 raise
             except Exception:

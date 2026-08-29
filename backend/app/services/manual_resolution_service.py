@@ -919,29 +919,28 @@ class ManualResolutionService:
             await self._mark_failure(intent_id, error=str(exc))
             return False
 
-        if is_approval_plan:
-            if resume_result == "deferred":
-                await self._requeue_deferred(intent_id)
-                return False
-            if resume_result in {"skipped", "failed"}:
-                await self._mark_failure(
-                    intent_id,
-                    error=f"approval_plan_resume_{resume_result}",
-                )
-                return False
-            await self._mark_terminal(intent_id)
-            return True
-
-        try:
-            await self._clear_manual_resolution_for_resume(event_id, generation)
-        except ValidationError:
-            # Resume path may have cleared substate or re-armed a newer hold.
-            logger.info(
-                "post-resume hold clear skipped intent=%s event=%s generation=%s",
+        if resume_result == "deferred":
+            await self._requeue_deferred(intent_id)
+            return False
+        if resume_result in {"skipped", "failed"}:
+            kind = "approval_plan" if is_approval_plan else "manual_hold"
+            await self._mark_failure(
                 intent_id,
-                event_id,
-                generation,
+                error=f"{kind}_resume_{resume_result}",
             )
+            return False
+
+        if not is_approval_plan:
+            try:
+                await self._clear_manual_resolution_for_resume(event_id, generation)
+            except ValidationError:
+                # Resume path may have cleared substate or re-armed a newer hold.
+                logger.info(
+                    "post-resume hold clear skipped intent=%s event=%s generation=%s",
+                    intent_id,
+                    event_id,
+                    generation,
+                )
         await self._mark_terminal(intent_id)
         return True
 

@@ -33,7 +33,7 @@ from app.core.config import Settings
 from app.core.errors import DependencyUnavailableError
 from app.ingestion import ingestion_scheduler
 from app.ingestion.source_ingester import source_to_ingestable
-from app.models.enums import Severity, SourceDisposition, SourceObjectKind
+from app.models.enums import ConnectorStatus, Severity, SourceDisposition, SourceObjectKind
 from app.models.source import SourceAlert, SourceAsset, SourceIncident, SourceLog
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -803,3 +803,45 @@ async def test_assets_success_maps_source_asset() -> None:
     assert asset.importance == "core"
     assert asset.raw_payload["assetId"] == 111
     assert page.has_more is False
+
+
+@pytest.mark.asyncio
+async def test_health_check_success_is_online() -> None:
+    captured: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={"code": "Success", "message": "ok", "data": {"item": []}},
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://xdr.example.com",
+    )
+    adapter = SangforSourceAdapter(_client(http), now_fn=lambda: _NOW)
+    try:
+        assert await adapter.health_check() is ConnectorStatus.ONLINE
+    finally:
+        await http.aclose()
+    assert captured == ["/api/xdr/v1/incidents/list"]
+
+
+@pytest.mark.asyncio
+async def test_health_check_business_failure_is_offline() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": "Fail", "message": "denied", "data": {}},
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://xdr.example.com",
+    )
+    adapter = SangforSourceAdapter(_client(http), now_fn=lambda: _NOW)
+    try:
+        assert await adapter.health_check() is ConnectorStatus.OFFLINE
+    finally:
+        await http.aclose()

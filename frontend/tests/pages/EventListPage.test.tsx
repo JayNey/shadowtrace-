@@ -472,7 +472,9 @@ describe("EventListPage", () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     await user.click(screen.getByTestId("trigger-investigation-evt-1"));
     expect(await screen.findByTestId("investigate-mode-modal")).toBeInTheDocument();
-    await user.click(screen.getByTestId("investigate-mode-full-loop"));
+    const fullLoop = screen.getByTestId("investigate-mode-full-loop");
+    await waitFor(() => expect(fullLoop).not.toBeDisabled());
+    await user.click(fullLoop);
     await user.click(screen.getByText("开始调查"));
 
     await waitFor(() =>
@@ -500,6 +502,24 @@ describe("EventListPage", () => {
     expect(await screen.findByTestId("investigate-mode-modal")).toBeInTheDocument();
     const fullLoop = screen.getByTestId("investigate-mode-full-loop");
     expect(fullLoop).toBeDisabled();
+    await waitFor(() => {
+      expect(screen.getByText(/ORCHESTRATION_MODE=analysis_only/)).toBeInTheDocument();
+    });
+  });
+
+  it("disables full-loop with health-check copy when health fails", async () => {
+    mockGetHealth.mockRejectedValue(new Error("health down"));
+    renderPage();
+    expect(await screen.findByText("Suspicious login")).toBeInTheDocument();
+
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.click(screen.getByTestId("trigger-investigation-evt-1"));
+    expect(await screen.findByTestId("investigate-mode-modal")).toBeInTheDocument();
+    const fullLoop = screen.getByTestId("investigate-mode-full-loop");
+    expect(fullLoop).toBeDisabled();
+    await waitFor(() => {
+      expect(screen.getByText(/调查健康检查失败/)).toBeInTheDocument();
+    });
   });
 
   it("shows approval policy version in investigate modal", async () => {

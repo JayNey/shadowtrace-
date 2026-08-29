@@ -116,6 +116,18 @@ class TestExactHit:
         assert entity_hits_chunk("PC-FIN", chunk) is False
         assert entity_hits_chunk("PC-FIN-023", chunk) is True
 
+    def test_dotted_names_are_not_hyphen_bounded_substrings(self) -> None:
+        exe = _chunk("atk-cmd", kb_name="attack_kb", content="spawned cmd.exe on host")
+        assert entity_hits_chunk("cmd", exe) is False
+        assert entity_hits_chunk("cmd.exe", exe) is True
+        domain = _chunk(
+            "atk-corp",
+            kb_name="attack_kb",
+            content="beacon to files.corp.internal",
+        )
+        assert entity_hits_chunk("corp", domain) is False
+        assert entity_hits_chunk("files.corp.internal", domain) is True
+
     def test_fp_negation_process_in_reason_is_not_a_hit(self) -> None:
         """Loaded 0d says 没有 7z.exe; that must not exact-hit insider process."""
         chunk = _chunk(

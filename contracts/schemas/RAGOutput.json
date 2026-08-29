@@ -516,6 +516,13 @@
       "default": false,
       "title": "Degraded",
       "type": "boolean"
+    },
+    "degraded_steps": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Degraded Steps",
+      "type": "array"
     }
   },
   "title": "RAGOutput",

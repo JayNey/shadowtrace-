@@ -1238,5 +1238,25 @@ class SangforSourceAdapter(BaseSourceAdapter):
             return None
 
     async def health_check(self) -> ConnectorStatus:
-        """No extra vendor URI; list is the only probe this layer has."""
-        return ConnectorStatus.UNKNOWN
+        """Probe incidents list — the only vendor URI this layer already uses."""
+        try:
+            window = self._window(
+                cursor=None,
+                updated_after=None,
+                limit=1,
+                kind=_INCIDENT_KIND,
+                time_field=self._time_field,
+                page_size=1,
+            )
+            result = await self._client.request(
+                "POST",
+                INCIDENTS_LIST_PATH,
+                json_body=self._list_body(window),
+                headers={"content-type": "application/json"},
+            )
+        except Exception:  # noqa: BLE001 — health must never raise to callers
+            return ConnectorStatus.OFFLINE
+        http_ok = 200 <= result.http_status < 300
+        if not http_ok or result.business_code != "Success":
+            return ConnectorStatus.OFFLINE
+        return ConnectorStatus.ONLINE

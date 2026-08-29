@@ -459,30 +459,21 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     renewal_failed,
                     event_id=event_id,
                 )
-                try:
-                    from app.api.v1.deps import get_workflow_runtime
-                    from app.orchestration.graph_resume import (
-                        maybe_catchup_approval_resume_same_lease,
-                    )
+                from app.api.v1.deps import get_workflow_runtime
+                from app.orchestration.graph_resume import (
+                    maybe_catchup_approval_resume_same_lease,
+                )
 
-                    async def _self_agent() -> SuperAgent:
-                        return self
+                async def _self_agent() -> SuperAgent:
+                    return self
 
-                    await maybe_catchup_approval_resume_same_lease(
-                        self.session_factory,
-                        event_id,
-                        self._investigation_graph,
-                        get_super_agent=_self_agent,
-                        get_workflow_runtime=get_workflow_runtime,
-                    )
-                except SoftTimeLimitExceeded:
-                    raise
-                except Exception:
-                    logger.warning(
-                        "SuperAgent: same-lease approval catchup failed event=%s",
-                        event_id,
-                        exc_info=True,
-                    )
+                await maybe_catchup_approval_resume_same_lease(
+                    self.session_factory,
+                    event_id,
+                    self._investigation_graph,
+                    get_super_agent=_self_agent,
+                    get_workflow_runtime=get_workflow_runtime,
+                )
             else:
                 graph = self._build_graph()
                 state: dict[str, Any] = {

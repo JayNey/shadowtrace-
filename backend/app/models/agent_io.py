@@ -434,6 +434,7 @@ class RAGOutput(BaseModel):
     )
     retrieval_metrics: RetrievalMetrics | None = None
     degraded: bool = False
+    degraded_steps: list[str] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #

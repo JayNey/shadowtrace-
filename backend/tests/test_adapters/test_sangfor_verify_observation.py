@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from app.adapters.sangfor.disposition import BLOCK_LIST_PATH
 from app.adapters.sangfor.verify_observation import (
     BLOCK_DETAIL_PATH,
     ISOLATE_LIST_PATH,
@@ -235,3 +236,38 @@ async def test_kind_mock_still_uses_mock_runtime(monkeypatch: pytest.MonkeyPatch
     assert seen == ["check_host_isolation_status"]
     assert result["provider_name"] == "mock_observation"
     assert result["data"]["is_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_block_ip_empty_detail_does_not_fallback_to_unscoped_list() -> None:
+    client = _FakeClient({"item": []})
+    result = await observe_sangfor_verification(
+        "check_ip_block_status",
+        {
+            "target_type": "ip",
+            "target": "203.0.113.50",
+            "parameters": {"job_id": "missing-rule"},
+        },
+        client=client,
+    )
+    assert result["status"] == ToolResultStatus.UNKNOWN.value
+    paths = [path for _method, path, _kwargs in client.calls]
+    assert BLOCK_DETAIL_PATH in paths
+    assert BLOCK_LIST_PATH not in paths
+
+
+@pytest.mark.asyncio
+async def test_virus_scan_without_vendor_task_id_is_unverifiable() -> None:
+    client = _FakeClient({"status": "completed", "item": []})
+    result = await observe_sangfor_verification(
+        "check_virus_scan_status",
+        {
+            "target_type": "host",
+            "target": "10.20.30.23",
+            "parameters": {"job_id": "st-internal-job"},
+        },
+        client=client,
+    )
+    assert result["status"] == ToolResultStatus.UNKNOWN.value
+    assert result["data"]["detail"] == "vendor_task_id_missing"
+    assert client.calls == []
