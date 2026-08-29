@@ -53,6 +53,21 @@
       "title": "CaseRecordSummary",
       "type": "object"
     },
+    "EventType": {
+      "description": "Supported security event types (intro §1); extensible via scenario packs.",
+      "enum": [
+        "account_anomaly",
+        "host_compromise",
+        "data_exfiltration",
+        "insider_threat",
+        "malicious_process",
+        "suspicious_domain",
+        "lateral_movement",
+        "other"
+      ],
+      "title": "EventType",
+      "type": "string"
+    },
     "FpRuleCandidate": {
       "additionalProperties": false,
       "properties": {
@@ -90,6 +105,17 @@
           ],
           "default": null,
           "title": "Review Id"
+        },
+        "event_type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [

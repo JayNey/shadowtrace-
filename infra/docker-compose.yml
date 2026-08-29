@@ -119,6 +119,9 @@ services:
       DISPOSITION_MODE: mock_xdr
       TOOL_MODE: mock
       SIMULATION_ENABLED: "true"
+      # Fallback is background. Pin celery via infra/docker-compose.worker.yml
+      # (`make up WORKER=1`) or infra/docker-compose.llm-audit.yml — do not
+      # recreate backend without one of those overlays.
       TASK_MODE: ${TASK_MODE:-background}
       CELERY_BROKER_URL: redis://redis:6379/0
 

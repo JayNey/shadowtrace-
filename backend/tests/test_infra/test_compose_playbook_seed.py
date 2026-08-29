@@ -8,6 +8,8 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 COMPOSE_PATH = REPO_ROOT / "infra" / "docker-compose.yml"
+WORKER_COMPOSE_PATH = REPO_ROOT / "infra" / "docker-compose.worker.yml"
+LLM_AUDIT_COMPOSE_PATH = REPO_ROOT / "infra" / "docker-compose.llm-audit.yml"
 ENTRYPOINT_PATH = REPO_ROOT / "backend" / "docker-entrypoint.sh"
 BOOTSTRAP_PATH = REPO_ROOT / "scripts" / "bootstrap.sh"
 SMOKE_PATH = REPO_ROOT / "scripts" / "smoke_bootstrap.sh"
@@ -105,3 +107,25 @@ def test_smoke_bootstrap_checks_playbook_ready() -> None:
     assert "ready" in text
     assert "smoke_event_terminal.py" in text
     assert "SMOKE_TERMINAL_MODE" in text
+
+
+def test_worker_overlay_pins_backend_task_mode_celery() -> None:
+    data = yaml.safe_load(WORKER_COMPOSE_PATH.read_text(encoding="utf-8"))
+    env = ((data.get("services") or {}).get("backend") or {}).get("environment") or {}
+    assert env.get("TASK_MODE") == "celery"
+
+
+def test_llm_audit_overlay_pins_backend_task_mode_celery() -> None:
+    data = yaml.safe_load(LLM_AUDIT_COMPOSE_PATH.read_text(encoding="utf-8"))
+    env = ((data.get("services") or {}).get("backend") or {}).get("environment") or {}
+    assert env.get("TASK_MODE") == "celery"
+
+
+def test_makefile_up_applies_worker_overlay_when_worker_enabled() -> None:
+    text = MAKEFILE_PATH.read_text(encoding="utf-8")
+    assert "WORKER_COMPOSE_FILE" in text
+    assert "docker-compose.worker.yml" in text
+    up_recipe = text[text.index("\nup:") : text.index("\ndown:")]
+    assert "WORKER_COMPOSE" in up_recipe
+    demo_block = text[text.index("COMPOSE_DEMO") : text.index("WORKER ?=")]
+    assert "WORKER_COMPOSE_FILE" in demo_block

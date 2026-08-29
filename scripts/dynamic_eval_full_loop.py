@@ -97,6 +97,37 @@ def llm_mode_from_health(health: dict[str, Any] | None) -> str:
     return str(llm.get("mode") or "").strip().lower()
 
 
+def assert_strict_closed_celery_ready(health: dict[str, Any] | None) -> None:
+    """Refuse --require-closed when API TASK_MODE is not celery with a live worker.
+
+    Overlay recreates that omit TASK_MODE=celery leave the API in background while
+    a worker container may still exist; execute/writeback then never complete.
+    """
+    celery = (health or {}).get("celery") or {}
+    if not isinstance(celery, dict):
+        celery = {}
+    task_mode = str(celery.get("task_mode") or "").strip().lower()
+    worker = celery.get("worker") if isinstance(celery.get("worker"), dict) else {}
+    worker_status = str(worker.get("status") or "").strip().lower()
+    try:
+        worker_count = int(worker.get("workers") or 0)
+    except (TypeError, ValueError):
+        worker_count = 0
+    if task_mode != "celery":
+        raise SystemExit(
+            "--require-closed requires health.celery.task_mode=celery "
+            f"(got {task_mode!r}, worker.status={worker_status!r}). "
+            "Use make up WORKER=1 (infra/docker-compose.worker.yml) or pin "
+            "TASK_MODE=celery on the llm-audit overlay; do not recreate backend "
+            "without that pin."
+        )
+    if worker_status != "ok" or worker_count < 1:
+        raise SystemExit(
+            "--require-closed requires a live investigation worker "
+            f"(got worker.status={worker_status!r} workers={worker_count})."
+        )
+
+
 def assert_eventtype8_real_llm(health: dict[str, Any] | None) -> None:
     """EventType-8 refuses MockLLM. Demo suite does not call this."""
     mode = llm_mode_from_health(health)
@@ -1348,6 +1379,8 @@ def main(argv: list[str] | None = None) -> int:
     if suite == "eventtype8":
         assert_eventtype8_real_llm(health)
     pb = (health or {}).get("playbook_resources") or {}
+    if args.require_closed:
+        assert_strict_closed_celery_ready(health)
     if pb.get("status") and pb.get("status") != "ready":
         print(
             f"[dynamic-eval] WARN: playbook_resources.status={pb.get('status')!r} "

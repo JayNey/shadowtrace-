@@ -1500,6 +1500,11 @@
           "title": "Constraint Channel",
           "type": "boolean"
         },
+        "entity_channel": {
+          "default": false,
+          "title": "Entity Channel",
+          "type": "boolean"
+        },
         "retrieval_action": {
           "default": "",
           "description": "sufficient | uncertain | conflict. Empty when unset.",
