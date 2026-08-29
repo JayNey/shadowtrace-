@@ -1,0 +1,255 @@
+{
+  "scenario": "account_anomaly_fp",
+  "compose_project_name": "shadowtrace-eval-account-anomaly-fp-20260820t023601z-601e9e1f",
+  "git_commit": "6609c79ba1bdc6eee96b96336e78e6138fa5e1c0",
+  "started_at": "2026-08-20T02:41:49.725172+00:00",
+  "fresh_volumes": true,
+  "require_closed": false,
+  "profile_by_scenario": true,
+  "profile": "analysis_only_fp",
+  "seed_summary": {
+    "accepted": 4,
+    "duplicate": 0,
+    "rejected": 0,
+    "watermark_before": null,
+    "watermark_after": null,
+    "degraded": false,
+    "errors": [],
+    "kind_summaries": {
+      "incident": {
+        "object_kind": "incident",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "alert": {
+        "object_kind": "alert",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "asset": {
+        "object_kind": "asset",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "log": {
+        "object_kind": "log",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      }
+    },
+    "event_ids": [
+      "evt-20240615-628d3dba"
+    ]
+  },
+  "event_ids": [
+    "evt-20240615-628d3dba",
+    "evt-20240615-55026fb0"
+  ],
+  "semantic_event_ids": [
+    "evt-20240615-628d3dba"
+  ],
+  "pressure_event_ids": [
+    "evt-20240615-55026fb0"
+  ],
+  "semantic_result": {
+    "triggered": [
+      {
+        "event_id": "evt-20240615-628d3dba",
+        "investigate": {
+          "event_id": "evt-20240615-628d3dba",
+          "task_id": "44d48f462b249f4d43ad2855fe30d2ab3f1f38a593ed8698be6eef8f646ccedb",
+          "intent_id": "iin-44f6ba9875cefc30",
+          "status": "new",
+          "include_response_execution": false,
+          "generate_report": true,
+          "full_loop_available": true
+        }
+      }
+    ],
+    "decisions": {},
+    "final_statuses": {
+      "evt-20240615-628d3dba": "closed"
+    },
+    "evidence_statuses": {
+      "evt-20240615-628d3dba": "completed"
+    },
+    "status_trace": {
+      "evt-20240615-628d3dba": [
+        "new",
+        "triaging",
+        "collecting_evidence",
+        "analyzing",
+        "scoring",
+        "closed"
+      ]
+    },
+    "semantic_assertions": {
+      "evt-20240615-628d3dba": {
+        "status": "closed",
+        "final_verdict": "false_positive",
+        "disposition_policy": "not_required"
+      }
+    },
+    "strict_assertions": null,
+    "profile": "analysis_only_fp",
+    "elapsed_s": 105.75,
+    "approval_timeout_used": false,
+    "fixture": "seed_mock_xdr_and_ingest",
+    "include_response_execution": false,
+    "seed_summary": null,
+    "scenario": "account_anomaly_fp",
+    "event_ids": [
+      "evt-20240615-628d3dba"
+    ],
+    "require_closed": false,
+    "analysis_only": true,
+    "notes": [
+      "Gold fixture is seed_mock_xdr_and_ingest — not POST /events.",
+      "Approvals were scripted — APPROVAL_TIMEOUT_MINUTES was not used to finish.",
+      "Production APPROVAL_TIMEOUT_MINUTES default remains 30.",
+      "EMBEDDING_MODE defaults to mock even when LLM_MODE is real (R2-014).",
+      "ISSUE-313 analysis-only semantic gate — response chain is intentionally skipped."
+    ]
+  },
+  "pressure_seed_summary": {
+    "accepted": 4,
+    "duplicate": 0,
+    "rejected": 0,
+    "watermark_before": null,
+    "watermark_after": null,
+    "degraded": false,
+    "errors": [],
+    "kind_summaries": {
+      "incident": {
+        "object_kind": "incident",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "alert": {
+        "object_kind": "alert",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "asset": {
+        "object_kind": "asset",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "log": {
+        "object_kind": "log",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      }
+    },
+    "event_ids": [
+      "evt-20240615-55026fb0"
+    ]
+  },
+  "pressure_result": null,
+  "pressure_error": {
+    "type": "MatrixError",
+    "message": "[pressure gate] dynamic_eval_full_loop failed (exit=1):\n\n[dynamic-eval] gold path events=['evt-20240615-55026fb0'] (fixture=seed_mock_xdr_and_ingest, include_response_execution=True)\n[dynamic-eval] triggered full_loop event_id=evt-20240615-55026fb0 generate_report=True\n[dynamic-eval] ERROR: gold-path FAILED for evt-20240615-55026fb0\nevent_id=evt-20240615-55026fb0\nelapsed_s=92.02845762501238\nstatus=failed\nstatus_trace=new -> triaging -> collecting_evidence -> analyzing -> scoring -> failed\nfinal_verdict=false_positive\nrecent_transitions=[{\"from_status\": null, \"to_status\": \"new\", \"operator\": \"EventService\", \"reason\": \"event_created\"}, {\"from_status\": \"new\", \"to_status\": \"new\", \"operator\": \"EventService\", \"reason\": \"related_source_linked_to_incident_event\"}, {\"from_status\": \"new\", \"to_status\": \"new\", \"operator\": \"EventService\", \"reason\": \"supporting_source_entities_refreshed\"}, {\"from_status\": \"new\", \"to_status\": \"triaging\", \"operator\": \"InvestigationGraph\", \"reason\": \"investigation:triage_start\"}, {\"from_status\": \"triaging\", \"to_status\": \"collecting_evidence\", \"operator\": \"InvestigationGraph\", \"reason\": \"investigation:evidence\"}]\nwriteback_readiness=not_required\nsoft_limit_diagnostics=event_id='evt-20240615-55026fb0'; event_status='failed' last_node=None checkpoint_node=None; intent_status=None\n"
+  },
+  "result": {
+    "triggered": [
+      {
+        "event_id": "evt-20240615-628d3dba",
+        "investigate": {
+          "event_id": "evt-20240615-628d3dba",
+          "task_id": "44d48f462b249f4d43ad2855fe30d2ab3f1f38a593ed8698be6eef8f646ccedb",
+          "intent_id": "iin-44f6ba9875cefc30",
+          "status": "new",
+          "include_response_execution": false,
+          "generate_report": true,
+          "full_loop_available": true
+        }
+      }
+    ],
+    "decisions": {},
+    "final_statuses": {
+      "evt-20240615-628d3dba": "closed"
+    },
+    "evidence_statuses": {
+      "evt-20240615-628d3dba": "completed"
+    },
+    "status_trace": {
+      "evt-20240615-628d3dba": [
+        "new",
+        "triaging",
+        "collecting_evidence",
+        "analyzing",
+        "scoring",
+        "closed"
+      ]
+    },
+    "semantic_assertions": {
+      "evt-20240615-628d3dba": {
+        "status": "closed",
+        "final_verdict": "false_positive",
+        "disposition_policy": "not_required"
+      }
+    },
+    "strict_assertions": null,
+    "profile": "analysis_only_fp",
+    "elapsed_s": 105.75,
+    "approval_timeout_used": false,
+    "fixture": "seed_mock_xdr_and_ingest",
+    "include_response_execution": false,
+    "seed_summary": null,
+    "scenario": "account_anomaly_fp",
+    "event_ids": [
+      "evt-20240615-628d3dba"
+    ],
+    "require_closed": false,
+    "analysis_only": true,
+    "notes": [
+      "Gold fixture is seed_mock_xdr_and_ingest — not POST /events.",
+      "Approvals were scripted — APPROVAL_TIMEOUT_MINUTES was not used to finish.",
+      "Production APPROVAL_TIMEOUT_MINUTES default remains 30.",
+      "EMBEDDING_MODE defaults to mock even when LLM_MODE is real (R2-014).",
+      "ISSUE-313 analysis-only semantic gate — response chain is intentionally skipped."
+    ]
+  },
+  "status": "passed_with_pressure_error",
+  "elapsed_s": 259.81
+}

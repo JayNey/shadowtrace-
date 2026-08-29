@@ -14,6 +14,7 @@ class FalsePositiveCase(BaseModel):
     """A confirmed false-positive pattern stored in fp_case_kb."""
 
     case_id: str = Field(..., description="case-{8 hex}")
+    event_type: EventType = Field(..., description="One of the 8 EventType values")
     pattern_summary: str = Field(..., description="Human-readable summary of the FP pattern")
     alert_signature: str = Field(..., description="Alert text / signature that triggers this FP")
     entity_pattern: str = Field(..., description="Involved entity types and characteristics")
@@ -55,12 +56,14 @@ def make_chunk_id(kb_name: str, case_id: str) -> str:
 
 def fp_case_to_text(case: FalsePositiveCase) -> str:
     """Flatten an FP case into a single searchable text for embedding."""
+    event_type = case.event_type.value if isinstance(case.event_type, EventType) else str(case.event_type)
     return " | ".join(
         [
             case.pattern_summary,
             case.alert_signature,
             case.entity_pattern,
             case.fp_reason,
+            event_type,
         ]
     )
 
@@ -72,8 +75,10 @@ def history_case_to_text(case: HistoryCase) -> str:
 
 def fp_case_metadata(case: FalsePositiveCase) -> dict[str, Any]:
     """Build metadata dict for an FP case chunk."""
+    event_type = case.event_type.value if isinstance(case.event_type, EventType) else case.event_type
     return {
         "case_id": case.case_id,
+        "event_type": event_type,
         "pattern_summary": case.pattern_summary,
         "alert_signature": case.alert_signature,
         "entity_pattern": case.entity_pattern,

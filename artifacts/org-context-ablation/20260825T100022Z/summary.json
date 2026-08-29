@@ -1,0 +1,103 @@
+{
+  "banner": "engineering_validation_only: mock embeddings / stub rewriter; not prize accuracy; RAG-segment metrics only",
+  "created_at": "2026-08-25T10:00:22.747594+00:00",
+  "accuracy": {
+    "banner": "engineering_validation_only: mock embeddings / stub rewriter; not prize accuracy; RAG-segment metrics only",
+    "cases": [
+      {
+        "case": "account_anomaly_fp",
+        "label": "benign_close",
+        "vector_rag_close": true,
+        "llm_close": true,
+        "exact_window_close": true,
+        "expected_close": true
+      },
+      {
+        "case": "suspicious_domain_access",
+        "label": "benign_close",
+        "vector_rag_close": true,
+        "llm_close": true,
+        "exact_window_close": true,
+        "expected_close": true
+      },
+      {
+        "case": "exfil_outside_window",
+        "label": "threat_keep_open",
+        "vector_rag_close": true,
+        "llm_close": true,
+        "exact_window_close": false,
+        "expected_close": false
+      }
+    ],
+    "vector_rag": {
+      "benign_correct_close": 2,
+      "threat_miss_close": 1
+    },
+    "llm_close": {
+      "benign_correct_close": 2,
+      "threat_miss_close": 1
+    },
+    "exact_change_window": {
+      "benign_correct_close": 2,
+      "threat_miss_close": 0
+    }
+  },
+  "latency": {
+    "banner": "engineering_validation_only: mock embeddings / stub rewriter; not prize accuracy; RAG-segment metrics only",
+    "arms": {
+      "current_rewrite": {
+        "n": 5,
+        "p50_ms": 55.29270926490426,
+        "p95_ms": 55.329457856714725,
+        "mean_llm_rewrite_calls": 1.0,
+        "top5": [
+          "chk-00000001",
+          "chk-00000002",
+          "chk-00000003",
+          "chk-00000004",
+          "chk-00000005"
+        ]
+      },
+      "skip_rewrite": {
+        "n": 5,
+        "p50_ms": 0.1411251723766327,
+        "p95_ms": 0.2671671099960804,
+        "mean_llm_rewrite_calls": 0.0,
+        "top5": [
+          "chk-00000001",
+          "chk-00000002",
+          "chk-00000003",
+          "chk-00000004",
+          "chk-00000005"
+        ]
+      },
+      "exact_only_org_context": {
+        "n": 5,
+        "p50_ms": 0.1411251723766327,
+        "p95_ms": 0.2671671099960804,
+        "mean_llm_rewrite_calls": 0.0,
+        "top5": [
+          "chk-00000001",
+          "chk-00000002",
+          "chk-00000003",
+          "chk-00000004",
+          "chk-00000005"
+        ],
+        "note": "org_context exact-only is additive; structured skip already measured"
+      },
+      "top_k_3": {
+        "n": 5,
+        "p50_ms": 0.09729107841849327,
+        "p95_ms": 0.11408282443881035,
+        "mean_llm_rewrite_calls": 0.0,
+        "top5": [
+          "chk-00000001",
+          "chk-00000002",
+          "chk-00000003"
+        ]
+      }
+    },
+    "top5_jaccard_skip_vs_current": 1.0,
+    "p95_drop_pct_skip_vs_current": 99.51713405418148
+  }
+}

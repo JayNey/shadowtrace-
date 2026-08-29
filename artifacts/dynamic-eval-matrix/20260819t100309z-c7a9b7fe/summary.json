@@ -1,0 +1,26 @@
+{
+  "run_id": "20260819t100309z-c7a9b7fe",
+  "git_commit": "6609c79ba1bdc6eee96b96336e78e6138fa5e1c0",
+  "scenarios": [
+    "suspicious_domain_access"
+  ],
+  "artifact_root": "/Users/apple/Desktop/shadowtrace副本/artifacts/dynamic-eval-matrix/20260819t100309z-c7a9b7fe",
+  "fresh_volumes": true,
+  "require_closed": false,
+  "profile_by_scenario": true,
+  "results": {
+    "suspicious_domain_access": {
+      "status": "failed",
+      "error": "full_loop did not emit JSON on stdout: '[dynamic-eval] gold path events=[\\'evt-20240615-a21c0948\\'] (fixture=seed_mock_xdr_and_ingest, include_response_execution=False)\\n[dynamic-eval] triggered analysis_only event_id=evt-20240615-a21c0948 generate_report=True\\n{\\n  \"triggered\": [\\n    {\\n      \"event_id\": \"evt-20240615-a21c0948\",\\n      \"investigate\": {\\n        \"event_id\": \"evt-20240615-a21c0948\",\\n        \"task_id\": \"e15ac9a190c6bf8013827c94d1b7ec787f64e4f4c3827058b652a51cbc506d63\",\\n        \"intent_id\": \"iin-83043726362f8947\",\\n        \"status\": \"new\",\\n        \"include_response_execution\": false,\\n        \"generate_report\": true,\\n        \"full_loop_available\": true\\n      }\\n    }\\n  ],\\n  \"decisions\": {},\\n  \"final_statuses\": {\\n    \"evt-20240615-a21c0948\": \"closed\"\\n  },\\n  \"evidence_statuses\": {\\n    \"evt-20240615-a21c0948\": \"completed\"\\n  },\\n  \"status_trace\": {\\n    \"evt-20240615-a21c0948\": [\\n      \"new\",\\n      \"triaging\",\\n      \"analyzing\",\\n      \"scoring\",\\n      \"closed\"\\n    ]\\n  },\\n  \"semantic_assertions\": {\\n    \"evt-20240615-a21c0948\": {\\n      \"status\": \"closed\",\\n      \"final_verdict\": \"none\",\\n      \"disposition_policy\": \"not_required\"\\n    }\\n  },\\n  \"strict_assertions\": null,\\n  \"profile\": \"analysis_only_domain\",\\n  \"elapsed_s\": 92.54,\\n  \"approval_timeout_used\": false,\\n  \"fixture\": \"seed_mock_xdr_and_ingest\",\\n  \"include_response_execution\": false,\\n  \"seed_summary\": null,\\n  \"scenario\": \"suspicious_domain_access\",\\n  \"event_ids\": [\\n    \"evt-20240615-a21c0948\"\\n  ],\\n  \"require_closed\": false,\\n  \"analysis_only\": true,\\n  \"notes\": [\\n    \"Gold fixture is seed_mock_xdr_and_ingest — not POST /events.\",\\n    \"Approvals were scripted — APPROVAL_TIMEOUT_MINUTES was not used to finish.\",\\n    \"Production APPROVAL_TIMEOUT_MINUTES default remains 30.\",\\n    \"EMBEDDING_MODE defaults to mock even when LLM_MODE is real (R2-014).\",\\n    \"ISSUE-313 analysis-only semantic gate — response chain is intentionally skipped.\"\\n  ]\\n}'\nstderr=''",
+      "compose_project_name": "shadowtrace-eval-suspicious-domain-access-20260819t100309z-c7a9b7fe",
+      "event_ids": [
+        "evt-20240615-a21c0948"
+      ],
+      "pressure_event_ids": [],
+      "semantic_event_ids": [
+        "evt-20240615-a21c0948"
+      ]
+    }
+  },
+  "status": "failed"
+}

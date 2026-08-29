@@ -66,7 +66,7 @@ CELERY_SIGKILL_ARTIFACT_DIR ?= $(CURDIR)/artifacts/issue-283
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo bootstrap-demo-analysis bootstrap-demo-full-loop smoke-demo demo-full-loop demo-guard-test up-observability down-observability llm-smoke test test-ci-lite lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest autonomous-mock-e2e-worker-sigkill eval-full-loop eval-full-loop-matrix eval-eventtype-8 adversarial-closure-gates test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift check-migration-revisions evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
+.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo bootstrap-demo-analysis bootstrap-demo-full-loop smoke-demo demo-full-loop demo-guard-test up-observability down-observability llm-smoke test test-ci-lite lint fmt migrate migrate-down load-kb up-embedding-remote integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest autonomous-mock-e2e-worker-sigkill eval-full-loop eval-full-loop-matrix eval-eventtype-8 adversarial-closure-gates test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift check-migration-revisions evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
@@ -127,6 +127,7 @@ BOOTSTRAP_GENERATE_REPORT ?= false
 BOOTSTRAP_INCLUDE_RESPONSE ?= false
 eval-full-loop:
 	@echo "[eval-full-loop] gold fixture=seed_mock_xdr_and_ingest scenario=$(EVAL_SCENARIO)"
+	@echo "[eval-full-loop] EMBEDDING_MODE stays mock — do not -f infra/docker-compose.embedding-remote.yml"
 	@echo "[eval-full-loop] scripted $(EVAL_DECISION) — never finish via APPROVAL_TIMEOUT"
 	@echo "[eval-full-loop] profile=$(if $(EVAL_REQUIRE_CLOSED),strict CLOSED,compat)"
 	COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
@@ -176,6 +177,7 @@ eval-full-loop-matrix:
 eval-eventtype-8:
 	@echo "[eval-eventtype-8] suite=eventtype8 scenario=$(EVAL_SCENARIO) (unset EVAL_SCENARIO to keep script default insider)"
 	@echo "[eval-eventtype-8] requires make load-kb already loaded into the stack (1期 does not change seeds)"
+	@echo "[eval-eventtype-8] EMBEDDING_MODE stays mock — do not -f infra/docker-compose.embedding-remote.yml"
 	@echo "[eval-eventtype-8] CJK compose path: COMPOSE_BAKE=0 DOCKER_BUILDKIT=0"
 	@echo "[eval-eventtype-8] scripted $(EVAL_DECISION) — never finish via APPROVAL_TIMEOUT"
 	COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
@@ -275,6 +277,15 @@ load-kb:
 	cd backend && $(PYTHON) -m scripts.load_case_kb
 	cd backend && $(PYTHON) -m scripts.load_org_context_kb
 	cd backend && $(PYTHON) -m scripts.load_playbook_release
+
+# P2 demo track only (docs/rag-remote-embedding-demo.md). NOT eval-eventtype-8.
+# Does not change SOURCE_MODE / DISPOSITION_ADAPTER_KIND / TOOL_MODE.
+# After recreate: make load-kb once. Do not loop load-kb. EMBEDDING_RELEASE_ID must change.
+EMBEDDING_REMOTE_COMPOSE := $(CURDIR)/infra/docker-compose.embedding-remote.yml
+up-embedding-remote:
+	@echo "[embedding-remote] NOT eval-eventtype-8 / eval-full-loop. Canonical Mock KIND unchanged."
+	@echo "[embedding-remote] After up: make load-kb once (same model; EMBEDDING_RELEASE_ID != mock-v1)."
+	$(COMPOSE) -f "$(EMBEDDING_REMOTE_COMPOSE)" $(WORKER_PROFILE) up -d --no-deps backend worker
 
 test:
 	cd backend && $(PYTHON) -m pytest tests/test_infra/test_health.py -v

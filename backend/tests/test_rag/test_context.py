@@ -57,6 +57,7 @@ def test_from_rag_input_uses_explicit_fields() -> None:
     assert ctx.event_id == "evt-test-001"
     assert ctx.trace_id == "abc123"
     assert ctx.org_constraints == ()
+    assert ctx.event_type is EventType.DATA_EXFILTRATION
 
 
 def test_from_rag_input_threads_occurred_at() -> None:
@@ -120,6 +121,7 @@ def test_for_investigation_resolves_tenant_from_source_snapshot() -> None:
     assert ctx.tenant_id == "tenant-from-snapshot"
     assert ctx.principal == "investigation:workflow_graph"
     assert ctx.trace_id == "trace-42"
+    assert ctx.event_type is None
 
 
 def test_for_investigation_requires_tenant_in_production(

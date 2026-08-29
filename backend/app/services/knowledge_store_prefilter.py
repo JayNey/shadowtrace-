@@ -39,6 +39,16 @@ def embedding_release_filter_clause(embedding_release_id: str | None) -> tuple[s
     return clause, {"embedding_release_id": embedding_release_id}
 
 
+def event_type_equals_clause(event_type: str | None) -> tuple[str, dict[str, str]]:
+    """Internal playbook EventType predicate. Not a KnowledgeFilterKind."""
+    value = (event_type or "").strip()
+    if not value:
+        return "", {}
+    return " AND metadata->>'event_type' = :event_type_equals", {
+        "event_type_equals": value,
+    }
+
+
 _KNOWLEDGE_CHUNK_KEYWORD_PREFILTER_FRAGMENT = re.compile(
     r"kb_name\s*=\s*:kb_name[\s\S]*"
     r"(metadata->>'release_id'\s*=\s*:release_id|metadata->>'embedding_release_id'\s*=\s*:embedding_release_id)",
@@ -169,5 +179,6 @@ __all__ = [
     "build_knowledge_chunk_keyword_sql",
     "build_knowledge_chunk_vector_sql",
     "embedding_release_filter_clause",
+    "event_type_equals_clause",
     "typed_filter_clause",
 ]

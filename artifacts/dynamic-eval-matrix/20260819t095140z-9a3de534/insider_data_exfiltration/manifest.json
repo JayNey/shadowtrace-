@@ -1,0 +1,77 @@
+{
+  "scenario": "insider_data_exfiltration",
+  "compose_project_name": "shadowtrace-eval-insider-data-exfiltration-20260819t095140z-9a3de534",
+  "git_commit": "6609c79ba1bdc6eee96b96336e78e6138fa5e1c0",
+  "started_at": "2026-08-19T09:51:40.891761+00:00",
+  "fresh_volumes": true,
+  "require_closed": false,
+  "profile_by_scenario": true,
+  "profile": "full_loop_strict",
+  "seed_summary": {
+    "accepted": 8,
+    "duplicate": 0,
+    "rejected": 0,
+    "watermark_before": null,
+    "watermark_after": null,
+    "degraded": false,
+    "errors": [],
+    "kind_summaries": {
+      "incident": {
+        "object_kind": "incident",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "alert": {
+        "object_kind": "alert",
+        "accepted": 3,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "asset": {
+        "object_kind": "asset",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "log": {
+        "object_kind": "log",
+        "accepted": 3,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      }
+    },
+    "event_ids": [
+      "evt-20240615-420918b5"
+    ]
+  },
+  "event_ids": [
+    "evt-20240615-420918b5"
+  ],
+  "semantic_event_ids": [
+    "evt-20240615-420918b5"
+  ],
+  "pressure_event_ids": [],
+  "status": "failed",
+  "error": {
+    "type": "MatrixError",
+    "message": "dynamic_eval_full_loop failed (exit=1):\n[dynamic-eval] gold path events=['evt-20240615-420918b5'] (fixture=seed_mock_xdr_and_ingest, include_response_execution=True)\n[dynamic-eval] triggered full_loop event_id=evt-20240615-420918b5 generate_report=True\n[dynamic-eval] scripted approve on evt-20240615-420918b5: 7 action(s)\n[dynamic-eval] ERROR: strict profile: event-level writeback_readiness='not_required' for evt-20240615-420918b5 (expected ready)\n"
+  },
+  "elapsed_s": 273.03
+}

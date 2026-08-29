@@ -207,6 +207,7 @@ BOOTSTRAP_INCLUDE_RESPONSE=true make bootstrap   # 会停在 waiting_approval，
 
 - Compose investigation worker 使用 `celery -c 2`。一次触发 **3** 路调查会排队约数分钟；评测请优先 `--max-events 1` / `EVAL_MAX_EVENTS=1`。
 - 默认 `EMBEDDING_MODE=mock`；即使 `LLM_MODE` 指向真实 openai_compatible 端点，embedding 仍可能是 mock，除非两边都显式覆盖。这是预期混跑，不是金标缺陷。
+- 答辩真向量走独立轨：`docs/rag-remote-embedding-demo.md` + 可选 `infra/docker-compose.embedding-remote.yml`。**不要**把该 overlay 叠进 `eval-eventtype-8` / `eval-full-loop`。切 remote 后同模型 `make load-kb` 一次（`embedding_release_id` 必须离开 `mock-v1`）。向量失败标 `vector_unavailable`，禁止静默改 mock 向量。演示轨仍按检索方案 §1.3 去重。
 - 本剖面 **不**改变 ISSUE-206 / 计划审批 / `evidence_limited` 产品合同。
 
 评测超时建议写在本地 `.env`（参考仓库根目录 `.env.example` 中「Dynamic eval / gold-path profile」注释块），**不要**把仓库里的 `APPROVAL_TIMEOUT_MINUTES=30` 改成 2。

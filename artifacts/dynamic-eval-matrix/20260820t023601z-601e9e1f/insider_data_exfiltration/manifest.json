@@ -1,0 +1,361 @@
+{
+  "scenario": "insider_data_exfiltration",
+  "compose_project_name": "shadowtrace-eval-insider-data-exfiltration-20260820t023601z-601e9e1f",
+  "git_commit": "6609c79ba1bdc6eee96b96336e78e6138fa5e1c0",
+  "started_at": "2026-08-20T02:36:02.002697+00:00",
+  "fresh_volumes": true,
+  "require_closed": false,
+  "profile_by_scenario": true,
+  "profile": "full_loop_strict",
+  "seed_summary": {
+    "accepted": 8,
+    "duplicate": 0,
+    "rejected": 0,
+    "watermark_before": null,
+    "watermark_after": null,
+    "degraded": false,
+    "errors": [],
+    "kind_summaries": {
+      "incident": {
+        "object_kind": "incident",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "alert": {
+        "object_kind": "alert",
+        "accepted": 3,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "asset": {
+        "object_kind": "asset",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "log": {
+        "object_kind": "log",
+        "accepted": 3,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      }
+    },
+    "event_ids": [
+      "evt-20240615-420918b5"
+    ]
+  },
+  "event_ids": [
+    "evt-20240615-420918b5"
+  ],
+  "semantic_event_ids": [
+    "evt-20240615-420918b5"
+  ],
+  "pressure_event_ids": [],
+  "semantic_result": {
+    "triggered": [
+      {
+        "event_id": "evt-20240615-420918b5",
+        "investigate": {
+          "event_id": "evt-20240615-420918b5",
+          "task_id": "ae5687db47770e917fdbc2a9bb19b5717ab5e6d4d88efe65d5624d9d79ff2358",
+          "intent_id": "iin-1e7ba0ba1b969633",
+          "status": "new",
+          "include_response_execution": true,
+          "generate_report": true,
+          "full_loop_available": true
+        }
+      }
+    ],
+    "decisions": {
+      "evt-20240615-420918b5": [
+        {
+          "action_id": "act-44fd83f1",
+          "action_level": "l2",
+          "decision": "approve",
+          "api": {
+            "action_id": "act-44fd83f1",
+            "status": "approved",
+            "decision_id": "dyn-eval-evt-20240615-420918b5-0-44fd83f1",
+            "message": "approved",
+            "resume_status": null,
+            "degraded": null
+          }
+        },
+        {
+          "action_id": "act-78b3fee0",
+          "action_level": "l2",
+          "decision": "approve",
+          "api": {
+            "action_id": "act-78b3fee0",
+            "status": "approved",
+            "decision_id": "dyn-eval-evt-20240615-420918b5-1-78b3fee0",
+            "message": "approved",
+            "resume_status": null,
+            "degraded": null
+          }
+        },
+        {
+          "action_id": "act-b4a99e35",
+          "action_level": "l2",
+          "decision": "approve",
+          "api": {
+            "action_id": "act-b4a99e35",
+            "status": "approved",
+            "decision_id": "dyn-eval-evt-20240615-420918b5-2-b4a99e35",
+            "message": "approved",
+            "resume_status": null,
+            "degraded": null
+          }
+        },
+        {
+          "action_id": "act-5a069496",
+          "action_level": "l3",
+          "decision": "approve",
+          "api": {
+            "action_id": "act-5a069496",
+            "status": "approved",
+            "decision_id": "dyn-eval-evt-20240615-420918b5-3-5a069496",
+            "message": "approved",
+            "resume_status": null,
+            "degraded": null
+          }
+        },
+        {
+          "action_id": "act-68f466b3",
+          "action_level": "l3",
+          "decision": "approve",
+          "api": {
+            "action_id": "act-68f466b3",
+            "status": "approved",
+            "decision_id": "dyn-eval-evt-20240615-420918b5-4-68f466b3",
+            "message": "approved",
+            "resume_status": null,
+            "degraded": null
+          }
+        },
+        {
+          "action_id": "act-eee863d9",
+          "action_level": "l3",
+          "decision": "approve",
+          "api": {
+            "action_id": "act-eee863d9",
+            "status": "approved",
+            "decision_id": "dyn-eval-evt-20240615-420918b5-5-eee863d9",
+            "message": "approved",
+            "resume_status": null,
+            "degraded": null
+          }
+        }
+      ]
+    },
+    "final_statuses": {
+      "evt-20240615-420918b5": "closed"
+    },
+    "evidence_statuses": {
+      "evt-20240615-420918b5": "completed"
+    },
+    "status_trace": {
+      "evt-20240615-420918b5": [
+        "new",
+        "triaging",
+        "collecting_evidence",
+        "analyzing",
+        "scoring",
+        "planning_response",
+        "waiting_approval",
+        "closed"
+      ]
+    },
+    "strict_assertions": {
+      "evt-20240615-420918b5": {
+        "event_id": "evt-20240615-420918b5",
+        "status": "closed",
+        "writeback_required": true,
+        "writeback_readiness": "ready",
+        "writeback_overall_status": "confirmed",
+        "report_quality": "degraded_template"
+      }
+    },
+    "profile": "strict",
+    "elapsed_s": 202.79,
+    "approval_timeout_used": false,
+    "fixture": "seed_mock_xdr_and_ingest",
+    "seed_summary": null,
+    "scenario": "insider_data_exfiltration",
+    "event_ids": [
+      "evt-20240615-420918b5"
+    ],
+    "require_closed": true,
+    "analysis_only": false,
+    "notes": [
+      "Gold fixture is seed_mock_xdr_and_ingest — not POST /events.",
+      "Approvals were scripted — APPROVAL_TIMEOUT_MINUTES was not used to finish.",
+      "Production APPROVAL_TIMEOUT_MINUTES default remains 30.",
+      "EMBEDDING_MODE defaults to mock even when LLM_MODE is real (R2-014).",
+      "Strict profile (ISSUE-301): reporting/contained/verifying are not success."
+    ]
+  },
+  "result": {
+    "triggered": [
+      {
+        "event_id": "evt-20240615-420918b5",
+        "investigate": {
+          "event_id": "evt-20240615-420918b5",
+          "task_id": "ae5687db47770e917fdbc2a9bb19b5717ab5e6d4d88efe65d5624d9d79ff2358",
+          "intent_id": "iin-1e7ba0ba1b969633",
+          "status": "new",
+          "include_response_execution": true,
+          "generate_report": true,
+          "full_loop_available": true
+        }
+      }
+    ],
+    "decisions": {
+      "evt-20240615-420918b5": [
+        {
+          "action_id": "act-44fd83f1",
+          "action_level": "l2",
+          "decision": "approve",
+          "api": {
+            "action_id": "act-44fd83f1",
+            "status": "approved",
+            "decision_id": "dyn-eval-evt-20240615-420918b5-0-44fd83f1",
+            "message": "approved",
+            "resume_status": null,
+            "degraded": null
+          }
+        },
+        {
+          "action_id": "act-78b3fee0",
+          "action_level": "l2",
+          "decision": "approve",
+          "api": {
+            "action_id": "act-78b3fee0",
+            "status": "approved",
+            "decision_id": "dyn-eval-evt-20240615-420918b5-1-78b3fee0",
+            "message": "approved",
+            "resume_status": null,
+            "degraded": null
+          }
+        },
+        {
+          "action_id": "act-b4a99e35",
+          "action_level": "l2",
+          "decision": "approve",
+          "api": {
+            "action_id": "act-b4a99e35",
+            "status": "approved",
+            "decision_id": "dyn-eval-evt-20240615-420918b5-2-b4a99e35",
+            "message": "approved",
+            "resume_status": null,
+            "degraded": null
+          }
+        },
+        {
+          "action_id": "act-5a069496",
+          "action_level": "l3",
+          "decision": "approve",
+          "api": {
+            "action_id": "act-5a069496",
+            "status": "approved",
+            "decision_id": "dyn-eval-evt-20240615-420918b5-3-5a069496",
+            "message": "approved",
+            "resume_status": null,
+            "degraded": null
+          }
+        },
+        {
+          "action_id": "act-68f466b3",
+          "action_level": "l3",
+          "decision": "approve",
+          "api": {
+            "action_id": "act-68f466b3",
+            "status": "approved",
+            "decision_id": "dyn-eval-evt-20240615-420918b5-4-68f466b3",
+            "message": "approved",
+            "resume_status": null,
+            "degraded": null
+          }
+        },
+        {
+          "action_id": "act-eee863d9",
+          "action_level": "l3",
+          "decision": "approve",
+          "api": {
+            "action_id": "act-eee863d9",
+            "status": "approved",
+            "decision_id": "dyn-eval-evt-20240615-420918b5-5-eee863d9",
+            "message": "approved",
+            "resume_status": null,
+            "degraded": null
+          }
+        }
+      ]
+    },
+    "final_statuses": {
+      "evt-20240615-420918b5": "closed"
+    },
+    "evidence_statuses": {
+      "evt-20240615-420918b5": "completed"
+    },
+    "status_trace": {
+      "evt-20240615-420918b5": [
+        "new",
+        "triaging",
+        "collecting_evidence",
+        "analyzing",
+        "scoring",
+        "planning_response",
+        "waiting_approval",
+        "closed"
+      ]
+    },
+    "strict_assertions": {
+      "evt-20240615-420918b5": {
+        "event_id": "evt-20240615-420918b5",
+        "status": "closed",
+        "writeback_required": true,
+        "writeback_readiness": "ready",
+        "writeback_overall_status": "confirmed",
+        "report_quality": "degraded_template"
+      }
+    },
+    "profile": "strict",
+    "elapsed_s": 202.79,
+    "approval_timeout_used": false,
+    "fixture": "seed_mock_xdr_and_ingest",
+    "seed_summary": null,
+    "scenario": "insider_data_exfiltration",
+    "event_ids": [
+      "evt-20240615-420918b5"
+    ],
+    "require_closed": true,
+    "analysis_only": false,
+    "notes": [
+      "Gold fixture is seed_mock_xdr_and_ingest — not POST /events.",
+      "Approvals were scripted — APPROVAL_TIMEOUT_MINUTES was not used to finish.",
+      "Production APPROVAL_TIMEOUT_MINUTES default remains 30.",
+      "EMBEDDING_MODE defaults to mock even when LLM_MODE is real (R2-014).",
+      "Strict profile (ISSUE-301): reporting/contained/verifying are not success."
+    ]
+  },
+  "status": "passed",
+  "elapsed_s": 345.33
+}

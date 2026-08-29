@@ -13,8 +13,10 @@ from opentelemetry import trace
 
 from app.core.config import Settings, get_settings
 from app.models.agent_io import RAGAgentInput
+from app.models.enums import EventType
 from app.models.knowledge_release import KnowledgeQueryPlan, KnowledgeTypedFilter
 from app.rag.constraint_rrf import OrgConstraint
+from app.rag.entity_rrf import EntityToken, extract_investigation_entities
 from app.rag.retrieval_router import evidence_conflict_present
 from app.services.org_context_matcher import OrgContextFacts, extract_org_context_facts
 from app.services.tenant_resolution import resolve_tenant_id
@@ -49,7 +51,9 @@ class RetrievalContext:
     query_plan: KnowledgeQueryPlan | None = None
     org_context_facts: OrgContextFacts | None = None
     org_constraints: tuple[OrgConstraint, ...] = ()
+    investigation_entities: tuple[EntityToken, ...] = ()
     has_evidence_conflict: bool = False
+    event_type: EventType | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tenant_id", _validate_identifier("tenant_id", self.tenant_id))
@@ -103,7 +107,12 @@ class RetrievalContext:
                 input.evidence_output,
                 now=input.occurred_at,
             ),
+            investigation_entities=extract_investigation_entities(
+                input.triage_result,
+                input.evidence_output,
+            ),
             has_evidence_conflict=evidence_conflict_present(input.evidence_output),
+            event_type=input.triage_result.event_type,
         )
 
     @classmethod

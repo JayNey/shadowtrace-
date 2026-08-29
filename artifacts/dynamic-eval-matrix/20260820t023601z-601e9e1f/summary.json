@@ -1,0 +1,58 @@
+{
+  "run_id": "20260820t023601z-601e9e1f",
+  "git_commit": "6609c79ba1bdc6eee96b96336e78e6138fa5e1c0",
+  "scenarios": [
+    "insider_data_exfiltration",
+    "account_anomaly_fp",
+    "suspicious_domain_access"
+  ],
+  "artifact_root": "/Users/apple/Desktop/shadowtrace副本/artifacts/dynamic-eval-matrix/20260820t023601z-601e9e1f",
+  "fresh_volumes": true,
+  "require_closed": false,
+  "profile_by_scenario": true,
+  "results": {
+    "insider_data_exfiltration": {
+      "status": "passed",
+      "event_ids": [
+        "evt-20240615-420918b5"
+      ],
+      "compose_project_name": "shadowtrace-eval-insider-data-exfiltration-20260820t023601z-601e9e1f",
+      "final_statuses": {
+        "evt-20240615-420918b5": "closed"
+      },
+      "semantic_profile": "full_loop_strict"
+    },
+    "account_anomaly_fp": {
+      "status": "passed_with_pressure_error",
+      "event_ids": [
+        "evt-20240615-628d3dba",
+        "evt-20240615-55026fb0"
+      ],
+      "compose_project_name": "shadowtrace-eval-account-anomaly-fp-20260820t023601z-601e9e1f",
+      "final_statuses": {
+        "evt-20240615-628d3dba": "closed"
+      },
+      "semantic_profile": "analysis_only_fp",
+      "pressure_error": {
+        "type": "MatrixError",
+        "message": "[pressure gate] dynamic_eval_full_loop failed (exit=1):\n\n[dynamic-eval] gold path events=['evt-20240615-55026fb0'] (fixture=seed_mock_xdr_and_ingest, include_response_execution=True)\n[dynamic-eval] triggered full_loop event_id=evt-20240615-55026fb0 generate_report=True\n[dynamic-eval] ERROR: gold-path FAILED for evt-20240615-55026fb0\nevent_id=evt-20240615-55026fb0\nelapsed_s=92.02845762501238\nstatus=failed\nstatus_trace=new -> triaging -> collecting_evidence -> analyzing -> scoring -> failed\nfinal_verdict=false_positive\nrecent_transitions=[{\"from_status\": null, \"to_status\": \"new\", \"operator\": \"EventService\", \"reason\": \"event_created\"}, {\"from_status\": \"new\", \"to_status\": \"new\", \"operator\": \"EventService\", \"reason\": \"related_source_linked_to_incident_event\"}, {\"from_status\": \"new\", \"to_status\": \"new\", \"operator\": \"EventService\", \"reason\": \"supporting_source_entities_refreshed\"}, {\"from_status\": \"new\", \"to_status\": \"triaging\", \"operator\": \"InvestigationGraph\", \"reason\": \"investigation:triage_start\"}, {\"from_status\": \"triaging\", \"to_status\": \"collecting_evidence\", \"operator\": \"InvestigationGraph\", \"reason\": \"investigation:evidence\"}]\nwriteback_readiness=not_required\nsoft_limit_diagnostics=event_id='evt-20240615-55026fb0'; event_status='failed' last_node=None checkpoint_node=None; intent_status=None\n"
+      }
+    },
+    "suspicious_domain_access": {
+      "status": "passed",
+      "event_ids": [
+        "evt-20240615-a21c0948",
+        "evt-20240615-45381569"
+      ],
+      "compose_project_name": "shadowtrace-eval-suspicious-domain-access-20260820t023601z-601e9e1f",
+      "final_statuses": {
+        "evt-20240615-a21c0948": "closed"
+      },
+      "semantic_profile": "analysis_only_domain",
+      "pressure_final_statuses": {
+        "evt-20240615-45381569": "closed"
+      }
+    }
+  },
+  "status": "passed_with_pressure_error"
+}

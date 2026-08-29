@@ -145,6 +145,7 @@ def _fp_candidate(
     signature: str = "Backup Service Login",
     confidence: float = 0.8,
     source_event_id: str = "evt-memory-review-1",
+    event_type: EventType | None = None,
 ) -> MemoryCandidate:
     rule = FpRuleCandidate(
         rule_summary=summary,
@@ -152,6 +153,7 @@ def _fp_candidate(
         confidence=confidence,
         source_event_id=source_event_id,
         pending_review=True,
+        event_type=event_type,
     )
     return MemoryCandidate(
         kb_name=FP_KB_NAME,
@@ -316,6 +318,21 @@ async def test_promoted_fp_rule_is_retrievable_and_audited(
     assert await knowledge_store.count(FP_KB_NAME) == 1
     assert hits
     assert hits[0].metadata["alert_signature"] == "Backup Service Login"
+    assert hits[0].metadata.get("event_type") == "other"
+
+
+@pytest.mark.asyncio
+async def test_promoted_fp_rule_preserves_candidate_event_type(
+    services: tuple[MemoryGovernance, KnowledgeStore, CaseKBService, ProfileService, _Clock],
+) -> None:
+    governance, _, case_kb, _, _ = services
+    review_id = await governance.ingest_candidate(
+        _fp_candidate(event_type=EventType.ACCOUNT_ANOMALY)
+    )
+    await governance.promote(review_id, "reviewer@example.com")
+    hits = await case_kb.search_fp_cases("Backup Service Login")
+    assert hits
+    assert hits[0].metadata.get("event_type") == EventType.ACCOUNT_ANOMALY.value
 
 
 @pytest.mark.asyncio

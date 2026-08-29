@@ -631,6 +631,7 @@ class FpRuleCandidate(BaseModel):
     source_event_id: str
     pending_review: bool = True
     review_id: str | None = None
+    event_type: EventType | None = None
 
 
 class ProfileUpdate(BaseModel):

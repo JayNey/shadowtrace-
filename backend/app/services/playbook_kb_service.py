@@ -355,6 +355,7 @@ class PlaybookKBService:
             query_text,
             top_k=fetch_k,
             release_id=release_id,
+            event_type_equals=event_type if event_type != "other" else None,
         )
         filtered = [
             hit for hit in hits if _meta_matches_filters(hit.metadata, event_type, query_ordinal)

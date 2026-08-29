@@ -27,6 +27,7 @@ from app.services.knowledge_store_prefilter import (
     assert_knowledge_chunk_keyword_prefilter_in_sql,
     assert_knowledge_chunk_prefilter_in_sql,
     embedding_release_filter_clause,
+    event_type_equals_clause,
     typed_filter_clause,
 )
 
@@ -118,6 +119,7 @@ class KnowledgeStore:
         release_id: str | None,
         embedding_release_id: str | None,
         typed_filters: tuple[KnowledgeTypedFilter, ...] | list[KnowledgeTypedFilter] = (),
+        event_type_equals: str | None = None,
     ) -> str:
         """Return the vector_search SQL body for backend pre-filter proof (#636)."""
         tenant_clause, _ = cls._tenant_filter_clause(
@@ -127,11 +129,13 @@ class KnowledgeStore:
         release_clause, _ = cls._release_filter_clause(release_id)
         embedding_clause, _ = embedding_release_filter_clause(embedding_release_id)
         filter_clause, _ = typed_filter_clause(typed_filters)
+        event_clause, _ = event_type_equals_clause(event_type_equals)
         return f"""
             SELECT chunk_id, kb_name, content, metadata,
                    1.0 - (embedding <=> :q) AS score
             FROM knowledge_chunk
-            WHERE kb_name = :kb_name{tenant_clause}{release_clause}{embedding_clause}{filter_clause}
+            WHERE kb_name = :kb_name
+              {tenant_clause}{release_clause}{embedding_clause}{filter_clause}{event_clause}
             ORDER BY embedding <=> :q
             LIMIT :top_k
             """
@@ -145,6 +149,7 @@ class KnowledgeStore:
         release_id: str | None,
         embedding_release_id: str | None,
         typed_filters: tuple[KnowledgeTypedFilter, ...] | list[KnowledgeTypedFilter] = (),
+        event_type_equals: str | None = None,
     ) -> str:
         """Return the keyword_search SQL body for backend pre-filter proof (#636)."""
         tenant_clause, _ = cls._tenant_filter_clause(
@@ -154,6 +159,7 @@ class KnowledgeStore:
         release_clause, _ = cls._release_filter_clause(release_id)
         embedding_clause, _ = embedding_release_filter_clause(embedding_release_id)
         filter_clause, _ = typed_filter_clause(typed_filters)
+        event_clause, _ = event_type_equals_clause(event_type_equals)
         return f"""
             SELECT chunk_id, kb_name, content, metadata,
                    GREATEST(
@@ -164,7 +170,7 @@ class KnowledgeStore:
             FROM knowledge_chunk
             WHERE kb_name = :kb_name
               AND to_tsvector('simple', content) @@ plainto_tsquery('simple', :q)
-              {tenant_clause}{release_clause}{embedding_clause}{filter_clause}
+              {tenant_clause}{release_clause}{embedding_clause}{filter_clause}{event_clause}
             ORDER BY ts_rank(to_tsvector('simple', content),
                              plainto_tsquery('simple', :q)) DESC
             LIMIT :top_k
@@ -244,6 +250,7 @@ class KnowledgeStore:
         release_id: str | None = None,
         embedding_release_id: str | None = None,
         typed_filters: tuple[KnowledgeTypedFilter, ...] | list[KnowledgeTypedFilter] = (),
+        event_type_equals: str | None = None,
     ) -> list[RetrievedChunk]:
         """Cosine-similarity search across vectors in *kb_name*."""
         tenant_clause, tenant_params = self._tenant_filter_clause(
@@ -253,6 +260,7 @@ class KnowledgeStore:
         release_clause, release_params = self._release_filter_clause(release_id)
         embedding_clause, embedding_params = embedding_release_filter_clause(embedding_release_id)
         filter_clause, filter_params = typed_filter_clause(typed_filters)
+        event_clause, event_params = event_type_equals_clause(event_type_equals)
         params: dict[str, object] = {
             "kb_name": kb_name,
             "q": query_embedding,
@@ -261,6 +269,7 @@ class KnowledgeStore:
             **release_params,
             **embedding_params,
             **filter_params,
+            **event_params,
         }
         sql_body = self.compose_vector_search_sql(
             tenant_id=tenant_id,
@@ -268,6 +277,7 @@ class KnowledgeStore:
             release_id=release_id,
             embedding_release_id=embedding_release_id,
             typed_filters=typed_filters,
+            event_type_equals=event_type_equals,
         )
         if release_id is not None or embedding_release_id is not None:
             assert_knowledge_chunk_prefilter_in_sql(sql_body)
@@ -302,6 +312,7 @@ class KnowledgeStore:
         tenant_id: str | None = None,
         release_id: str | None = None,
         embedding_release_id: str | None = None,
+        event_type_equals: str | None = None,
     ) -> list[RetrievedChunk]:
         """Embed *query_text* and run cosine-similarity search (ISSUE-522)."""
         query_vec = await self._embed.embed_query(query_text)
@@ -312,6 +323,7 @@ class KnowledgeStore:
             tenant_id=tenant_id,
             release_id=release_id,
             embedding_release_id=embedding_release_id,
+            event_type_equals=event_type_equals,
         )
 
     async def keyword_search(
@@ -324,6 +336,7 @@ class KnowledgeStore:
         release_id: str | None = None,
         embedding_release_id: str | None = None,
         typed_filters: tuple[KnowledgeTypedFilter, ...] | list[KnowledgeTypedFilter] = (),
+        event_type_equals: str | None = None,
     ) -> list[RetrievedChunk]:
         """PostgreSQL full-text search across chunks in *kb_name*."""
         tenant_clause, tenant_params = self._tenant_filter_clause(
@@ -333,6 +346,7 @@ class KnowledgeStore:
         release_clause, release_params = self._release_filter_clause(release_id)
         embedding_clause, embedding_params = embedding_release_filter_clause(embedding_release_id)
         filter_clause, filter_params = typed_filter_clause(typed_filters)
+        event_clause, event_params = event_type_equals_clause(event_type_equals)
         params: dict[str, object] = {
             "kb_name": kb_name,
             "q": query_text,
@@ -341,6 +355,7 @@ class KnowledgeStore:
             **release_params,
             **embedding_params,
             **filter_params,
+            **event_params,
         }
         sql_body = self.compose_keyword_search_sql(
             tenant_id=tenant_id,
@@ -348,6 +363,7 @@ class KnowledgeStore:
             release_id=release_id,
             embedding_release_id=embedding_release_id,
             typed_filters=typed_filters,
+            event_type_equals=event_type_equals,
         )
         if release_id is not None or embedding_release_id is not None:
             assert_knowledge_chunk_keyword_prefilter_in_sql(sql_body)
@@ -379,6 +395,7 @@ class KnowledgeStore:
         tenant_id: str | None = None,
         release_id: str | None = None,
         embedding_release_id: str | None = None,
+        event_type_equals: str | None = None,
     ) -> list[RetrievedChunk]:
         """Vector search plus keyword fallback, merged by chunk_id."""
         query_vec = await self._embed.embed_query(query_text)
@@ -389,6 +406,7 @@ class KnowledgeStore:
             tenant_id=tenant_id,
             release_id=release_id,
             embedding_release_id=embedding_release_id,
+            event_type_equals=event_type_equals,
         )
         keyword_hits = await self.keyword_search(
             kb_name,
@@ -397,6 +415,7 @@ class KnowledgeStore:
             tenant_id=tenant_id,
             release_id=release_id,
             embedding_release_id=embedding_release_id,
+            event_type_equals=event_type_equals,
         )
         return _merge_hybrid_results(vector_hits, keyword_hits, top_k)
 
@@ -405,18 +424,23 @@ class KnowledgeStore:
         *,
         kb_name: str | None = None,
         tenant_id: str | None = None,
+        embedding_release_id: str | None = None,
     ) -> int:
-        """Count chunks, optionally scoped to *kb_name* and tenant metadata."""
+        """Count chunks, optionally scoped to *kb_name*, tenant, and embedding pin."""
         tenant_clause, tenant_params = self._tenant_filter_clause(
             tenant_id,
             tenant_isolation_strict=self._tenant_isolation_strict,
         )
         kb_clause = " AND kb_name = :kb_name" if kb_name is not None else ""
-        params: dict[str, object] = {**tenant_params}
+        embedding_clause, embedding_params = embedding_release_filter_clause(
+            embedding_release_id
+        )
+        params: dict[str, object] = {**tenant_params, **embedding_params}
         if kb_name is not None:
             params["kb_name"] = kb_name
         sql = text(
-            f"SELECT COUNT(*) AS cnt FROM knowledge_chunk WHERE 1=1{kb_clause}{tenant_clause}"
+            f"SELECT COUNT(*) AS cnt FROM knowledge_chunk "
+            f"WHERE 1=1{kb_clause}{tenant_clause}{embedding_clause}"
         )
         async with self._session_factory() as session:
             result = await session.execute(sql, params)

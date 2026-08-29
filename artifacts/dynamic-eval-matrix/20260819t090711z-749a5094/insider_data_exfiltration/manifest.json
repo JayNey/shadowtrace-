@@ -1,0 +1,16 @@
+{
+  "scenario": "insider_data_exfiltration",
+  "compose_project_name": "shadowtrace-eval-insider-data-exfiltration-20260819t090711z-749a5094",
+  "git_commit": "6609c79ba1bdc6eee96b96336e78e6138fa5e1c0",
+  "started_at": "2026-08-19T09:07:11.615758+00:00",
+  "fresh_volumes": true,
+  "require_closed": false,
+  "profile_by_scenario": true,
+  "profile": "full_loop_strict",
+  "status": "failed",
+  "error": {
+    "type": "MatrixError",
+    "message": "compose up failed (exit=1):\n#1 [internal] load local bake definitions\n#1 reading from stdin 1.81kB done\n#1 DONE 0.0s\n\n Image shadowtrace-eval-insider-data-exfiltration-20260819t090711z-749a5094-worker Building \n Image shadowtrace-eval-insider-data-exfiltration-20260819t090711z-749a5094-backend Building \n Image shadowtrace-eval-insider-data-exfiltration-20260819t090711z-749a5094-mock-xdr Building \nfailed to dial gRPC: rpc error: code = Internal desc = rpc error: code = Internal desc = header key \"x-docker-expose-session-sharedkey\" contains value with non-printable ASCII characters\n\n"
+  },
+  "elapsed_s": 0.61
+}

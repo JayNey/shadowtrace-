@@ -399,12 +399,14 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
                     exc_info=True,
                 )
         # Keep the match key deterministic; the LLM may only refine summary/confidence.
+        event_type = context.event.event_type if context.event is not None else None
         return FpRuleCandidate(
             rule_summary=draft.rule_summary,
             alert_signature=signature,
             confidence=draft.confidence,
             source_event_id=event_id,
             pending_review=True,
+            event_type=event_type,
         )
 
 

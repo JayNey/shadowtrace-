@@ -1,0 +1,77 @@
+{
+  "scenario": "account_anomaly_fp",
+  "compose_project_name": "shadowtrace-eval-account-anomaly-fp-20260819t095932z-eec325d0",
+  "git_commit": "6609c79ba1bdc6eee96b96336e78e6138fa5e1c0",
+  "started_at": "2026-08-19T09:59:32.124767+00:00",
+  "fresh_volumes": true,
+  "require_closed": false,
+  "profile_by_scenario": true,
+  "profile": "analysis_only_fp",
+  "seed_summary": {
+    "accepted": 4,
+    "duplicate": 0,
+    "rejected": 0,
+    "watermark_before": null,
+    "watermark_after": null,
+    "degraded": false,
+    "errors": [],
+    "kind_summaries": {
+      "incident": {
+        "object_kind": "incident",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "alert": {
+        "object_kind": "alert",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "asset": {
+        "object_kind": "asset",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      },
+      "log": {
+        "object_kind": "log",
+        "accepted": 1,
+        "duplicate": 0,
+        "rejected": 0,
+        "watermark_before": null,
+        "watermark_after": null,
+        "degraded": false,
+        "errors": []
+      }
+    },
+    "event_ids": [
+      "evt-20240615-628d3dba"
+    ]
+  },
+  "event_ids": [
+    "evt-20240615-628d3dba"
+  ],
+  "semantic_event_ids": [
+    "evt-20240615-628d3dba"
+  ],
+  "pressure_event_ids": [],
+  "status": "failed",
+  "error": {
+    "type": "MatrixError",
+    "message": "full_loop did not emit JSON on stdout: '[dynamic-eval] gold path events=[\\'evt-20240615-628d3dba\\'] (fixture=seed_mock_xdr_and_ingest, include_response_execution=False)\\n[dynamic-eval] triggered analysis_only event_id=evt-20240615-628d3dba generate_report=True\\n{\\n  \"triggered\": [\\n    {\\n      \"event_id\": \"evt-20240615-628d3dba\",\\n      \"investigate\": {\\n        \"event_id\": \"evt-20240615-628d3dba\",\\n        \"task_id\": \"26124cbdca4c5fc53289cd506665aa8ea2a81fe6995efd691f549595a59e9fcd\",\\n        \"intent_id\": \"iin-6059ff21d70d3494\",\\n        \"status\": \"new\",\\n        \"include_response_execution\": false,\\n        \"generate_report\": true,\\n        \"full_loop_available\": true\\n      }\\n    }\\n  ],\\n  \"decisions\": {},\\n  \"final_statuses\": {\\n    \"evt-20240615-628d3dba\": \"closed\"\\n  },\\n  \"evidence_statuses\": {\\n    \"evt-20240615-628d3dba\": \"completed\"\\n  },\\n  \"status_trace\": {\\n    \"evt-20240615-628d3dba\": [\\n      \"new\",\\n      \"triaging\",\\n      \"analyzing\",\\n      \"scoring\",\\n      \"closed\"\\n    ]\\n  },\\n  \"semantic_assertions\": {\\n    \"evt-20240615-628d3dba\": {\\n      \"status\": \"closed\",\\n      \"final_verdict\": \"false_positive\",\\n      \"disposition_policy\": \"not_required\"\\n    }\\n  },\\n  \"strict_assertions\": null,\\n  \"profile\": \"analysis_only_fp\",\\n  \"elapsed_s\": 106.48,\\n  \"approval_timeout_used\": false,\\n  \"fixture\": \"seed_mock_xdr_and_ingest\",\\n  \"include_response_execution\": false,\\n  \"seed_summary\": null,\\n  \"scenario\": \"account_anomaly_fp\",\\n  \"event_ids\": [\\n    \"evt-20240615-628d3dba\"\\n  ],\\n  \"require_closed\": false,\\n  \"analysis_only\": true,\\n  \"notes\": [\\n    \"Gold fixture is seed_mock_xdr_and_ingest — not POST /events.\",\\n    \"Approvals were scripted — APPROVAL_TIMEOUT_MINUTES was not used to finish.\",\\n    \"Production APPROVAL_TIMEOUT_MINUTES default remains 30.\",\\n    \"EMBEDDING_MODE defaults to mock even when LLM_MODE is real (R2-014).\",\\n    \"ISSUE-313 analysis-only semantic gate — response chain is intentionally skipped.\"\\n  ]\\n}'\nstderr=''"
+  },
+  "elapsed_s": 144.99
+}

@@ -56,9 +56,10 @@ _EVENT_TYPE_FTS: dict[str, str] = {
 _HOST_COMPROMISE_QUERIES: tuple[str, ...] = ("credential dumping", "scripting")
 
 _LABELED_ENTITY = re.compile(
-    r"\b(?:Host|IP|Process|Domain|Account|File|IOC)\s*:\s*([^\s,;]+)",
+    r"\b(?P<label>Host|IP|Process|Domain|Account|File|IOC)\s*:\s*(?P<value>[^\s,;]+)",
     re.IGNORECASE,
 )
+_FP_AND_LABELS = frozenset({"account", "host"})
 _STOPWORDS = frozenset(
     {
         "event",
@@ -150,15 +151,14 @@ def keyword_queries_for_kb(kb_name: str, query: str, *, limit: int = 2) -> list[
         return _dedupe(ordered, limit=capped)
 
     if kb_name == "fp_case_kb":
-        ordered = list(extras)
-        tokens = _entity_tokens(stripped)
-        entity_like = [token for token in tokens if _looks_like_entity(token)]
-        if entity_like:
-            ordered.append(" ".join(entity_like[:2]))
-        elif tokens:
-            ordered.append(" ".join(tokens[:2]))
-        if event_fts:
-            ordered.append(event_fts)
+        # 口径 M: first slot is Account+Host AND. extras must not occupy both slots.
+        ordered: list[str] = []
+        entity_and = _fp_entity_and(stripped)
+        if entity_and:
+            ordered.append(entity_and)
+        second = extras[0] if extras else event_fts
+        if second:
+            ordered.append(second)
         return _dedupe(ordered, limit=capped)
 
     if kb_name == "playbook_kb":
@@ -169,13 +169,14 @@ def keyword_queries_for_kb(kb_name: str, query: str, *, limit: int = 2) -> list[
         return []
 
     if kb_name == "history_case_kb":
-        tokens = _entity_tokens(stripped)
+        # Same queue contract as fp: entity AND occupies slot 1.
         ordered = []
+        tokens = _entity_tokens(stripped)
         if tokens:
             ordered.append(" ".join(tokens[:2]))
-        ordered.extend(extras)
-        if event_fts:
-            ordered.append(event_fts)
+        second = extras[0] if extras else event_fts
+        if second:
+            ordered.append(second)
         return _dedupe(ordered, limit=capped)
 
     if kb_name == "org_context_kb":
@@ -205,8 +206,35 @@ def _event_type_fts(query: str) -> str:
     return ""
 
 
+def _fp_entity_and(query: str) -> str:
+    """First keyword road: labeled Account → Host, else entity-like tokens.
+
+    Process labels never occupy the AND slots (口径 D / M).
+    """
+    labeled_and: list[str] = []
+    seen: set[str] = set()
+    for match in _LABELED_ENTITY.finditer(query):
+        if match.group("label").lower() not in _FP_AND_LABELS:
+            continue
+        value = match.group("value")
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        labeled_and.append(value)
+        if len(labeled_and) >= 2:
+            break
+    if labeled_and:
+        return " ".join(labeled_and)
+    tokens = _entity_tokens(query)
+    entity_like = [token for token in tokens if _fp_and_fallback_token(token)]
+    if entity_like:
+        return " ".join(entity_like[:2])
+    return ""
+
+
 def _entity_tokens(query: str) -> list[str]:
-    labeled = [match.group(1) for match in _LABELED_ENTITY.finditer(query)]
+    labeled = [match.group("value") for match in _LABELED_ENTITY.finditer(query)]
     leftover: list[str] = []
     for token in _TOKEN.findall(query):
         lowered = token.lower()
@@ -226,9 +254,25 @@ def _entity_tokens(query: str) -> list[str]:
     return merged
 
 
+_PROCESS_SUFFIXES = frozenset({"exe", "dll", "bin", "so", "dylib"})
+
+
 def _looks_like_entity(token: str) -> bool:
     """Prefer host/account-like tokens over English filler words."""
     return any(sep in token for sep in ("-", "_", ".")) and token.lower() not in _STOPWORDS
+
+
+def _fp_and_fallback_token(token: str) -> bool:
+    """Account/host-like only. Process and dotted domains never occupy AND slots."""
+    if not _looks_like_entity(token):
+        return False
+    lowered = token.lower()
+    suffix = lowered.rsplit(".", 1)[-1]
+    if suffix in _PROCESS_SUFFIXES:
+        return False
+    if token.count(".") >= 2:
+        return False
+    return True
 
 
 def _dedupe(items: list[str], *, limit: int) -> list[str]:

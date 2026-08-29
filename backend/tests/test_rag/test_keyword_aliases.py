@@ -110,3 +110,15 @@ def test_insider_phrase_extra_queries() -> None:
     extras = extra_keyword_queries("内鬼外泄 7z.exe")
     assert extras
     assert any("insider" in item or "archive" in item for item in extras)
+
+
+def test_fp_labeled_account_host_and_is_first_keyword_road() -> None:
+    query = (
+        "False positive pattern for event type account_anomaly, severity low. "
+        "Account:ops-change-bot Host:PC-OPS-JUMP-01 Process:net.exe"
+    )
+    roads = keyword_queries_for_kb("fp_case_kb", query, limit=2)
+    assert any("ops-change-bot" in item and "PC-OPS-JUMP-01" in item for item in roads)
+    assert "ops-change-bot" in roads[0]
+    assert "PC-OPS-JUMP-01" in roads[0]
+    assert "net.exe" not in roads[0]

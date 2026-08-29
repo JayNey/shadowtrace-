@@ -94,6 +94,9 @@ class CaseKBService:
             keyword_query=keyword_query,
             top_k=fetch_k,
             tenant_id=tenant_id,
+            event_type_equals=(
+                event_type if event_type and event_type != EventType.OTHER.value else None
+            ),
         )
         if event_type is not None:
             results = [r for r in results if r.metadata.get("event_type") == event_type]

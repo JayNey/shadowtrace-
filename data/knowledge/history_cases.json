@@ -244,11 +244,59 @@
     "event_id": null,
     "event_type": "other",
     "case_label": "uncertain",
-    "summary": "通用工作站 WKS-GEN-099 上 general-user-099 触发低置信未分类告警，上下文不足以归入已知 EventType",
-    "key_entities": "account=general-user-099; host=WKS-GEN-099; signal=unclassified; confidence=low",
+    "summary": "通用工作站 WKS-GEN-099 上 general-user-099 触发低置信 unclassified 告警，insufficient context 不足以归入已知 EventType，保持观察",
+    "key_entities": "account=general-user-099; host=WKS-GEN-099; signal=unclassified; context=insufficient context; confidence=low",
     "final_verdict": "none",
     "risk_score": 22,
     "resolution": "保持观察并补证据，不执行主机隔离或网络封禁",
     "closed_at": "2024-06-15T12:00:00Z"
+  },
+  {
+    "case_id": "case-10000022",
+    "event_id": null,
+    "event_type": "host_compromise",
+    "case_label": "true_positive",
+    "summary": "失陷主机 WKS-HOST-007 上 svc-beacon-007 运行 beacon.exe 外连 beacon-example.test；结案 isolate 该主机并 scan 全盘 IOC",
+    "key_entities": "account=svc-beacon-007; host=WKS-HOST-007; process=beacon.exe; domain=beacon-example.test; action=isolate; action=scan",
+    "final_verdict": "confirmed_threat",
+    "risk_score": 88,
+    "resolution": "isolate_host 后 scan_host_for_virus，阻断 beacon-example.test",
+    "closed_at": "2024-06-15T17:00:00Z"
+  },
+  {
+    "case_id": "case-10000023",
+    "event_id": null,
+    "event_type": "malicious_process",
+    "case_label": "true_positive",
+    "summary": "开发机 DEV-WKS-012 上出现 ransomware_stage.exe，不是批准编译工具；结案 block_process 终止该进程",
+    "key_entities": "account=dev-user-012; host=DEV-WKS-012; process=ransomware_stage.exe; action=block_process",
+    "final_verdict": "confirmed_threat",
+    "risk_score": 86,
+    "resolution": "block_process 终止 ransomware_stage.exe 并保留样本",
+    "closed_at": "2024-06-15T17:10:00Z"
+  },
+  {
+    "case_id": "case-10000024",
+    "event_id": null,
+    "event_type": "insider_threat",
+    "case_label": "true_positive",
+    "summary": "特权滥用：svc-admin-abuse 在 SRV-ADMIN-003 上执行 net.exe 提权；结案 disable_account，与离职 U 盘下载案区分",
+    "key_entities": "account=svc-admin-abuse; host=SRV-ADMIN-003; process=net.exe; action=disable_account",
+    "final_verdict": "confirmed_threat",
+    "risk_score": 87,
+    "resolution": "disable_account 停用 svc-admin-abuse，核对 SRV-ADMIN-003 上的 net.exe 会话",
+    "closed_at": "2024-06-15T17:20:00Z"
+  },
+  {
+    "case_id": "case-10000025",
+    "event_id": null,
+    "event_type": "lateral_movement",
+    "case_label": "true_positive",
+    "summary": "JUMP-HOST-001 上 ops-jump-001 用 mstsc.exe 对 SRV-CORE-002 做 RDP lateral movement；结案 block_ip 并 isolate 跳板",
+    "key_entities": "account=ops-jump-001; host=JUMP-HOST-001; dst_host=SRV-CORE-002; process=mstsc.exe; technique=lateral movement; protocol=RDP; action=block_ip",
+    "final_verdict": "confirmed_threat",
+    "risk_score": 89,
+    "resolution": "block_ip 阻断横向跳转，isolate JUMP-HOST-001，与批准跳板 PC-OPS-JUMP-01 区分",
+    "closed_at": "2024-06-15T17:30:00Z"
   }
 ]

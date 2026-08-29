@@ -23,6 +23,8 @@ APPROVE_PATH = SCRIPTS / "dynamic_eval_approve.py"
 FULL_LOOP_PATH = SCRIPTS / "dynamic_eval_full_loop.py"
 MATRIX_PATH = SCRIPTS / "dynamic_eval_matrix.py"
 EVAL_COMPOSE = REPO_ROOT / "infra" / "docker-compose.eval.yml"
+EMBEDDING_REMOTE_COMPOSE = REPO_ROOT / "infra" / "docker-compose.embedding-remote.yml"
+REMOTE_EMBEDDING_DOC = REPO_ROOT / "docs" / "rag-remote-embedding-demo.md"
 BOOTSTRAP_PATH = SCRIPTS / "bootstrap.sh"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 DEPLOYMENT_DOC = REPO_ROOT / "docs" / "deployment.md"
@@ -597,6 +599,72 @@ def test_makefile_eval_full_loop_target() -> None:
     assert "--suite eventtype8" in eventtype8_recipe
     assert "--require-closed" in eventtype8_recipe
     assert "--seed-via-compose" in eventtype8_recipe
+
+
+def _makefile_recipe_commands(text: str, start: str, end: str) -> str:
+    block = text[text.index(start) : text.index(end)]
+    return "\n".join(
+        line
+        for line in block.splitlines()
+        if not line.lstrip().startswith("@echo") and not line.lstrip().startswith("@#")
+    )
+
+
+def test_eval_targets_do_not_compose_remote_embedding() -> None:
+    text = MAKEFILE_PATH.read_text(encoding="utf-8")
+    overlay = "docker-compose.embedding-remote.yml"
+    full_loop = _makefile_recipe_commands(text, "eval-full-loop:", "eval-full-loop-matrix:")
+    matrix = _makefile_recipe_commands(text, "eval-full-loop-matrix:", "eval-eventtype-8:")
+    eventtype8 = _makefile_recipe_commands(text, "eval-eventtype-8:", "up-demo:")
+    assert overlay not in full_loop
+    assert overlay not in matrix
+    assert overlay not in eventtype8
+    assert "EMBEDDING_MODE=remote" not in full_loop
+    assert "EMBEDDING_MODE=remote" not in matrix
+    assert "EMBEDDING_MODE=remote" not in eventtype8
+    eval_compose = EVAL_COMPOSE.read_text(encoding="utf-8")
+    assert "EMBEDDING_MODE" not in eval_compose
+    matrix_script = MATRIX_PATH.read_text(encoding="utf-8")
+    assert overlay not in matrix_script
+
+
+def test_remote_embedding_overlay_is_opt_in_not_kind() -> None:
+    assert EMBEDDING_REMOTE_COMPOSE.is_file()
+    text = EMBEDDING_REMOTE_COMPOSE.read_text(encoding="utf-8")
+    assert "EMBEDDING_MODE: remote" in text
+    assert "DISPOSITION_ADAPTER_KIND:" not in text
+    assert "SOURCE_MODE:" not in text
+    assert "DISPOSITION_MODE:" not in text
+    assert "TOOL_MODE:" not in text
+    assert "eval-eventtype-8" in text
+    assert "KIND=mock" in text
+    makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
+    assert "up-embedding-remote:" in makefile
+    assert "NOT eval-eventtype-8" in makefile
+
+
+def test_remote_embedding_runbook_locks_gold_mock() -> None:
+    assert REMOTE_EMBEDDING_DOC.is_file()
+    text = REMOTE_EMBEDDING_DOC.read_text(encoding="utf-8")
+    assert "EMBEDDING_MODE=mock" in text
+    assert "eval-eventtype-8" in text
+    assert "eval-full-loop" in text
+    assert "vector_unavailable" in text
+    assert "make load-kb" in text
+    assert "embedding_release_id" in text or "EMBEDDING_RELEASE_ID" in text
+    assert "禁止写" in text
+    assert "300+" in text
+    assert "KIND=mock" in text
+    deployment = DEPLOYMENT_DOC.read_text(encoding="utf-8")
+    assert "rag-remote-embedding-demo.md" in deployment
+    env = ENV_EXAMPLE.read_text(encoding="utf-8")
+    assert "rag-remote-embedding-demo.md" in env
+    active = [
+        line.strip()
+        for line in env.splitlines()
+        if line.strip().startswith("EMBEDDING_MODE=")
+    ]
+    assert "EMBEDDING_MODE=remote" not in active
 
 
 def test_deployment_docs_gold_path_honesty() -> None:

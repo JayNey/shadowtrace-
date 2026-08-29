@@ -18,12 +18,20 @@ from app.models.knowledge import (
 )
 from app.models.knowledge_release import KnowledgeQueryPlanHints
 from app.rag.citation_tracer import CitationTracer
-from app.rag.constraint_rrf import c_rrf_fuse
+from app.rag.constraint_rrf import rank_constraint_channel
 from app.rag.context import RetrievalContext
+from app.rag.entity_rrf import (
+    blocked_domains_from_constraints,
+    dedupe_retrieved_chunks,
+    project_entities_for_kb,
+    rank_entity_channel,
+    reorder_fp_hits_first,
+)
+from app.rag.event_type_filter import playbook_empty_degraded_steps
 from app.rag.hybrid_retriever import HybridRetriever
 from app.rag.query_rewrite_policy import should_skip_query_rewrite
 from app.rag.query_rewriter import QueryRewriter
-from app.rag.reranker import Reranker
+from app.rag.reranker import Reranker, effective_rerank_mode
 from app.rag.retrieval_router import decide_retrieval_action, should_short_circuit_org_exact
 from app.rag.rrf_fusion import rrf_fuse
 from app.services.knowledge_query_plan_validator import validate_knowledge_query_plan
@@ -248,6 +256,21 @@ class RetrievalPipeline:
             rewritten, kb_names, top_k=effective_top_k, context=active_context
         )
         retrieve_ms = _elapsed_ms(retrieve_started)
+        if getattr(self._retriever, "vector_unavailable", False):
+            degraded.append("vector_unavailable")
+
+        extra_blocked = blocked_domains_from_constraints(active_context.org_constraints)
+        entity_kb = kb_names[0] if len(kb_names) == 1 else ""
+        entity_set = (
+            ()
+            if entity_kb == ORG_CONTEXT_KB_NAME or not entity_kb
+            else project_entities_for_kb(
+                entity_kb,
+                active_context.investigation_entities,
+                extra_blocked_domains=extra_blocked,
+            )
+        )
+        result_lists = [dedupe_retrieved_chunks(lst, entity_set) for lst in result_lists]
 
         plan_payload = (
             active_context.query_plan.model_dump(mode="json")
@@ -260,6 +283,13 @@ class RetrievalPipeline:
         )
         if not any(result_lists):
             chunks = list(pending_exact_chunks)
+            if not chunks:
+                await _tag_playbook_empty(
+                    kb_names,
+                    active_context,
+                    getattr(self._retriever, "_store", None),
+                    degraded,
+                )
             citations = CitationTracer.generate(query, chunks) if chunks else []
             return RetrievalResult(
                 query=query,
@@ -279,25 +309,28 @@ class RetrievalPipeline:
             )
 
         rrf_started = time.perf_counter()
-        constraint_channel = False
-        if kb_names == [ORG_CONTEXT_KB_NAME] or not active_context.org_constraints:
-            fused = rrf_fuse(result_lists, k=60)
-        else:
-            fused, constraint_channel = c_rrf_fuse(
-                result_lists,
-                active_context.org_constraints,
-                k=60,
-            )
+        fused, constraint_channel, entity_channel = _fuse_with_channels(
+            result_lists,
+            kb_names=kb_names,
+            org_constraints=active_context.org_constraints,
+            entity_set=entity_set,
+        )
         rrf_ms = _elapsed_ms(rrf_started)
 
+        if entity_kb == "fp_case_kb" and entity_set:
+            fused = reorder_fp_hits_first(fused, entity_set)
+        fused = dedupe_retrieved_chunks(fused, entity_set)
+
         rerank_started = time.perf_counter()
-        if constraint_channel:
+        rerank_mode = effective_rerank_mode(cfg)
+        skip_mock_rerank = rerank_mode == "mock" and (constraint_channel or entity_channel)
+        if rerank_mode == "off" or skip_mock_rerank:
             reranked = _ensure_normalized(fused[:effective_top_k])
         else:
             try:
                 reranked = await self._reranker.rerank(query, fused, effective_top_k)
             except Exception as exc:
-                logger.warning("Reranking failed, using RRF order: %s", exc)
+                logger.warning("Reranking failed, using fusion order: %s", exc)
                 degraded.append("reranker")
                 reranked = _ensure_normalized(fused[:effective_top_k])
         rerank_ms = _elapsed_ms(rerank_started)
@@ -309,6 +342,13 @@ class RetrievalPipeline:
             ]
             reranked = reranked[:effective_top_k]
         citations = CitationTracer.generate(query, reranked)
+        if not reranked:
+            await _tag_playbook_empty(
+                kb_names,
+                active_context,
+                getattr(self._retriever, "_store", None),
+                degraded,
+            )
         return RetrievalResult(
             query=query,
             rewritten_queries=rewritten,
@@ -324,6 +364,7 @@ class RetrievalPipeline:
                 total_ms=_elapsed_ms(impl_started),
                 llm_rewrite_calls=llm_rewrite_calls,
                 constraint_channel=constraint_channel,
+                entity_channel=entity_channel,
                 org_context_exact_hit=org_exact_hit,
                 retrieval_action=action,
             ),
@@ -403,6 +444,33 @@ class RetrievalPipeline:
         )
 
 
+def _fuse_with_channels(
+    result_lists: list[list[RetrievedChunk]],
+    *,
+    kb_names: list[str],
+    org_constraints: tuple[Any, ...],
+    entity_set: tuple[Any, ...],
+) -> tuple[list[RetrievedChunk], bool, bool]:
+    """RRF with optional L_C and L_E voters. org_context_kb never takes L_E."""
+    extra: list[list[RetrievedChunk]] = []
+    skip_constraint = kb_names == [ORG_CONTEXT_KB_NAME] or not org_constraints
+    pool = [chunk for lst in result_lists for chunk in lst]
+    constraint_channel = False
+    entity_channel = False
+    if not skip_constraint:
+        channel = rank_constraint_channel(pool, org_constraints)
+        if channel:
+            extra.append(channel)
+            constraint_channel = True
+    if entity_set:
+        ranked_entities = rank_entity_channel(pool, entity_set)
+        if ranked_entities:
+            extra.append(ranked_entities)
+            entity_channel = True
+    fused = rrf_fuse([*result_lists, *extra], k=60) if extra else rrf_fuse(result_lists, k=60)
+    return fused, constraint_channel, entity_channel
+
+
 def _elapsed_ms(started: float) -> float:
     return (time.perf_counter() - started) * 1000.0
 
@@ -412,6 +480,20 @@ def _with_retrieval_action(result: RetrievalResult, action: str) -> RetrievalRes
     return result.model_copy(
         update={"retrieval_metrics": metrics.model_copy(update={"retrieval_action": action})}
     )
+
+
+async def _tag_playbook_empty(
+    kb_names: list[str],
+    context: RetrievalContext,
+    store: Any,
+    degraded: list[str],
+) -> None:
+    if kb_names != ["playbook_kb"] or store is None:
+        return
+    tags = await playbook_empty_degraded_steps(store, context)
+    for tag in tags:
+        if tag not in degraded:
+            degraded.append(tag)
 
 
 def _empty_result(

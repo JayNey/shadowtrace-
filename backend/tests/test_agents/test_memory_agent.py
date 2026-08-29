@@ -346,6 +346,7 @@ async def test_false_positive_candidate_is_pending_review_with_llm_fallback() ->
     assert len(output.fp_rules) == 1
     assert output.fp_rules[0].pending_review is True
     assert output.fp_rules[0].source_event_id == EVENT_ID
+    assert output.fp_rules[0].event_type == EventType.DATA_EXFILTRATION
     assert output.fp_rules[0].review_id == "rev-00000002"
     assert output.sigma_drafts == []
     assert [candidate.candidate_type for candidate in governance.candidates] == [

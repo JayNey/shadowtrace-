@@ -31,7 +31,7 @@
       "technique_id": "T1560.001",
       "technique_name": "Archive via Utility",
       "tactics": ["Collection"],
-      "keywords": ["archive", "7z", "7z.exe", "finance_report.zip"],
+      "keywords": ["archive", "7z", "7z.exe", "finance_report.zip", "exfiltration"],
       "aliases": ["打包压缩", "7z打包"],
       "description": "Adversaries may use utilities such as 7-Zip, WinRAR, or tar to compress collected files before exfiltration. On finance endpoints this often appears as 7z.exe creating a zip of report files.",
       "detection": "Alert on 7z.exe or similar archivers packing sensitive directories, especially commands like 7z.exe a finance_report.zip on hosts such as PC-FIN-023, followed by outbound transfers."
@@ -49,8 +49,10 @@
       "technique_id": "T1071",
       "technique_name": "Application Layer Protocol",
       "tactics": ["Command and Control"],
-      "description": "Adversaries may communicate using application layer protocols to blend in with existing traffic. Commands to the compromised system and exfiltrated data may be embedded within the protocol. Common protocols abused include HTTP/HTTPS, DNS, SMTP, and WebSocket.",
-      "detection": "Analyze network traffic for anomalies in common protocols: unusual User-Agent strings, beaconing intervals in HTTP requests, DNS queries with high entropy subdomains or unusual query types. Inspect protocol fields that deviate from RFC specifications or organizational baselines."
+      "keywords": ["beacon.exe", "beacon-example.test", "C2", "application layer protocol"],
+      "aliases": ["C2", "失陷回连", "应用层协议"],
+      "description": "Adversaries may communicate using application layer protocols to blend in with existing traffic. Commands to the compromised system and exfiltrated data may be embedded within the protocol. Common protocols abused include HTTP/HTTPS, DNS, SMTP, and WebSocket. Demo host compromise uses beacon.exe reaching beacon-example.test.",
+      "detection": "Analyze network traffic for anomalies in common protocols: unusual User-Agent strings, beaconing intervals in HTTP requests, DNS queries with high entropy subdomains or unusual query types. Alert on beacon.exe or similar beacons contacting unregistered C2 such as beacon-example.test. Inspect protocol fields that deviate from RFC specifications or organizational baselines."
     },
     {
       "technique_id": "T1048",
@@ -92,8 +94,10 @@
       "technique_id": "T1059",
       "technique_name": "Command and Scripting Interpreter",
       "tactics": ["Execution"],
-      "description": "Adversaries may abuse command and script interpreters to execute commands, scripts, or binaries. These include PowerShell on Windows, bash/sh on Linux/macOS, Python, JavaScript, VBScript, and Unix shells. These interfaces can be used to interact with systems and may provide capabilities not available through other means.",
-      "detection": "Monitor command-line parameters for suspicious patterns: encoded commands (-EncodedCommand, -e), hidden/NonInteractive windows, IEX/Invoke-Expression usage, download cradle patterns. Track PowerShell script block logging (Event ID 4104). Monitor bash history and shell audit logs for unusual commands."
+      "keywords": ["scripting", "command interpreter", "ransomware_stage.exe"],
+      "aliases": ["命令解释器", "脚本执行", "恶意进程"],
+      "description": "Adversaries may abuse command and script interpreters to execute commands, scripts, or binaries. These include PowerShell on Windows, bash/sh on Linux/macOS, Python, JavaScript, VBScript, and Unix shells. Demo malicious_process staging uses ransomware_stage.exe rather than a compiler toolchain.",
+      "detection": "Monitor command-line parameters for suspicious patterns: encoded commands (-EncodedCommand, -e), hidden/NonInteractive windows, IEX/Invoke-Expression usage, download cradle patterns. Track PowerShell script block logging (Event ID 4104). Alert on ransomware_stage.exe as a non-approved process on developer workstations. Monitor bash history and shell audit logs for unusual commands."
     },
     {
       "technique_id": "T1190",
@@ -106,6 +110,8 @@
       "technique_id": "T1189",
       "technique_name": "Drive-by Compromise",
       "tactics": ["Initial Access"],
+      "keywords": ["drive-by", "newly registered", "suspicious domain"],
+      "aliases": ["挂马", "路过式攻击"],
       "description": "Adversaries may gain access to systems by compromising a website that a user visits. This often exploits browser or plugin vulnerabilities, or leverages social engineering to trick the user into downloading and executing malicious content. Watering hole attacks target sites frequently visited by the victim organization.",
       "detection": "Monitor web proxy logs for connections to newly-registered or low-reputation domains. Inspect web traffic for drive-by exploit kit patterns (multiple redirects, obfuscated JavaScript, heap spray indicators). Track browser crash reports and plugin exploitation alerts from endpoint protection."
     },
@@ -134,6 +140,8 @@
       "technique_id": "T1055",
       "technique_name": "Process Injection",
       "tactics": ["Defense Evasion", "Privilege Escalation"],
+      "keywords": ["process injection", "dll injection", "malicious process"],
+      "aliases": ["进程注入", "恶意进程"],
       "description": "Adversaries may inject code into running processes to evade process-based defenses and elevate privileges. Techniques include DLL injection, process hollowing, thread execution hijacking, PE injection, and APC injection. Injected code may be masked as legitimate process activity.",
       "detection": "Monitor for process injection API calls (VirtualAllocEx, WriteProcessMemory, CreateRemoteThread). Enable Windows Event ID 8 (CreateRemoteThread) tracking. Watch for processes with mismatched image paths and parent-child relationships. Analyze memory forensics for anomalous DLL loads."
     },
@@ -162,6 +170,8 @@
       "technique_id": "T1548",
       "technique_name": "Abuse Elevation Control Mechanism",
       "tactics": ["Defense Evasion", "Privilege Escalation"],
+      "keywords": ["privilege escalation", "UAC bypass", "elevation"],
+      "aliases": ["提权", "UAC 绕过"],
       "description": "Adversaries may bypass or manipulate mechanisms designed to control privilege elevation. On Windows this includes UAC bypass techniques (eventvwr, fodhelper, computerdefaults), sudo caching abuse on Linux, and setuid/setgid program exploitation. These techniques allow elevation without triggering security prompts.",
       "detection": "Monitor for UAC bypass patterns: processes auto-elevating without user consent prompts (Event ID 4688 with specific integrity levels). Track sudo usage patterns and cache modifications. Alert on registry modifications to UAC-related keys (HKCU\\Software\\Classes)."
     },
@@ -190,6 +200,8 @@
       "technique_id": "T1003",
       "technique_name": "OS Credential Dumping",
       "tactics": ["Credential Access"],
+      "keywords": ["credential dumping", "lsass", "mimikatz"],
+      "aliases": ["凭据转储", "LSASS"],
       "description": "Adversaries may attempt to dump credentials from the operating system to obtain account login and authentication material. On Windows this targets LSASS memory, SAM database, and cached domain credentials (via tools like Mimikatz or direct API calls). On Linux this targets /etc/shadow, memory, and keyrings.",
       "detection": "Monitor for access to LSASS process memory (OpenProcess with PROCESS_VM_READ on lsass.exe). Track use of known credential dumping tools (Mimikatz, ProcDump, fgdump). Alert on SAM registry hive access. Monitor Linux systems for access to /etc/shadow by non-system processes."
     },
@@ -446,8 +458,10 @@
       "technique_id": "T1218",
       "technique_name": "System Binary Proxy Execution",
       "tactics": ["Defense Evasion"],
-      "description": "Adversaries may use trusted system binaries (LOLBins) to proxy execution of malicious code. Examples include rundll32.exe, regsvr32.exe, mshta.exe, certutil.exe, and msiexec.exe on Windows. These signed Microsoft binaries bypass application control and are often allowlisted by security software.",
-      "detection": "Monitor for LOLBin executions with suspicious parameters: rundll32 calling URLs or JavaScript, regsvr32 with /i:http://, mshta with remote scripts, certutil with -urlcache. Track parent-child process relationships that deviate from normal patterns. Correlate LOLBin activity with network connections."
+      "keywords": ["lolbin", "proxy execution", "ransomware_stage.exe"],
+      "aliases": ["系统二进制代理", "LOLBin"],
+      "description": "Adversaries may use trusted system binaries (LOLBins) to proxy execution of malicious code. Examples include rundll32.exe, regsvr32.exe, mshta.exe, certutil.exe, and msiexec.exe on Windows. Demo malicious_process also flags ransomware_stage.exe as a non-approved staged binary rather than a signed LOLBin.",
+      "detection": "Monitor for LOLBin executions with suspicious parameters: rundll32 calling URLs or JavaScript, regsvr32 with /i:http://, mshta with remote scripts, certutil with -urlcache. Alert on ransomware_stage.exe execution. Track parent-child process relationships that deviate from normal patterns. Correlate LOLBin activity with network connections."
     },
     {
       "technique_id": "T1106",
@@ -488,6 +502,8 @@
       "technique_id": "T1608",
       "technique_name": "Stage Capabilities",
       "tactics": ["Resource Development"],
+      "keywords": ["stage capabilities", "newly registered", "lookalike domain"],
+      "aliases": ["能力预置", "基础设施准备"],
       "description": "Adversaries may upload, install, or otherwise set up capabilities that can be used during targeting. This includes staging malware on compromised websites or cloud storage, creating lookalike domains, registering accounts on third-party services, and preparing C2 infrastructure before an operation begins.",
       "detection": "Monitor threat intelligence feeds for newly-registered domains with characteristics similar to your brand. Track DNS registration patterns for suspicious domains. Monitor for malware staging URLs shared on threat intel platforms. Proactively scan for credential harvesting pages impersonating your organization."
     },
@@ -558,15 +574,19 @@
       "technique_id": "T1047",
       "technique_name": "Windows Management Instrumentation",
       "tactics": ["Execution"],
-      "description": "Adversaries may abuse Windows Management Instrumentation (WMI) to execute malicious commands and payloads. WMI provides a powerful interface for local and remote system management, including process creation (Win32_Process.Create), service management, registry access, and file operations.",
-      "detection": "Monitor WMI process creation events (Event ID 4688 with parent wmiprvse.exe). Track WMI permanent event subscriptions. Alert on WMI usage from non-admin workstations targeting servers. Detect WMI scripting via wmic.exe and PowerShell WMI cmdlets from unexpected processes."
+      "keywords": ["WMI", "lateral"],
+      "aliases": ["WMI", "Windows Management Instrumentation"],
+      "description": "Adversaries may abuse Windows Management Instrumentation (WMI) to execute malicious commands and payloads. WMI provides a powerful interface for local and remote system management, including process creation (Win32_Process.Create), service management, registry access, and file operations. Remote WMI is a lateral execution path distinct from RDP.",
+      "detection": "Monitor WMI process creation events (Event ID 4688 with parent wmiprvse.exe). Track WMI permanent event subscriptions. Alert on WMI usage from non-admin workstations targeting servers. Detect WMI scripting via wmic.exe and PowerShell WMI cmdlets from unexpected processes. Correlate WMI with subsequent lateral connections."
     },
     {
       "technique_id": "T1134",
       "technique_name": "Access Token Manipulation",
       "tactics": ["Defense Evasion", "Privilege Escalation"],
-      "description": "Adversaries may modify access tokens to impersonate other users or processes. This includes token duplication, token stealing (stealing SYSTEM token from a service), and manipulating token privileges (enabling SeDebugPrivilege, SeImpersonatePrivilege). Token manipulation can allow code to run under a different security context.",
-      "detection": "Monitor for process token privilege changes (Event ID 4703 with SeDebugPrivilege, SeImpersonatePrivilege, SeAssignPrimaryTokenPrivilege). Track process creation with mismatched parent and child security contexts. Detect use of runas and token manipulation tool signatures."
+      "keywords": ["token manipulation", "net.exe", "privilege"],
+      "aliases": ["令牌操纵", "特权提升"],
+      "description": "Adversaries may modify access tokens to impersonate other users or processes. This includes token duplication, token stealing (stealing SYSTEM token from a service), and manipulating token privileges (enabling SeDebugPrivilege, SeImpersonatePrivilege). Local privilege abuse often uses net.exe to add groups or enable rights.",
+      "detection": "Monitor for process token privilege changes (Event ID 4703 with SeDebugPrivilege, SeImpersonatePrivilege, SeAssignPrimaryTokenPrivilege). Track process creation with mismatched parent and child security contexts. Detect use of runas, net.exe, and token manipulation tool signatures."
     },
     {
       "technique_id": "T1222",

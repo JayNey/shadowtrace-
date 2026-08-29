@@ -32,12 +32,20 @@ from app.models.agent_io import (
     RAGOutput,
     TriageResult,
 )
-from app.models.entities import AccountEntity, EntitySet, HostEntity, IPEntity, ProcessEntity
+from app.models.entities import (
+    AccountEntity,
+    DomainEntity,
+    EntitySet,
+    HostEntity,
+    IPEntity,
+    ProcessEntity,
+)
 from app.models.enums import EventType, EvidenceSource, Severity
 from app.models.evidence import Evidence
 from app.models.knowledge import RetrievalMetrics, RetrievalResult, RetrievedChunk
 from app.models.knowledge_release import KnowledgeRelease
 from app.models.workflow import FP_LOW_THRESHOLD
+from app.rag.entity_rrf import EntityToken
 from tests.test_support.production_settings import production_settings
 
 # --------------------------------------------------------------------------- #
@@ -296,7 +304,7 @@ _FP_CHUNKS = [
             "case_id": "case-fp00001",
             "pattern_summary": "Bulk login during scheduled ops change window",
             "alert_signature": "ops_change_window_bulk_login",
-            "entity_pattern": "svc-* accounts",
+            "entity_pattern": "host=web-server-01; account=svc-ops",
             "fp_reason": "Scheduled maintenance window activity",
             "confirmed_by": "soc-analyst-1",
             "confirmed_at": "2026-01-15T10:00:00Z",
@@ -559,7 +567,14 @@ class TestRAGQueryBuilder:
                                 entity_type="account",
                                 username="zhangsan",
                             )
-                        ]
+                        ],
+                        "domains": [
+                            DomainEntity(
+                                entity_id="dom-1",
+                                entity_type="domain",
+                                fqdn="files.corp.internal",
+                            )
+                        ],
                     }
                 )
             }
@@ -567,6 +582,12 @@ class TestRAGQueryBuilder:
         queries = RAGQueryBuilder.build_queries(triage)
         assert "Account:zhangsan" in queries["history_case_kb"]
         assert "Account:zhangsan" in queries["fp_case_kb"]
+        assert "Host:web-server-01" in queries["fp_case_kb"]
+        assert queries["fp_case_kb"].index("Account:zhangsan") < queries["fp_case_kb"].index(
+            "Host:web-server-01"
+        )
+        assert "files.corp.internal" not in queries["fp_case_kb"]
+        assert "cdn.corp.internal" not in queries["fp_case_kb"]
 
     def test_playbook_query_includes_event_type_and_severity(self):
         triage = _make_triage_result(EventType.DATA_EXFILTRATION, Severity.HIGH)
@@ -666,7 +687,13 @@ class TestBuildFpSimilarity:
             chunks=_FP_CHUNKS,
             citations=_FP_CITATIONS,
         )
-        fp = _build_fp_similarity(result)
+        fp = _build_fp_similarity(
+            result,
+            entities=(
+                EntityToken("account", "svc-ops"),
+                EntityToken("host", "web-server-01"),
+            ),
+        )
         assert fp.max_score >= FP_LOW_THRESHOLD
         assert fp.matched_case_id == "case-fp00001"
         assert fp.matched_pattern is not None
@@ -687,10 +714,14 @@ class TestBuildFpSimilarity:
             "fp_case_kb",
             "x",
             score=1.5,
-            metadata={"case_id": "case-99", "pattern_summary": "test"},
+            metadata={
+                "case_id": "case-99",
+                "pattern_summary": "test",
+                "entity_pattern": "account=svc-ops",
+            },
         )
         result = RetrievalResult(query="", chunks=[chunk], citations=[])
-        fp = _build_fp_similarity(result)
+        fp = _build_fp_similarity(result, entities=(EntityToken("account", "svc-ops"),))
         assert 0.0 <= fp.max_score <= 1.0
 
 

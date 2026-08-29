@@ -5,7 +5,7 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.errors import ConfigurationError
@@ -282,6 +282,26 @@ class Settings(BaseSettings):
     embedding_timeout_seconds: float = Field(default=30.0, alias="EMBEDDING_TIMEOUT_SECONDS")
 
     rerank_mode: str = Field(default="mock", alias="RERANK_MODE")
+    rerank_api_base_url: str = Field(default="", alias="RERANK_API_BASE_URL")
+    rerank_api_key: str = Field(default="", alias="RERANK_API_KEY")
+    rerank_model_id: str = Field(default="", alias="RERANK_MODEL_ID")
+    rerank_timeout_seconds: float = Field(default=15.0, alias="RERANK_TIMEOUT_SECONDS")
+    rerank_min_score: float = Field(default=0.0, alias="RERANK_MIN_SCORE")
+
+    @field_validator("rerank_mode", mode="before")
+    @classmethod
+    def validate_rerank_mode(cls, value: object) -> str:
+        normalized = str(value or "mock").strip().lower()
+        if normalized not in {"mock", "remote", "off"}:
+            raise ValueError("RERANK_MODE must be 'mock', 'remote', or 'off'")
+        return normalized
+
+    @model_validator(mode="after")
+    def coerce_remote_rerank_when_embedding_is_mock(self) -> "Settings":
+        """Hash vectors + Cross-Encoder has no precision (plan §4). Gold path stays mock."""
+        if self.embedding_mode.strip().lower() == "mock" and self.rerank_mode == "remote":
+            self.rerank_mode = "mock"
+        return self
 
     retrieval_default_tenant_id: str = Field(default="local", alias="RETRIEVAL_DEFAULT_TENANT_ID")
     retrieval_fixture_fallback: bool = Field(default=False, alias="RETRIEVAL_FIXTURE_FALLBACK")

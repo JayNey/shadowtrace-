@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
+
 from app.models.agent_io import EvidenceOutput, TriageResult
 from app.models.enums import EventType
+from app.rag.entity_rrf import (
+    ALLOWLIST_DOMAINS,
+    EntityToken,
+    extract_investigation_entities,
+    fp_query_entities,
+    project_entities_for_kb,
+)
 
 _EVENT_TYPE_HINTS: dict[EventType, str] = {
     EventType.DATA_EXFILTRATION: "exfiltration archive 数据外泄",
@@ -24,13 +34,15 @@ class RAGQueryBuilder:
     def build_queries(
         triage_result: TriageResult,
         evidence_output: EvidenceOutput | None = None,
+        extra_blocked_domains: Sequence[str] = (),
     ) -> dict[str, str]:
         """Return ``{kb_name: query_string}`` for each investigation knowledge base."""
 
         event_hint = _EVENT_TYPE_HINTS.get(triage_result.event_type, "")
+        extracted = extract_investigation_entities(triage_result, evidence_output)
         evidence_bits = _evidence_tokens(evidence_output)
 
-        # attack_kb: 攻击技术查询拼证据行为摘要 + 中英检索提示
+        # attack_kb: 进程优先，再 Host/Account；行为摘要保留
         attack_parts: list[str] = [
             f"Event type: {triage_result.event_type.value}.",
             f"Alert severity: {triage_result.severity.value}.",
@@ -41,46 +53,63 @@ class RAGQueryBuilder:
             behaviors = [e.description for e in evidence_output.evidence_list if e.description]
             if behaviors:
                 attack_parts.append("Behavior evidence: " + "; ".join(behaviors[:3]))
+        attack_entities = project_entities_for_kb("attack_kb", extracted)
+        attack_labels = _labeled_tokens(
+            attack_entities,
+            kind_order=("process", "host", "account", "domain", "ip"),
+            limits={"process": 3, "host": 4, "account": 4, "domain": 4, "ip": 4},
+        )
+        if attack_labels:
+            attack_parts.append(" ".join(attack_labels))
         if evidence_bits:
             attack_parts.append(" ".join(evidence_bits[:6]))
         attack_query = " ".join(attack_parts)
 
-        # fp_case_kb: 误报查询拼告警特征
+        # fp_case_kb: Account → Host → optional Process. No domain / IP / allowlist.
+        # Labeled IOC tokens MUST precede Analysis so keyword AND cannot steal slots.
         fp_parts: list[str] = [
             f"False positive pattern for event type {triage_result.event_type.value},",
             f"severity {triage_result.severity.value}.",
         ]
-        if triage_result.reasoning:
-            fp_parts.append(f"Analysis: {triage_result.reasoning[:200]}")
-        for account in triage_result.entities.accounts[:4]:
-            if account.username:
-                fp_parts.append(f"Account:{account.username}")
-        fp_query = " ".join(fp_parts)
+        fp_entities = fp_query_entities(
+            project_entities_for_kb(
+                "fp_case_kb",
+                extracted,
+                extra_blocked_domains=extra_blocked_domains,
+            ),
+            extra_blocked_domains=extra_blocked_domains,
+        )
+        fp_parts.extend(
+            _labeled_tokens(
+                fp_entities,
+                kind_order=("account", "host", "process"),
+                limits={"account": 4, "host": 4, "process": 3},
+            )
+        )
+        analysis_src = _fp_analysis_text(triage_result)
+        if analysis_src:
+            analysis = _strip_entity_labels(analysis_src)
+            if analysis:
+                fp_parts.append(f"Analysis: {analysis}")
+        fp_query = _drop_blocked_tokens(" ".join(fp_parts), extra_blocked_domains)
 
-        # history_case_kb: 案例查询拼事件类型与实体特征
+        # history_case_kb: 抽出函数 + 按库投影，上限与今天同级
         history_parts: list[str] = [
             f"Historical case with event type {triage_result.event_type.value}."
         ]
-        entity_descs: list[str] = []
-        for ip_e in triage_result.entities.ips[:5]:
-            entity_descs.append(f"IP:{ip_e.address}")
-        for host_e in triage_result.entities.hosts[:5]:
-            entity_descs.append(f"Host:{host_e.hostname}")
-        for acct in triage_result.entities.accounts[:5]:
-            if acct.username:
-                entity_descs.append(f"Account:{acct.username}")
-        for proc_e in triage_result.entities.processes[:3]:
-            entity_descs.append(f"Process:{proc_e.name}")
-        for domain in triage_result.entities.domains[:4]:
-            if domain.fqdn:
-                entity_descs.append(f"Domain:{domain.fqdn}")
-        if entity_descs:
-            history_parts.append("Entities: " + ", ".join(entity_descs))
+        history_entities = project_entities_for_kb("history_case_kb", extracted)
+        history_labels = _labeled_tokens(
+            history_entities,
+            kind_order=("host", "account", "process", "domain", "ip"),
+            limits={"host": 5, "account": 5, "process": 3, "domain": 4, "ip": 5},
+        )
+        if history_labels:
+            history_parts.append("Entities: " + ", ".join(history_labels))
         if evidence_bits:
-            history_parts.append(" ".join(evidence_bits[:4]))
+            history_parts.append(" ".join(_drop_allowlist(evidence_bits[:4])))
         history_query = " ".join(history_parts)
 
-        # playbook_kb: 剧本查询拼事件类型与严重度
+        # playbook_kb: 只有 type + severity（不追加实体）
         playbook_query = (
             f"SOAR playbook for event type {triage_result.event_type.value}, "
             f"severity {triage_result.severity.value}."
@@ -120,6 +149,76 @@ class RAGQueryBuilder:
             "playbook_kb": playbook_query,
             "org_context_kb": org_query,
         }
+
+
+_LABELED_IN_TEXT = re.compile(
+    r"\b(?:Host|IP|Process|Domain|Account|File|IOC)\s*:\s*[^\s,;]+",
+    re.IGNORECASE,
+)
+
+
+def _fp_analysis_text(triage_result: TriageResult) -> str:
+    """Prefer decision_summary; fall back to dumped reasoning without the deprecated accessor."""
+    summary = (triage_result.decision_summary or "").strip()
+    if summary:
+        return summary[:200]
+    dumped = triage_result.model_dump()
+    return str(dumped.get("reasoning") or "").strip()[:200]
+
+
+def _strip_entity_labels(text: str) -> str:
+    """Drop Host:/Account: tokens from free-text so they cannot occupy keyword AND."""
+    return " ".join(_LABELED_IN_TEXT.sub(" ", text).split())
+
+
+_LABEL_BY_KIND = {
+    "account": "Account",
+    "host": "Host",
+    "process": "Process",
+    "domain": "Domain",
+    "ip": "IP",
+}
+
+
+def _labeled_tokens(
+    entities: Sequence[EntityToken],
+    *,
+    kind_order: tuple[str, ...],
+    limits: dict[str, int],
+) -> list[str]:
+    counts: dict[str, int] = {kind: 0 for kind in kind_order}
+    out: list[str] = []
+    by_kind: dict[str, list[str]] = {kind: [] for kind in kind_order}
+    for token in entities:
+        if token.kind not in limits:
+            continue
+        if counts[token.kind] >= limits[token.kind]:
+            continue
+        counts[token.kind] += 1
+        by_kind[token.kind].append(f"{_LABEL_BY_KIND[token.kind]}:{token.value}")
+    for kind in kind_order:
+        out.extend(by_kind[kind])
+    return out
+
+
+def _drop_allowlist(tokens: list[str]) -> list[str]:
+    blocked = {item.lower() for item in ALLOWLIST_DOMAINS}
+    return [token for token in tokens if token.strip().lower() not in blocked]
+
+
+def _drop_blocked_tokens(text: str, extra_blocked_domains: Sequence[str] = ()) -> str:
+    """Remove allowlist / org-allow domain tokens from the fp query (口径 C)."""
+    blocked = {item.lower() for item in ALLOWLIST_DOMAINS}
+    blocked.update(item.strip().lower() for item in extra_blocked_domains if item.strip())
+    if not blocked:
+        return text
+    kept: list[str] = []
+    for token in text.split():
+        stripped = token.strip(".,;:()[]\"'").lower()
+        if stripped in blocked:
+            continue
+        kept.append(token)
+    return " ".join(kept)
 
 
 def _evidence_tokens(evidence_output: EvidenceOutput | None) -> list[str]:

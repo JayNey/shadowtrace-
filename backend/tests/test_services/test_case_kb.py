@@ -169,10 +169,33 @@ async def _load_case_metadata(
 
 # ── Seed helpers ─────────────────────────────────────────────────────
 
+_FP_EVENT_TYPE_BY_ID = {
+    "case-00000001": EventType.ACCOUNT_ANOMALY,
+    "case-00000002": EventType.DATA_EXFILTRATION,
+    "case-00000003": EventType.OTHER,
+    "case-00000004": EventType.OTHER,
+    "case-00000005": EventType.OTHER,
+    "case-00000006": EventType.OTHER,
+    "case-00000007": EventType.OTHER,
+    "case-00000008": EventType.OTHER,
+    "case-00000009": EventType.OTHER,
+    "case-0000000a": EventType.MALICIOUS_PROCESS,
+    "case-0000000b": EventType.OTHER,
+    "case-0000000c": EventType.MALICIOUS_PROCESS,
+    "case-0000000d": EventType.DATA_EXFILTRATION,
+    "case-0000000e": EventType.OTHER,
+}
+
+
+def _fp_case(**kwargs: object) -> FalsePositiveCase:
+    case_id = str(kwargs["case_id"])
+    kwargs.setdefault("event_type", _FP_EVENT_TYPE_BY_ID.get(case_id, EventType.OTHER))
+    return FalsePositiveCase.model_validate(kwargs)
+
 
 def _ops_change_window_case() -> FalsePositiveCase:
     """The FP case matching account_anomaly_fp scenario."""
-    return FalsePositiveCase(
+    return _fp_case(
         case_id="case-00000001",
         pattern_summary="运维账号在变更窗口内批量登录跳板机执行自动化改密脚本",
         alert_signature="Bulk login by ops account during change window from jump host",
@@ -215,7 +238,7 @@ class TestSeedLoading:
         """Seeding ≥10 FP cases (inline) and counting them."""
         cases = [
             _ops_change_window_case(),
-            FalsePositiveCase(
+            _fp_case(
                 case_id="case-00000002",
                 pattern_summary="夜间备份任务大流量",
                 alert_signature="Large outbound data transfer during off-hours",
@@ -224,7 +247,7 @@ class TestSeedLoading:
                 confirmed_by="infra_engineer",
                 confirmed_at="2024-04-02T08:15:00Z",
             ),
-            FalsePositiveCase(
+            _fp_case(
                 case_id="case-00000003",
                 pattern_summary="内部漏洞扫描器全网扫描",
                 alert_signature="Port scan across internal subnets from scanner host",
@@ -235,7 +258,7 @@ class TestSeedLoading:
                 confirmed_by="vuln_mgmt_lead",
                 confirmed_at="2024-05-11T14:00:00Z",
             ),
-            FalsePositiveCase(
+            _fp_case(
                 case_id="case-00000004",
                 pattern_summary="CI/CD 自动部署触发 SSH 暴力破解告警",
                 alert_signature="Multiple SSH logins to production servers from CI runner",
@@ -244,7 +267,7 @@ class TestSeedLoading:
                 confirmed_by="devops_lead",
                 confirmed_at="2024-06-20T11:45:00Z",
             ),
-            FalsePositiveCase(
+            _fp_case(
                 case_id="case-00000005",
                 pattern_summary="域控间 AD 复制流量",
                 alert_signature="LDAP replication traffic between DCs across WAN",
@@ -253,7 +276,7 @@ class TestSeedLoading:
                 confirmed_by="ad_admin",
                 confirmed_at="2024-07-03T16:00:00Z",
             ),
-            FalsePositiveCase(
+            _fp_case(
                 case_id="case-00000006",
                 pattern_summary="DHCP 租约续租波峰",
                 alert_signature="ARP traffic surge at DHCP lease renewal boundary",
@@ -264,7 +287,7 @@ class TestSeedLoading:
                 confirmed_by="network_engineer",
                 confirmed_at="2024-01-28T09:00:00Z",
             ),
-            FalsePositiveCase(
+            _fp_case(
                 case_id="case-00000007",
                 pattern_summary="EDR Agent 心跳被误判 C2",
                 alert_signature="Encrypted outbound with beaconing pattern from EDR sensor",
@@ -273,7 +296,7 @@ class TestSeedLoading:
                 confirmed_by="soc_analyst",
                 confirmed_at="2024-02-14T13:20:00Z",
             ),
-            FalsePositiveCase(
+            _fp_case(
                 case_id="case-00000008",
                 pattern_summary="VPN 早高峰集中拨入",
                 alert_signature="Concurrent VPN logins from geo-distributed IPs in morning rush",
@@ -282,7 +305,7 @@ class TestSeedLoading:
                 confirmed_by="it_support",
                 confirmed_at="2024-08-05T08:30:00Z",
             ),
-            FalsePositiveCase(
+            _fp_case(
                 case_id="case-00000009",
                 pattern_summary="邮件钓鱼演练误报",
                 alert_signature="Mass phishing campaign alert from email security gateway",
@@ -291,7 +314,7 @@ class TestSeedLoading:
                 confirmed_by="security_awareness_lead",
                 confirmed_at="2024-04-01T10:00:00Z",
             ),
-            FalsePositiveCase(
+            _fp_case(
                 case_id="case-0000000a",
                 pattern_summary="开发环境批量安装依赖包",
                 alert_signature="Bulk download of packages from public registries",
@@ -419,7 +442,7 @@ class TestFpCaseSearch:
 
         # Also seed a few distractor FP cases.
         distractors = [
-            FalsePositiveCase(
+            _fp_case(
                 case_id="case-0000000b",
                 pattern_summary="财务系统月底批量导出报表",
                 alert_signature="Large volume of file reads from finance drive",
@@ -428,7 +451,7 @@ class TestFpCaseSearch:
                 confirmed_by="finance_director",
                 confirmed_at="2024-06-28T17:00:00Z",
             ),
-            FalsePositiveCase(
+            _fp_case(
                 case_id="case-0000000c",
                 pattern_summary="K8s HPA 扩容进程创建",
                 alert_signature="Rapid process creation during HPA scale-out",

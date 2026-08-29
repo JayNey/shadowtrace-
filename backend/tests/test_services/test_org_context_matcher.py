@@ -157,6 +157,38 @@ class TestOrgContextMatcher:
         hits = OrgContextMatcher.match(facts, _listed_from_seed(), now=_OUTSIDE_WINDOW)
         assert any(h.kind == "account_role" and h.match_type == "account_exact" for h in hits)
 
+    def test_change_window_hits_fixture_occurred_at_not_wall_clock(self) -> None:
+        fixture_occurred_at = datetime(2024, 6, 15, 9, 0, tzinfo=UTC)
+        facts = OrgContextFacts(
+            accounts=("ops-change-bot",),
+            hosts=("PC-OPS-JUMP-01",),
+        )
+        hits = OrgContextMatcher.match(
+            facts, _listed_from_seed(), now=fixture_occurred_at
+        )
+        assert any(
+            h.kind == "time_window"
+            and h.match_type == "window"
+            and h.matched_value == "08:00/12:00"
+            for h in hits
+        )
+
+    def test_jump_host_has_no_allowed_source_catalog_hit(self) -> None:
+        facts = OrgContextFacts(hosts=("JUMP-HOST-001",), accounts=("ops-jump-001",))
+        hits = OrgContextMatcher.match(facts, _listed_from_seed(), now=_OUTSIDE_WINDOW)
+        assert not any(h.kind == "allowed_source" for h in hits)
+        assert not any(h.match_type == "host_exact" for h in hits)
+
+    def test_beacon_c2_is_restricted_domain(self) -> None:
+        facts = OrgContextFacts(domains=("beacon-example.test",))
+        hits = OrgContextMatcher.match(facts, _listed_from_seed(), now=_OUTSIDE_WINDOW)
+        assert any(
+            h.kind == "data_handling"
+            and h.match_type == "restricted_domain"
+            and h.matched_value == "beacon-example.test"
+            for h in hits
+        )
+
     def test_window_inside_hits(self) -> None:
         facts = OrgContextFacts(domains=("files.corp.internal",))
         hits = OrgContextMatcher.match(facts, _listed_from_seed(), now=_INSIDE_WINDOW)

@@ -14,6 +14,7 @@ import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -234,6 +235,116 @@ class TestConstrainedRRFPipeline:
         assert result.retrieval_metrics.constraint_channel is False
 
 
+class TestRerankSkipContract:
+    """Plan §3: mock protects fusion order; remote always reranks."""
+
+    @pytest.mark.asyncio
+    async def test_mock_constraint_channel_does_not_call_reranker(self) -> None:
+        from app.rag.constraint_rrf import OrgConstraint
+
+        overlap = _make_chunk(
+            "chk-a",
+            "attack_kb",
+            "Nightly archive to files.corp.internal is expected.",
+        )
+        other = _make_chunk("chk-b", "attack_kb", "Generic exfiltration technique notes.")
+        spy = _RecordingReranker()
+        pipeline = RetrievalPipeline(
+            rewriter=_EchoRewriter(),  # type: ignore[arg-type]
+            retriever=_ConstantRetriever([[other, overlap], [overlap, other]]),  # type: ignore[arg-type]
+            reranker=spy,  # type: ignore[arg-type]
+            settings=Settings(EMBEDDING_MODE="mock", RERANK_MODE="mock"),
+        )
+        result = await pipeline.retrieve(
+            "technique notes",
+            ["attack_kb"],
+            top_k=2,
+            context=RetrievalContext(
+                tenant_id="local",
+                principal="investigation:test",
+                event_id="evt-skip-c",
+                trace_id="trace-skip-c",
+                org_constraints=(
+                    OrgConstraint(kind="allowed_destination", value="files.corp.internal"),
+                ),
+            ),
+        )
+        assert spy.calls == []
+        assert result.retrieval_metrics is not None
+        assert result.retrieval_metrics.constraint_channel is True
+        assert result.chunks[0].chunk_id == "chk-a"
+
+    @pytest.mark.asyncio
+    async def test_mock_nonempty_entity_channel_does_not_call_reranker(self) -> None:
+        from app.rag.entity_rrf import EntityToken
+
+        hit = _make_chunk("chk-host", "attack_kb", "beacon.exe on host=WKS-HOST-007")
+        other = _make_chunk("chk-other", "attack_kb", "generic interpreter notes")
+        spy = _RecordingReranker()
+        pipeline = RetrievalPipeline(
+            rewriter=_EchoRewriter(),  # type: ignore[arg-type]
+            retriever=_ConstantRetriever([[other, hit], [hit]]),  # type: ignore[arg-type]
+            reranker=spy,  # type: ignore[arg-type]
+            settings=Settings(EMBEDDING_MODE="mock", RERANK_MODE="mock"),
+        )
+        result = await pipeline.retrieve(
+            "malicious process",
+            ["attack_kb"],
+            top_k=2,
+            context=RetrievalContext(
+                tenant_id="local",
+                principal="investigation:test",
+                event_id="evt-skip-e",
+                trace_id="trace-skip-e",
+                investigation_entities=(EntityToken(kind="host", value="WKS-HOST-007"),),
+            ),
+        )
+        assert spy.calls == []
+        assert result.retrieval_metrics is not None
+        assert result.retrieval_metrics.entity_channel is True
+        assert result.retrieval_metrics.constraint_channel is False
+
+    @pytest.mark.asyncio
+    async def test_remote_constraint_channel_calls_reranker(self) -> None:
+        from app.rag.constraint_rrf import OrgConstraint
+
+        overlap = _make_chunk(
+            "chk-a",
+            "attack_kb",
+            "Nightly archive to files.corp.internal is expected.",
+        )
+        other = _make_chunk("chk-b", "attack_kb", "Generic exfiltration technique notes.")
+        spy = _RecordingReranker()
+        settings = Settings(
+            EMBEDDING_MODE="remote",
+            RERANK_MODE="remote",
+            RERANK_API_BASE_URL="http://rerank.test",
+        )
+        pipeline = RetrievalPipeline(
+            rewriter=_EchoRewriter(),  # type: ignore[arg-type]
+            retriever=_ConstantRetriever([[other, overlap], [overlap, other]]),  # type: ignore[arg-type]
+            reranker=spy,  # type: ignore[arg-type]
+            settings=settings,
+        )
+        result = await pipeline.retrieve(
+            "technique notes",
+            ["attack_kb"],
+            top_k=2,
+            context=RetrievalContext(
+                tenant_id="local",
+                principal="investigation:test",
+                event_id="evt-remote-c",
+                trace_id="trace-remote-c",
+                org_constraints=(
+                    OrgConstraint(kind="allowed_destination", value="files.corp.internal"),
+                ),
+            ),
+        )
+        assert len(spy.calls) == 1
+        assert result.retrieval_metrics is not None
+        assert result.retrieval_metrics.constraint_channel is True
+
+
 class TestMockReranker:
     """Deterministic mock reranker tests."""
 
@@ -325,6 +436,158 @@ class TestMockReranker:
         assert len(result) == 3
 
 
+class TestVectorUnavailable:
+    """P2: embed failure tags vector_unavailable; keyword lists still fuse."""
+
+    @pytest.mark.asyncio
+    async def test_embed_failure_keeps_keyword_does_not_call_vector_search(self) -> None:
+        from app.core.embedding.base import EmbeddingUnavailableError
+        from app.core.embedding.mock_embedder import MockEmbedder
+
+        kw_chunk = _make_chunk(
+            "chk-k",
+            "attack_kb",
+            "exfiltration keyword hit",
+            method="keyword",
+        )
+        store = MagicMock()
+        store.vector_search = AsyncMock(
+            return_value=[_make_chunk("chk-v", "attack_kb", "vector hit")]
+        )
+        store.keyword_search = AsyncMock(return_value=[kw_chunk])
+        embed = MagicMock()
+        embed.embed_query = AsyncMock(
+            side_effect=EmbeddingUnavailableError(
+                message="embedding provider request failed",
+                error_code="embedding_provider_unavailable",
+            )
+        )
+        embed.embed = AsyncMock(side_effect=AssertionError("must not call MockEmbedder"))
+        retriever = HybridRetriever(store, embed)  # type: ignore[arg-type]
+        pipeline = RetrievalPipeline(
+            rewriter=_EchoRewriter(),  # type: ignore[arg-type]
+            retriever=retriever,
+            reranker=MockReranker(),
+            settings=Settings(EMBEDDING_MODE="mock", RERANK_MODE="off"),
+        )
+        result = await pipeline.retrieve(
+            "data_exfiltration",
+            ["attack_kb"],
+            top_k=2,
+            context=_ctx(),
+        )
+        assert "vector_unavailable" in result.degraded_steps
+        assert any(c.chunk_id == "chk-k" for c in result.chunks)
+        store.vector_search.assert_not_called()
+        embed.embed_query.assert_called()
+        assert not isinstance(retriever._embed, MockEmbedder)
+
+    @pytest.mark.asyncio
+    async def test_vector_store_failure_tags_and_keeps_keyword(self) -> None:
+        kw_chunk = _make_chunk(
+            "chk-k",
+            "attack_kb",
+            "exfiltration keyword hit",
+            method="keyword",
+        )
+        store = MagicMock()
+        store.vector_search = AsyncMock(side_effect=RuntimeError("pgvector down"))
+        store.keyword_search = AsyncMock(return_value=[kw_chunk])
+        embed = MagicMock()
+        embed.embed_query = AsyncMock(return_value=[0.0, 0.1])
+        retriever = HybridRetriever(store, embed)  # type: ignore[arg-type]
+        pipeline = RetrievalPipeline(
+            rewriter=_EchoRewriter(),  # type: ignore[arg-type]
+            retriever=retriever,
+            reranker=MockReranker(),
+            settings=Settings(EMBEDDING_MODE="mock", RERANK_MODE="off"),
+        )
+        result = await pipeline.retrieve(
+            "data_exfiltration",
+            ["attack_kb"],
+            top_k=2,
+            context=_ctx(),
+        )
+        assert "vector_unavailable" in result.degraded_steps
+        assert any(c.chunk_id == "chk-k" for c in result.chunks)
+
+
+class TestRemoteReranker:
+    def test_mock_embedding_coerces_remote_rerank_mode(self) -> None:
+        settings = Settings(EMBEDDING_MODE="mock", RERANK_MODE="remote")
+        assert settings.rerank_mode == "mock"
+        assert Reranker(settings).mode == "mock"
+
+    @pytest.mark.asyncio
+    async def test_remote_uses_provider_score_not_fusion_blend(self) -> None:
+        settings = Settings(
+            EMBEDDING_MODE="remote",
+            RERANK_MODE="remote",
+            RERANK_API_BASE_URL="http://rerank.test",
+            RERANK_MODEL_ID="rerank-v1",
+        )
+        reranker = Reranker(settings)
+        captured: dict[str, object] = {}
+
+        class _Resp:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return {
+                    "results": [
+                        {"index": 1, "relevance_score": 0.91},
+                        {"index": 0, "relevance_score": 0.11},
+                    ]
+                }
+
+        async def _post(path: str, json: dict[str, object], timeout: float) -> _Resp:
+            captured["path"] = path
+            captured["payload"] = json
+            captured["timeout"] = timeout
+            return _Resp()
+
+        reranker._http = type("Client", (), {"post": staticmethod(_post)})()  # type: ignore[method-assign]
+        chunks = [
+            _make_chunk("chk-a", "kb1", "fusion first", score=0.99),
+            _make_chunk("chk-b", "kb1", "fusion second", score=0.10),
+        ]
+        result = await reranker.rerank("query", chunks, top_k=2)
+        assert captured["path"] == "/rerank"
+        payload = captured["payload"]
+        assert isinstance(payload, dict)
+        assert payload["documents"] == ["fusion first", "fusion second"]
+        assert [c.chunk_id for c in result] == ["chk-b", "chk-a"]
+        assert result[0].score == pytest.approx(0.91)
+        assert result[0].retrieval_method == "reranked"
+
+    @pytest.mark.asyncio
+    async def test_remote_window_is_max_top_k_times_four_or_20(self) -> None:
+        settings = Settings(
+            EMBEDDING_MODE="remote",
+            RERANK_MODE="remote",
+            RERANK_API_BASE_URL="http://rerank.test",
+        )
+        reranker = Reranker(settings)
+        sent: list[str] = []
+
+        class _Resp:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return {"results": [{"index": 0, "relevance_score": 1.0}]}
+
+        async def _post(path: str, json: dict[str, object], timeout: float) -> _Resp:
+            sent.extend(json["documents"])  # type: ignore[arg-type]
+            return _Resp()
+
+        reranker._http = type("Client", (), {"post": staticmethod(_post)})()  # type: ignore[method-assign]
+        chunks = [_make_chunk(f"chk-{i}", "kb1", f"doc {i}", score=0.5) for i in range(30)]
+        await reranker.rerank("q", chunks, top_k=5)
+        assert len(sent) == 20
+
+
 class TestCitationTracer:
     """Citation generation and traceability."""
 
@@ -400,6 +663,17 @@ class _FailingReranker:
         self, query: str, chunks: list[RetrievedChunk], top_k: int
     ) -> list[RetrievedChunk]:
         raise RuntimeError("simulated reranker failure")
+
+
+class _RecordingReranker:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[str, ...], int]] = []
+
+    async def rerank(
+        self, query: str, chunks: list[RetrievedChunk], top_k: int
+    ) -> list[RetrievedChunk]:
+        self.calls.append((query, tuple(chunk.chunk_id for chunk in chunks), top_k))
+        return list(chunks[:top_k])
 
 
 class _EchoRewriter:
@@ -528,17 +802,24 @@ class TestPipelineDegradation:
             _make_chunk("chk-a", "kb1", "first result", score=0.9),
             _make_chunk("chk-b", "kb1", "second result", score=0.7),
         ]
+        settings = Settings(
+            EMBEDDING_MODE="remote",
+            RERANK_MODE="remote",
+            RERANK_API_BASE_URL="",
+        )
         pipeline = RetrievalPipeline(
             rewriter=QueryRewriter(
                 MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
                 agent_name="test",
             ),
             retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
-            reranker=Reranker(Settings(rerank_mode="remote")),
+            reranker=Reranker(settings),
+            settings=settings,
         )
         result = await pipeline.retrieve("test query", ["kb1"], top_k=2, context=_ctx())
         assert "reranker" in result.degraded_steps
         assert [c.chunk_id for c in result.chunks] == ["chk-a", "chk-b"]
+        assert all(c.retrieval_method != "reranked" for c in result.chunks)
 
     @pytest.mark.asyncio
     async def test_rerank_failure_uses_rrf_order(self) -> None:
@@ -1062,7 +1343,9 @@ class TestFullPipelineIntegration:
         """Querying an empty KB returns empty but valid RetrievalResult."""
         pipeline = _build_pipeline(knowledge_store, embed_service, mock_llm)
 
-        result = await pipeline.retrieve("anything", ["attack_kb"], top_k=5, context=_ctx())
+        result = await pipeline.retrieve(
+            "anything", ["empty_test_kb"], top_k=5, context=_ctx()
+        )
         assert isinstance(result, RetrievalResult)
         assert result.chunks == []
         assert result.citations == []

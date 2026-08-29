@@ -142,6 +142,11 @@ def test_development_allows_explicit_volatile_task_mode() -> None:
     assert settings.task_mode is TaskMode.BACKGROUND
 
 
+def test_mock_embedding_coerces_remote_rerank_to_mock() -> None:
+    settings = Settings(APP_ENV="development", EMBEDDING_MODE="mock", RERANK_MODE="remote")
+    assert settings.rerank_mode == "mock"
+
+
 def test_production_rejects_volatile_task_mode() -> None:
     with pytest.raises(ConfigurationError) as exc_info:
         Settings(**_base_kwargs(TASK_MODE="background"))

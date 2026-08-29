@@ -88,6 +88,7 @@ class RetrievalMetrics(BaseModel):
     llm_rewrite_calls: int = 0
     org_context_exact_hit: bool = False
     constraint_channel: bool = False
+    entity_channel: bool = False
     retrieval_action: str = Field(
         default="",
         description="sufficient | uncertain | conflict. Empty when unset.",

@@ -269,6 +269,82 @@ def mock_org_context_records() -> list[OrgContextRecord]:
             ),
             hosts=("SRV-ADMIN-003",),
         ),
+        OrgContextRecord(
+            record_id="org-window-ops-change",
+            kind="time_window",
+            content=(
+                "每日 08:00-12:00 UTC 为 ops-change-bot 经 PC-OPS-JUMP-01 的批准改密窗口；"
+                "该时段批量改密属于已审批变更，不是账号异常本身。"
+            ),
+            accounts=("ops-change-bot",),
+            hosts=("PC-OPS-JUMP-01",),
+            window_start="08:00",
+            window_end="12:00",
+        ),
+        OrgContextRecord(
+            record_id="org-person-zhangsan",
+            kind="person_status",
+            content=(
+                "zhangsan 是在职财务人员，在职财务 ≠ 批准把 finance_report.zip "
+                "发往非 files.corp.internal 的外网。"
+            ),
+            accounts=("zhangsan",),
+            status="active",
+        ),
+        OrgContextRecord(
+            record_id="org-person-office-user-014",
+            kind="person_status",
+            content=(
+                "office-user-014 是在职办公账号，在职办公 ≠ 批准访问未登记域 "
+                "brand-new-cdn-example.net；批准 CDN 仍是 cdn.corp.internal。"
+            ),
+            accounts=("office-user-014",),
+            status="active",
+        ),
+        OrgContextRecord(
+            record_id="org-person-general-user-099",
+            kind="person_status",
+            content=(
+                "general-user-099 是在职无特权账号，在职无特权 ≠ 可忽略、不等于无需观察。"
+            ),
+            accounts=("general-user-099",),
+            status="active",
+        ),
+        OrgContextRecord(
+            record_id="org-data-usb-personal-cloud",
+            kind="data_handling",
+            content=(
+                "U 盘与个人网盘不是财务机密的批准通道；"
+                "机密级数据的批准通道仍是 files.corp.internal。"
+            ),
+            data_class="confidential",
+            allowed_channels=("files.corp.internal",),
+        ),
+        OrgContextRecord(
+            record_id="org-data-jump-host-not-approved",
+            kind="data_handling",
+            content=(
+                "JUMP-HOST-001 上 ops-jump-001 使用 mstsc.exe RDP 到 SRV-CORE-002 "
+                "不是批准运维；批准运维跳板是 PC-OPS-JUMP-01 + ops-change-bot。"
+            ),
+        ),
+        OrgContextRecord(
+            record_id="org-data-beacon-c2-unapproved",
+            kind="data_handling",
+            content=(
+                "svc-beacon-007 经 beacon.exe 外连 beacon-example.test 不是批准服务通信；"
+                "该域不是已登记对端。"
+            ),
+            domains=("beacon-example.test",),
+        ),
+        OrgContextRecord(
+            record_id="org-data-ransomware-stage-not-approved",
+            kind="data_handling",
+            content=(
+                "开发机允许编译与包管理；ransomware_stage.exe 不是批准进程，"
+                "不得当作日常开发工具。"
+            ),
+        ),
     ]
 
 

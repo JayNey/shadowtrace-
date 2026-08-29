@@ -1,0 +1,28 @@
+# Optional P2 remote-embedding demo overlay (docs/rag-remote-embedding-demo.md).
+#
+# NOT eval-eventtype-8 / eval-full-loop / eval-full-loop-matrix.
+# Do not add this file to infra/docker-compose.eval.yml or matrix compose_files.
+# This is not a Sangfor capability overlay; do not apply vendor overlay onto KIND=mock.
+# Does not set SOURCE_MODE, DISPOSITION_MODE, DISPOSITION_ADAPTER_KIND, or TOOL_MODE.
+#
+# After up: make load-kb once with the same EMBEDDING_MODEL_ID.
+# EMBEDDING_RELEASE_ID must differ from mock-v1.
+
+services:
+  backend:
+    environment:
+      EMBEDDING_MODE: remote
+      EMBEDDING_API_BASE_URL: ${EMBEDDING_API_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL_ID: ${EMBEDDING_MODEL_ID:-}
+      EMBEDDING_RELEASE_ID: ${EMBEDDING_RELEASE_ID:-remote-v1}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
+
+  worker:
+    environment:
+      EMBEDDING_MODE: remote
+      EMBEDDING_API_BASE_URL: ${EMBEDDING_API_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL_ID: ${EMBEDDING_MODEL_ID:-}
+      EMBEDDING_RELEASE_ID: ${EMBEDDING_RELEASE_ID:-remote-v1}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}

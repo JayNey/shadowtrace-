@@ -35,8 +35,17 @@ from app.models.enums import EventType, FinalVerdict
 from app.models.knowledge import RetrievalMetrics, RetrievalResult
 from app.models.knowledge_release import KnowledgeQueryPlan
 from app.models.playbook_release import PlaybookRef
+from app.rag.citation_tracer import CitationTracer
 from app.rag.constraint_rrf import OrgConstraint, constraints_from_org_matches
 from app.rag.context import RetrievalContext
+from app.rag.entity_rrf import (
+    EntityToken,
+    blocked_domains_from_constraints,
+    entity_hit_count,
+    extract_investigation_entities,
+    project_entities_for_kb,
+    promote_fp_exact_match,
+)
 from app.rag.retrieval_router import attack_kb_top_k, evidence_conflict_present
 from app.services.knowledge_query_plan_service import resolve_active_knowledge_query_plan
 from app.services.knowledge_release_service import KnowledgeReleaseService
@@ -114,6 +123,10 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
 
     async def _run(self, input: RAGAgentInput) -> RAGOutput:
         queries = RAGQueryBuilder.build_queries(input.triage_result, input.evidence_output)
+        investigation_entities = extract_investigation_entities(
+            input.triage_result,
+            input.evidence_output,
+        )
 
         # Two-phase retrieval: org_context_kb first, then the other four in parallel.
         if self._pipeline is None:
@@ -143,6 +156,13 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
             _build_org_context_matches(org_result),
         )
         org_constraints = constraints_from_org_matches(org_context_matches)
+        extra_blocked = blocked_domains_from_constraints(org_constraints)
+        if extra_blocked:
+            queries["fp_case_kb"] = RAGQueryBuilder.build_queries(
+                input.triage_result,
+                input.evidence_output,
+                extra_blocked_domains=extra_blocked,
+            )["fp_case_kb"]
         retrieve_outcomes = await asyncio.gather(
             *(
                 self._retrieve_for_kb(
@@ -168,9 +188,15 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
         )
         results = {_ORG_KB: org_result, **dict(zip(_OTHER_KBS, retrieve_outcomes, strict=True))}
 
+        fp_result = results.get("fp_case_kb")
+        fp_similarity, fp_result = _assemble_fp_similarity(
+            fp_result,
+            entities=investigation_entities,
+        )
+        results["fp_case_kb"] = fp_result
+
         # Assemble output sections.
         attack_techniques = _build_attack_techniques(results.get("attack_kb"))
-        fp_similarity = _build_fp_similarity(results.get("fp_case_kb"))
         similar_cases = _build_similar_cases(
             results.get("history_case_kb"),
             event_type=input.triage_result.event_type,
@@ -269,6 +295,7 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
         context = replace(
             base_context,
             query_plan=query_plan,
+            event_type=base_context.event_type,
             org_constraints=(
                 org_constraints if org_constraints is not None else base_context.org_constraints
             ),
@@ -434,19 +461,52 @@ def _build_attack_techniques(
     return deduped
 
 
-def _build_fp_similarity(result: RetrievalResult | None) -> FpSimilarity:
-    """Compute false-positive similarity from fp_case_kb retrieval result."""
-    if result is None or not result.chunks:
-        return FpSimilarity(max_score=0.0)
+def _assemble_fp_similarity(
+    result: RetrievalResult | None,
+    *,
+    entities: tuple[EntityToken, ...] = (),
+) -> tuple[FpSimilarity, RetrievalResult | None]:
+    """口径 H: first exact hit is promoted to chunks[0] with the pre-promote max score."""
+    if result is None:
+        return FpSimilarity(max_score=0.0), None
+    if not result.chunks:
+        return FpSimilarity(max_score=0.0), result
 
-    best = max(result.chunks, key=lambda c: c.score)
-    max_score = max(0.0, min(1.0, best.score))
-    meta = best.metadata
-    return FpSimilarity(
-        max_score=max_score,
-        matched_case_id=meta.get("case_id"),
-        matched_pattern=meta.get("pattern_summary"),
+    projected = project_entities_for_kb("fp_case_kb", entities)
+    if not projected:
+        return FpSimilarity(max_score=0.0), result
+
+    promoted = promote_fp_exact_match(result.chunks, projected)
+    updated = result.model_copy(
+        update={
+            "chunks": promoted,
+            "citations": CitationTracer.generate(result.query, promoted),
+        }
     )
+    head = promoted[0]
+    if entity_hit_count(head, projected) <= 0:
+        return FpSimilarity(max_score=0.0), updated
+
+    max_score = max(0.0, min(1.0, head.score))
+    meta = head.metadata
+    return (
+        FpSimilarity(
+            max_score=max_score,
+            matched_case_id=meta.get("case_id"),
+            matched_pattern=meta.get("pattern_summary"),
+        ),
+        updated,
+    )
+
+
+def _build_fp_similarity(
+    result: RetrievalResult | None,
+    *,
+    entities: tuple[EntityToken, ...] = (),
+) -> FpSimilarity:
+    """Compute false-positive similarity from fp_case_kb retrieval result."""
+    fp, _updated = _assemble_fp_similarity(result, entities=entities)
+    return fp
 
 
 _SIMILAR_CASE_MIN_SCORE = 0.25
@@ -654,6 +714,7 @@ def _aggregate_retrieval_metrics(
         llm_rewrite_calls=sum(item.llm_rewrite_calls for item in metrics),
         org_context_exact_hit=any(item.org_context_exact_hit for item in metrics),
         constraint_channel=any(item.constraint_channel for item in metrics),
+        entity_channel=any(item.entity_channel for item in metrics),
         retrieval_action=_aggregate_retrieval_action(metrics),
     )
 

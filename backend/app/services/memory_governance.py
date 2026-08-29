@@ -17,6 +17,7 @@ from app.core.errors import MemoryReviewConflictError, MemoryReviewNotFoundError
 from app.db.orm.memory_review import MemoryReviewORM
 from app.models.agent_io import FpRuleCandidate, ProfileUpdate
 from app.models.case import FalsePositiveCase, HistoryCase
+from app.models.enums import EventType
 from app.models.memory import MemoryCandidate, MemoryReview
 from app.services.case_kb_service import FP_KB_NAME, HISTORY_KB_NAME, CaseKBService
 from app.services.profile_service import RISK_HISTORY_LIMIT, ProfileService
@@ -293,6 +294,7 @@ class MemoryGovernance:
         digest = hashlib.sha256(_normalize_text(candidate.alert_signature).encode()).hexdigest()
         fp_case = FalsePositiveCase(
             case_id=f"case-{digest[:8]}",
+            event_type=candidate.event_type or EventType.OTHER,
             pattern_summary=candidate.rule_summary,
             alert_signature=candidate.alert_signature,
             entity_pattern=str(payload.get("entity_pattern") or "reviewed alert signature"),
