@@ -91,7 +91,11 @@ class Reranker:
             "documents": documents,
             "top_n": top_k,
         }
-        resp = await http.post("/rerank", json=payload, timeout=self._settings.rerank_timeout_seconds)
+        resp = await http.post(
+            "/rerank",
+            json=payload,
+            timeout=self._settings.rerank_timeout_seconds,
+        )
         resp.raise_for_status()
         ranked = _parse_remote_rerank_results(resp.json(), len(candidates))
         min_score = float(self._settings.rerank_min_score)

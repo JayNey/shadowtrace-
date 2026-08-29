@@ -31,7 +31,6 @@ from app.models.enums import (
     ActionLevel,
     ActionStatus,
     EventStatus,
-    ExecutionOwner,
     Severity,
     WritebackReadiness,
 )

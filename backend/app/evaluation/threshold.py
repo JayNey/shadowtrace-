@@ -23,7 +23,6 @@ from app.models.evaluation_run import (
     ScorerOutcome,
 )
 
-
 EVALUATION_MANIFEST_ROOT = (REPO_ROOT / "data" / "evaluation").resolve()
 
 
