@@ -1370,9 +1370,7 @@ class TestFullPipelineIntegration:
         """Querying an empty KB returns empty but valid RetrievalResult."""
         pipeline = _build_pipeline(knowledge_store, embed_service, mock_llm)
 
-        result = await pipeline.retrieve(
-            "anything", ["empty_test_kb"], top_k=5, context=_ctx()
-        )
+        result = await pipeline.retrieve("anything", ["empty_test_kb"], top_k=5, context=_ctx())
         assert isinstance(result, RetrievalResult)
         assert result.chunks == []
         assert result.citations == []

@@ -66,6 +66,7 @@ def _enqueue_storyline_refine(event_id: str) -> None:
             exc_info=True,
         )
 
+
 _PHASE_ORDER: dict[StorylinePhaseName, int] = {
     StorylinePhaseName.INITIAL_ACCESS: 1,
     StorylinePhaseName.COLLECTION: 2,

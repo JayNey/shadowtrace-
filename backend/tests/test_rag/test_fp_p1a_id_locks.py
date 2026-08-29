@@ -81,11 +81,7 @@ class _InMemoryKbStore:
         tenant_id: str | None = None,
     ) -> list[ListedKnowledgeChunk]:
         del tenant_id
-        rows = [
-            row
-            for row in self._rows.values()
-            if kb_name is None or row[0].kb_name == kb_name
-        ]
+        rows = [row for row in self._rows.values() if kb_name is None or row[0].kb_name == kb_name]
         rows.sort(key=lambda item: (item[0].kb_name, item[0].chunk_id))
         start = max(page - 1, 0) * page_size
         page_rows = rows[start : start + page_size]

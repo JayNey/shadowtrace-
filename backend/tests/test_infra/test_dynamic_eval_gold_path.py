@@ -718,9 +718,7 @@ def test_remote_embedding_runbook_locks_gold_mock() -> None:
     env = ENV_EXAMPLE.read_text(encoding="utf-8")
     assert "rag-remote-embedding-demo.md" in env
     active = [
-        line.strip()
-        for line in env.splitlines()
-        if line.strip().startswith("EMBEDDING_MODE=")
+        line.strip() for line in env.splitlines() if line.strip().startswith("EMBEDDING_MODE=")
     ]
     assert "EMBEDDING_MODE=remote" not in active
 

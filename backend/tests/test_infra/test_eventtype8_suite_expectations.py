@@ -310,8 +310,7 @@ def test_sangfor_column_rejects_mock_tool_provider_on_query(expect_mod) -> None:
 
 def test_sangfor_and_mock_asserts_are_not_the_same_function(expect_mod) -> None:
     assert (
-        expect_mod.assert_eventtype8_sangfor_column
-        is not expect_mod.assert_eventtype8_mock_column
+        expect_mod.assert_eventtype8_sangfor_column is not expect_mod.assert_eventtype8_mock_column
     )
     sangfor = expect_mod.column_expectation("host_compromise", "sangfor_xdr")
     mock = expect_mod.column_expectation("host_compromise", "mock_xdr")

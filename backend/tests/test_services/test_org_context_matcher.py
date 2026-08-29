@@ -163,9 +163,7 @@ class TestOrgContextMatcher:
             accounts=("ops-change-bot",),
             hosts=("PC-OPS-JUMP-01",),
         )
-        hits = OrgContextMatcher.match(
-            facts, _listed_from_seed(), now=fixture_occurred_at
-        )
+        hits = OrgContextMatcher.match(facts, _listed_from_seed(), now=fixture_occurred_at)
         assert any(
             h.kind == "time_window"
             and h.match_type == "window"

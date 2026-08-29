@@ -90,8 +90,7 @@ class TestStorageEventTypeEquals:
     def test_history_opened_subset_of_recorded_smoke_not_other(self) -> None:
         """§2.2 gate 3: smoke scenario_id recorded before opening a type."""
         recorded = {
-            event_type: scenario
-            for scenario, event_type, _hits in HISTORY_TYPE_FILTER_SMOKE
+            event_type: scenario for scenario, event_type, _hits in HISTORY_TYPE_FILTER_SMOKE
         }
         assert recorded["account_anomaly"] == "account_anomaly_fp"
         assert "other" not in HISTORY_EVENT_TYPE_FILTER_OPENED
@@ -149,9 +148,7 @@ class TestHybridRetrieverEventType:
             top_k=5,
             context=ctx,
         )
-        assert store.vector_search.await_args.kwargs["event_type_equals"] == (
-            "malicious_process"
-        )
+        assert store.vector_search.await_args.kwargs["event_type_equals"] == ("malicious_process")
         await retriever.retrieve(
             ["False positive pattern for event type data_exfiltration."],
             ["fp_case_kb"],
@@ -290,8 +287,6 @@ class TestPlaybookEmptyTags:
     async def test_other_empty_does_not_tag_type_filter(self) -> None:
         store = MagicMock()
         store.count_chunks = AsyncMock(return_value=3)
-        tags = await playbook_empty_degraded_steps(
-            store, _ctx(event_type=EventType.OTHER)
-        )
+        tags = await playbook_empty_degraded_steps(store, _ctx(event_type=EventType.OTHER))
         assert EVENT_TYPE_FILTER_EMPTY not in tags
         assert PLAYBOOK_RELEASE_PIN_EMPTY not in tags

@@ -340,9 +340,7 @@ def test_run_scenario_finally_compose_down_with_volumes(matrix_mod, tmp_path: Pa
     assert down_calls == [True]
 
 
-def test_run_scenario_eventtype8_fresh_volumes_loads_kb_once(
-    matrix_mod, tmp_path: Path
-) -> None:
+def test_run_scenario_eventtype8_fresh_volumes_loads_kb_once(matrix_mod, tmp_path: Path) -> None:
     load_calls: list[str] = []
 
     def _fake_load(project: str, _files: list[Path]) -> None:

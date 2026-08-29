@@ -82,18 +82,24 @@ def test_payload_spaces_and_key_order_share_hash() -> None:
     case = _VECTORS["cases"]["post_json_spaces_and_key_order"]
     assert case["a"]["payload_hash"] == case["b"]["payload_hash"] == case["c"]["payload_hash"]
     assert payload_hash(case["a"]["payload"]) == case["a"]["payload_hash"]
-    assert _sign(
-        method="POST",
-        url=case["a"]["url"],
-        params={},
-        payload=case["a"]["payload"],
-    ) == case["a"]["signature"]
-    assert _sign(
-        method="POST",
-        url=case["b"]["url"],
-        params={},
-        payload=case["b"]["payload"],
-    ) == case["b"]["signature"]
+    assert (
+        _sign(
+            method="POST",
+            url=case["a"]["url"],
+            params={},
+            payload=case["a"]["payload"],
+        )
+        == case["a"]["signature"]
+    )
+    assert (
+        _sign(
+            method="POST",
+            url=case["b"]["url"],
+            params={},
+            payload=case["b"]["payload"],
+        )
+        == case["b"]["signature"]
+    )
 
 
 def test_query_percent3d_restored_to_equals() -> None:
@@ -104,12 +110,15 @@ def test_query_percent3d_restored_to_equals() -> None:
     assert "%3D" in encoded
     assert canonical == encoded.replace("%3D", "=")
     assert case["canonical_query"] == canonical
-    assert _sign(
-        method=case["method"],
-        url=case["url"],
-        params=case["params"],
-        payload=case["payload"],
-    ) == case["signature"]
+    assert (
+        _sign(
+            method=case["method"],
+            url=case["url"],
+            params=case["params"],
+            payload=case["payload"],
+        )
+        == case["signature"]
+    )
 
 
 def test_params_none_matches_empty_dict() -> None:
@@ -117,8 +126,9 @@ def test_params_none_matches_empty_dict() -> None:
     assert query_canonical(None) == ""
     assert query_canonical({}) == ""
     assert case["none"]["signature"] == case["empty"]["signature"]
-    assert _sign(method="POST", url=case["none"]["url"], params=None, payload="") == (
-        case["none"]["signature"]
+    assert (
+        _sign(method="POST", url=case["none"]["url"], params=None, payload="")
+        == (case["none"]["signature"])
     )
 
 
@@ -137,12 +147,15 @@ def test_trailing_slash_matches_demo_canonical_path() -> None:
     case = _VECTORS["cases"]["path_trailing_slash"]
     assert canonical_path(case["without"]["url"]) == canonical_path(case["with"]["url"])
     assert case["without"]["signature"] == case["with"]["signature"]
-    assert _sign(
-        method="POST",
-        url=case["without"]["url"],
-        params={},
-        payload="",
-    ) == case["without"]["signature"]
+    assert (
+        _sign(
+            method="POST",
+            url=case["without"]["url"],
+            params={},
+            payload="",
+        )
+        == case["without"]["signature"]
+    )
 
 
 def test_authorization_uses_python_header_names() -> None:

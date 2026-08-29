@@ -370,8 +370,7 @@ async def test_wire_enrich_gets_proof_and_six_entities_without_account() -> None
     assert all(not path.endswith("/entities/account") for _method, path in methods_paths)
     assert all("/alerts/" not in path for _method, path in methods_paths)
     assert all(
-        "/isolate" not in path or path.endswith("/isolate/list")
-        for _method, path in methods_paths
+        "/isolate" not in path or path.endswith("/isolate/list") for _method, path in methods_paths
     )
     gets = [item for item in captured if item[0] == "GET"]
     assert len(gets) == 7

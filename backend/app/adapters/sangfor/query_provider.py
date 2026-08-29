@@ -166,8 +166,7 @@ class SangforQueryAdapter(BaseToolAdapter):
 
     def _failed(self, result: SangforHttpResult, *, path: str) -> ToolResult:
         reason = (
-            f"sangfor {path} http_status={result.http_status} "
-            f"business_code={result.business_code}"
+            f"sangfor {path} http_status={result.http_status} business_code={result.business_code}"
         )
         data = _query_data(records=[], reasons=[reason], coverage="missing", degraded=True)
         return ToolResult(
@@ -404,6 +403,4 @@ def build_sangfor_query_adapters(
     config: AdapterConfig,
 ) -> list[SangforQueryAdapter]:
     """One adapter instance per Evidence query tool (unique provider names)."""
-    return [
-        SangforQueryAdapter(config, client=client, tool_name=name) for name in QUERY_TOOL_NAMES
-    ]
+    return [SangforQueryAdapter(config, client=client, tool_name=name) for name in QUERY_TOOL_NAMES]

@@ -1967,16 +1967,12 @@ async def test_approval_node_enters_execution_when_engine_already_advanced() -> 
                         "authoritative_status": EventStatus.EXECUTING_RESPONSE.value,
                     },
                 )
-            await super().set_execution_substate(
-                event_id, substate, event_status=event_status
-            )
+            await super().set_execution_substate(event_id, substate, event_status=event_status)
 
     runtime = _StrictRuntime()
     machine = FakeStateMachine(status=EventStatus.WAITING_APPROVAL)
     services = _services(machine, runtime=runtime)
-    services["session_factory"] = _ScalarStatusSessionFactory(
-        EventStatus.EXECUTING_RESPONSE.value
-    )
+    services["session_factory"] = _ScalarStatusSessionFactory(EventStatus.EXECUTING_RESPONSE.value)
     services["approval_engine"] = FakeApprovalEngine(needs_wait=False, evaluated_count=2)
     node = build_investigation_graph(_agents(), services).nodes[NODE_APPROVAL]
     result = await node.ainvoke(
@@ -3446,7 +3442,6 @@ async def test_execute_node_execution_ok_false_when_action_failed() -> None:
         )
     )
     assert result["execution_ok"] is False
-
 
 
 @pytest.mark.asyncio

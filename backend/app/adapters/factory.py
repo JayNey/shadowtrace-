@@ -342,9 +342,10 @@ def source_adapter_component(settings: Settings) -> dict[str, Any]:
             ),
         }
     if _normalize(mode) == SANGFOR_PROVIDER:
-        if not sangfor_credentials_configured(settings) or not (
-            settings.sangfor_xdr_base_url or ""
-        ).strip():
+        if (
+            not sangfor_credentials_configured(settings)
+            or not (settings.sangfor_xdr_base_url or "").strip()
+        ):
             return {
                 "status": "error",
                 "mode": mode,
@@ -393,9 +394,10 @@ def disposition_adapter_component(settings: Settings) -> dict[str, Any]:
             ),
         }
     if kind == KIND_SANGFOR:
-        if not sangfor_credentials_configured(settings) or not (
-            settings.sangfor_xdr_base_url or ""
-        ).strip():
+        if (
+            not sangfor_credentials_configured(settings)
+            or not (settings.sangfor_xdr_base_url or "").strip()
+        ):
             return {
                 "status": "error",
                 "mode": mode,
@@ -467,14 +469,16 @@ async def probe_sangfor_auth(settings: Settings, *, client: Any | None = None) -
 
 async def live_auth_failed(settings: Settings, *, client: Any | None = None) -> bool:
     """True when a live Sangfor probe proves auth failure (401 / offline)."""
-    live = _normalize(settings.source_mode) == SANGFOR_PROVIDER or disposition_kind(
-        settings
-    ) == KIND_SANGFOR
+    live = (
+        _normalize(settings.source_mode) == SANGFOR_PROVIDER
+        or disposition_kind(settings) == KIND_SANGFOR
+    )
     if not live:
         return False
-    if not sangfor_credentials_configured(settings) or not (
-        settings.sangfor_xdr_base_url or ""
-    ).strip():
+    if (
+        not sangfor_credentials_configured(settings)
+        or not (settings.sangfor_xdr_base_url or "").strip()
+    ):
         return True
     status = await probe_sangfor_auth(settings, client=client)
     return status is ConnectorStatus.OFFLINE

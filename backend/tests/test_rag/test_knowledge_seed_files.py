@@ -173,8 +173,7 @@ def test_history_seed_aligns_other_unclassified_host() -> None:
     gen_hits = [
         row
         for row in rows
-        if row.get("event_type") == "other"
-        and "WKS-GEN-099" in row.get("key_entities", "")
+        if row.get("event_type") == "other" and "WKS-GEN-099" in row.get("key_entities", "")
     ]
     assert [row["case_id"] for row in gen_hits] == ["case-10000021"]
 
@@ -400,9 +399,7 @@ def test_org_seed_p0_person_status_and_frozen_allow() -> None:
     assert backup.window_start == "02:00"
     assert backup.window_end == "04:00"
     jump_allow = [
-        row
-        for row in records
-        if row.kind == "allowed_source" and "JUMP-HOST-001" in row.hosts
+        row for row in records if row.kind == "allowed_source" and "JUMP-HOST-001" in row.hosts
     ]
     assert jump_allow == []
     window = by_id["org-window-ops-change"]

@@ -52,9 +52,7 @@ def test_empty_settings_keep_block_scan_ticket_ownerless() -> None:
         "notify_security_team",
     ):
         assert list(index[name].supported_execution_owners) == []
-    assert list(index["create_ticket"].supported_execution_owners) == [
-        ExecutionOwner.DIRECT_TOOL
-    ]
+    assert list(index["create_ticket"].supported_execution_owners) == [ExecutionOwner.DIRECT_TOOL]
     adapter = build_disposition_adapter_registry(settings).get("sangfor_xdr")
     assert isinstance(adapter, SangforDispositionAdapter)
     assert adapter._block.devices == ()
@@ -69,12 +67,8 @@ def test_one_af_wires_block_scan_but_ticket_needs_assignees() -> None:
     index = response_agent_overrides_for_kind(SANGFOR_ADAPTER_KIND, settings)["tool_index"]
     assert index["block_ip"].supported_execution_owners == [ExecutionOwner.XDR_MANAGED]
     assert index["block_domain"].supported_execution_owners == [ExecutionOwner.XDR_MANAGED]
-    assert index["scan_host_for_virus"].supported_execution_owners == [
-        ExecutionOwner.XDR_MANAGED
-    ]
-    assert list(index["create_ticket"].supported_execution_owners) == [
-        ExecutionOwner.DIRECT_TOOL
-    ]
+    assert index["scan_host_for_virus"].supported_execution_owners == [ExecutionOwner.XDR_MANAGED]
+    assert list(index["create_ticket"].supported_execution_owners) == [ExecutionOwner.DIRECT_TOOL]
     assert list(index["isolate_host"].supported_execution_owners) == []
     assert list(index["disable_account"].supported_execution_owners) == []
     assert list(index["notify_security_team"].supported_execution_owners) == []

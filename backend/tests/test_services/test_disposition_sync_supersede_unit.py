@@ -619,8 +619,5 @@ def test_resolve_adapter_falls_back_to_single_registered_kind() -> None:
     registry.register("generic_http_disposition", adapter)  # type: ignore[arg-type]
     service = DispositionSyncService.__new__(DispositionSyncService)
     service._adapters = registry
-    outbox = SimpleNamespace(
-        command_payload={"source_locator": {"source_product": "sangfor_xdr"}}
-    )
+    outbox = SimpleNamespace(command_payload={"source_locator": {"source_product": "sangfor_xdr"}})
     assert service._resolve_adapter(outbox) is adapter  # type: ignore[arg-type]
-

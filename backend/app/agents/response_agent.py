@@ -879,6 +879,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             strategy=strategy,
             disposition_only=disposition_only,
         )
+
         def _resolve_tool_level(tool_name: str) -> ActionLevel:
             meta = policy_filter._tool_index.get(tool_name)
             return meta.action_level if meta is not None else ActionLevel.L0
