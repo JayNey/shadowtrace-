@@ -43,7 +43,7 @@ def build_sangfor_capability_manifest() -> CapabilityManifest:
     return CapabilityManifest(
         provider_name=_SANGFOR_PROVIDER,
         online=True,
-        source_read=CapabilityState.SUPPORTED,
+        source_read=CapabilityState.UNKNOWN,
         event_disposition=CapabilityState.SUPPORTED,
         entity_response=CapabilityState.SUPPORTED,
         allowed_intents=[

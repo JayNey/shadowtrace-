@@ -1,7 +1,6 @@
 """Sangfor XDR SourceAdapter — incident/alert/asset/log lists (Layer 4c).
 
-Not wired into SOURCE_MODE / the ingestion scheduler. Agents must not
-import this module.
+Wired when ``SOURCE_MODE=sangfor_xdr``. Agents must not import this module.
 """
 
 from __future__ import annotations

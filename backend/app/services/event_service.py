@@ -86,6 +86,7 @@ from app.services.source_entity_enricher import enrich_entities_from_source
 from app.services.source_policy_resolver import (
     SourcePolicyResolver,
     connector_policy_from_row,
+    is_live_ingest_source,
 )
 
 logger = logging.getLogger(__name__)
@@ -2657,8 +2658,10 @@ class EventService:
             "file",
             "manual",
         }
-        is_live = (source.source_type or "").strip().lower() == "live" or (
-            settings.source_mode == "live" and not is_mock and not is_file_or_manual
+        is_live = is_live_ingest_source(
+            source_type=source.source_type,
+            source_product=ref.source_product,
+            source_mode=settings.source_mode,
         )
         if is_live:
             raise ValidationError(
@@ -2677,6 +2680,8 @@ class EventService:
                 DispositionPolicy.REQUIRED.value
                 if is_mock
                 else DispositionPolicy.NOT_REQUIRED.value
+                if is_file_or_manual
+                else None
             ),
             connector_metadata=(
                 {
@@ -2762,13 +2767,10 @@ class EventService:
         source_type = source.source_type
         if source_type is None and source.reference.source_product == "file":
             source_type = "file"
-        normalized_type = (source_type or "").strip().lower()
-        product = (source.reference.source_product or "").strip().lower()
-        mode = (settings.source_mode or "").strip().lower()
-        is_mock = product == "mock_xdr" or mode == "mock_xdr"
-        is_file_or_manual = normalized_type in {"file", "manual"}
-        is_live = normalized_type == "live" or (
-            mode == "live" and not is_mock and not is_file_or_manual
+        is_live = is_live_ingest_source(
+            source_type=source_type,
+            source_product=source.reference.source_product,
+            source_mode=settings.source_mode,
         )
         connector_policy = connector_policy_from_row(connector)
         try:

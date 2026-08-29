@@ -741,9 +741,15 @@ class Settings(BaseSettings):
             self.tool_mode, "tool_mode"
         ):
             violations.append("source_mode=sangfor_xdr forbids tool_mode=mock")
+        disposition_kind = getattr(self, "disposition_adapter_kind", None) or ""
+        if _normalize_mode_value(self.source_mode) == "sangfor_xdr" and (
+            _looks_mock(self.disposition_mode, "disposition_mode")
+            or _looks_mock(disposition_kind, "disposition_adapter_kind")
+        ):
+            violations.append("source_mode=sangfor_xdr forbids mock disposition")
         if _normalize_mode_value(self.disposition_mode) == "live_xdr" and (
-            not _normalize_mode_value(self.disposition_adapter_kind)
-            or _looks_mock(self.disposition_adapter_kind, "disposition_adapter_kind")
+            not _normalize_mode_value(disposition_kind)
+            or _looks_mock(disposition_kind, "disposition_adapter_kind")
         ):
             violations.append(
                 "disposition_mode=live_xdr forbids disposition_adapter_kind=mock"

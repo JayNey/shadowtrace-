@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.core.errors import InvalidStateTransitionError, ValidationError
-from app.models.enums import EventStatus
+from app.models.enums import ActionStatus, EventStatus
 from app.orchestration.graph_resume_observability import (
     GRAPH_RESUME_FAILED_FLAG,
     GraphResumeFailedError,
@@ -386,3 +386,58 @@ async def test_execute_graph_resume_with_retry_preserves_soft_time_limit(
 
     record.assert_not_awaited()
     degraded.set_flag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_graph_resume_passes_through_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.resume_investigation_from_checkpoint",
+        AsyncMock(return_value="skipped"),
+    )
+    outcome = await execute_graph_resume_with_retry(
+        "evt-skip",
+        session_factory=_SessionFactory(),
+        get_super_agent=AsyncMock(return_value=MagicMock()),
+        get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+        degraded_flags=MagicMock(),
+        lease_acquired=True,
+    )
+    assert outcome == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_maybe_advance_plan_transition_failure_returns_failed() -> None:
+    resume = AsyncMock(return_value="ok")
+    machine = MagicMock()
+    machine.transition = AsyncMock(side_effect=RuntimeError("cas lost"))
+    engine = ApprovalEngine(
+        MagicMock(),
+        resume_investigation=resume,
+        state_machine=machine,
+    )
+    engine.is_plan_fully_decided = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    approved = MagicMock()
+    approved.status = ActionStatus.APPROVED
+    approved.writeback_required = False
+    approved.tool_name = "isolate_host"
+    engine._load_plan_response_actions = AsyncMock(return_value=[approved])  # type: ignore[method-assign]
+    engine._event_status = AsyncMock(return_value=EventStatus.WAITING_APPROVAL)  # type: ignore[method-assign]
+
+    status = await engine._maybe_advance_plan("evt-transition-fail", 1)
+    assert status == "failed"
+    resume.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_maybe_advance_plan_skipped_resume_is_not_ok() -> None:
+    resume = AsyncMock(return_value="skipped")
+    engine = ApprovalEngine(MagicMock(), resume_investigation=resume)
+    engine.is_plan_fully_decided = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    engine._load_plan_response_actions = AsyncMock(return_value=[MagicMock(status=MagicMock())])  # type: ignore[method-assign]
+    engine._event_status = AsyncMock(return_value=EventStatus.WAITING_APPROVAL)  # type: ignore[method-assign]
+    engine._state_machine = None
+
+    status = await engine._maybe_advance_plan("evt-resume-skip", 1)
+    assert status == "failed"

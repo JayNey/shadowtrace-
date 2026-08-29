@@ -569,3 +569,58 @@ async def test_enqueue_command_rejects_unapproved_action_id() -> None:
 
     violations = exc_info.value.details["violations"]
     assert any(item["rule_name"] == "disposition_approved_action" for item in violations)
+
+
+@pytest.mark.asyncio
+async def test_accepted_receipt_leaves_action_executing() -> None:
+    from app.models.enums import ActionCategory, ActionStatus, WritebackStatus
+
+    service = DispositionSyncService.__new__(DispositionSyncService)
+    action = SimpleNamespace(
+        status=ActionStatus.EXECUTING.value,
+        executed_at=None,
+        action_category=ActionCategory.RESPONSE.value,
+    )
+    receipt = SimpleNamespace(status=WritebackStatus.ACCEPTED)
+    await service._apply_action_terminal_from_receipt(  # type: ignore[arg-type]
+        AsyncMock(),
+        action,
+        receipt,
+    )
+    assert action.status == ActionStatus.EXECUTING.value
+    assert action.executed_at is None
+
+
+@pytest.mark.asyncio
+async def test_confirmed_receipt_marks_action_success() -> None:
+    from app.models.enums import ActionCategory, ActionStatus, WritebackStatus
+
+    service = DispositionSyncService.__new__(DispositionSyncService)
+    action = SimpleNamespace(
+        status=ActionStatus.EXECUTING.value,
+        executed_at=None,
+        action_category=ActionCategory.RESPONSE.value,
+    )
+    receipt = SimpleNamespace(status=WritebackStatus.CONFIRMED)
+    await service._apply_action_terminal_from_receipt(  # type: ignore[arg-type]
+        AsyncMock(),
+        action,
+        receipt,
+    )
+    assert action.status == ActionStatus.SUCCESS.value
+    assert action.executed_at is not None
+
+
+def test_resolve_adapter_falls_back_to_single_registered_kind() -> None:
+    from app.adapters.registry import DispositionAdapterRegistry
+
+    adapter = SimpleNamespace(name="generic_http_disposition")
+    registry = DispositionAdapterRegistry()
+    registry.register("generic_http_disposition", adapter)  # type: ignore[arg-type]
+    service = DispositionSyncService.__new__(DispositionSyncService)
+    service._adapters = registry
+    outbox = SimpleNamespace(
+        command_payload={"source_locator": {"source_product": "sangfor_xdr"}}
+    )
+    assert service._resolve_adapter(outbox) is adapter  # type: ignore[arg-type]
+

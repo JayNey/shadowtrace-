@@ -457,6 +457,27 @@ class TestEventHandlers:
         assert sid not in ns_rooms.get(GLOBAL_ROOM, {})
 
     @pytest.mark.asyncio
+    async def test_subscribe_rejects_principal_without_read_role(
+        self,
+        sio: socketio.AsyncServer,
+    ) -> None:
+        sid = _fake_sid()
+        event_id = "evt-norole-subscribe"
+        _connect_session(sio, sid)
+        connect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
+        assert connect_handler is not None
+        environ = {
+            "HTTP_AUTHORIZATION": "Bearer norole-token",
+            "REMOTE_ADDR": "127.0.0.1",
+        }
+        await connect_handler(sid, environ, None)
+        handler = sio.handlers[SOCKETIO_NAMESPACE].get("subscribe")
+        assert handler is not None
+        await handler(sid, {"event_id": event_id})
+        ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
+        assert sid not in ns_rooms.get(_event_room(event_id), {})
+
+    @pytest.mark.asyncio
     async def test_disconnect_clears_session_registry(
         self,
         sio: socketio.AsyncServer,

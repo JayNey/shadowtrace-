@@ -923,6 +923,12 @@ class ManualResolutionService:
             if resume_result == "deferred":
                 await self._requeue_deferred(intent_id)
                 return False
+            if resume_result in {"skipped", "failed"}:
+                await self._mark_failure(
+                    intent_id,
+                    error=f"approval_plan_resume_{resume_result}",
+                )
+                return False
             await self._mark_terminal(intent_id)
             return True
 

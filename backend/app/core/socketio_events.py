@@ -165,8 +165,10 @@ async def disconnect_invalid_sessions(
     return cleanup_ok
 
 
-async def _event_readable(event_id: str) -> bool:
-    """Return whether the event exists (mirrors REST ``GET /events/{id}`` gate)."""
+async def _event_readable(event_id: str, principal: Principal) -> bool:
+    """Return whether the principal may read the event (REST GET /events/{id})."""
+    if not principal.has_read_access():
+        return False
     try:
         from app.api.v1.deps import get_event_service
 
@@ -285,7 +287,7 @@ def register_handlers(
             await _emit_auth_error(sio, sid, "subscribe requires a valid event_id string")
             return
 
-        if not await _event_readable(event_id):
+        if not await _event_readable(event_id, session.principal):
             logger.info(
                 "socketio subscribe rejected sid=%s subject=%s event_id=%s — not found",
                 sid,

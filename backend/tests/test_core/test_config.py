@@ -109,10 +109,29 @@ def test_sangfor_source_rejects_tool_mode_mock_in_every_env() -> None:
     object.__setattr__(probe, "source_mode", "sangfor_xdr")
     object.__setattr__(probe, "tool_mode", "mock")
     object.__setattr__(probe, "disposition_mode", "live_xdr")
+    object.__setattr__(probe, "disposition_adapter_kind", "sangfor_xdr")
     object.__setattr__(probe, "simulation_enabled", False)
     violations = Settings.runtime_adapter_fail_closed_violations(probe)
     assert violations
     assert any("tool_mode=mock" in item for item in violations)
+
+
+def test_sangfor_source_rejects_mock_disposition_in_every_env() -> None:
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings(
+            APP_ENV="staging",
+            SOURCE_MODE="sangfor_xdr",
+            DISPOSITION_MODE="mock_xdr",
+            DISPOSITION_ADAPTER_KIND="mock",
+            TOOL_MODE="live",
+            SIMULATION_ENABLED=False,
+            ALLOW_LIVE_SIDE_EFFECTS=True,
+            SANGFOR_XDR_BASE_URL="https://xdr.example.invalid",
+            SANGFOR_ACCESS_KEY="test-ak-01xxxxxx",
+            SANGFOR_SECRET_KEY="test-sk-01-not-prod",
+            SHARED_CREDENTIAL_SCOPE_VERIFIED=True,
+        )
+    assert "mock disposition" in str(exc_info.value).lower()
 
 
 def test_staging_sangfor_live_xdr_without_simulation_is_accepted() -> None:

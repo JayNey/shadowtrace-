@@ -74,5 +74,8 @@ export function isApprovalUiDisabled(): boolean {
 }
 
 export function canPromoteKnowledgeReviews(): boolean {
+  if (!hasKnownAuthRoles()) {
+    return true;
+  }
   return currentAuthRoles().includes(APPROVER_ROLE);
 }

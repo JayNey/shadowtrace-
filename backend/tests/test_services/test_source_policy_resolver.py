@@ -46,6 +46,26 @@ def test_live_without_explicit_policy_raises(resolver: SourcePolicyResolver) -> 
         resolver.resolve(source_mode="live", live_configured=True)
 
 
+def test_sangfor_without_explicit_policy_raises(resolver: SourcePolicyResolver) -> None:
+    with pytest.raises(ValueError, match="explicit disposition_policy_default"):
+        resolver.resolve(source_product="sangfor_xdr")
+    with pytest.raises(ValueError, match="explicit disposition_policy_default"):
+        resolver.resolve(source_mode="sangfor_xdr")
+    with pytest.raises(ValueError, match="explicit disposition_policy_default"):
+        resolver.resolve(source_type="sangfor_xdr", source_product="sangfor_xdr")
+
+
+def test_sangfor_honors_explicit_connector_policy(resolver: SourcePolicyResolver) -> None:
+    assert (
+        resolver.resolve(
+            source_product="sangfor_xdr",
+            source_mode="sangfor_xdr",
+            connector_policy_default=DispositionPolicy.REQUIRED,
+        )
+        is DispositionPolicy.REQUIRED
+    )
+
+
 def test_readiness_block_reasons(resolver: SourcePolicyResolver) -> None:
     assert (
         resolver.readiness_when_required_but_blocked(

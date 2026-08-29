@@ -116,9 +116,8 @@ def test_disposition_kind_rejects_live_xdr_mock() -> None:
 
 
 def test_factory_rejects_sangfor_kind_with_mock_disposition_mode() -> None:
-    settings = _sangfor_settings(DISPOSITION_MODE="mock_xdr")
-    with pytest.raises(ConfigurationError, match="live_xdr"):
-        build_disposition_adapter_registry(settings)
+    with pytest.raises(ConfigurationError, match="mock disposition"):
+        _sangfor_settings(DISPOSITION_MODE="mock_xdr")
 
 
 def test_factory_rejects_sangfor_without_credentials() -> None:

@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 GetSuperAgent = Callable[[], Awaitable[Any]]
 GetWorkflowRuntime = Callable[[], Awaitable[Any]]
-GraphResumeOutcome = Literal["ok", "deferred"]
+GraphResumeOutcome = Literal["ok", "deferred", "skipped"]
 
 # Resume may delegate to Celery only when the event never entered the graph.
 _GRAPH_NEVER_STARTED_STATUSES = frozenset(
@@ -738,13 +738,12 @@ async def resume_investigation_from_checkpoint(
             return "deferred"
         owns_lease = True
     try:
-        await _resume_investigation_from_checkpoint_body(
+        return await _resume_investigation_from_checkpoint_body(
             session_factory,
             event_id,
             get_super_agent=get_super_agent,
             get_workflow_runtime=get_workflow_runtime,
         )
-        return "ok"
     except SoftTimeLimitExceeded:
         # ISSUE-314: keep the lease until the task-layer outcome handler runs.
         soft_limited = True
@@ -769,7 +768,7 @@ async def _resume_investigation_from_checkpoint_body(
     *,
     get_super_agent: GetSuperAgent,
     get_workflow_runtime: GetWorkflowRuntime,
-) -> None:
+) -> Literal["ok", "skipped"]:
     from app.orchestration.graph_resume_observability import GraphResumeFailedError
 
     agent = await get_super_agent()
@@ -780,7 +779,7 @@ async def _resume_investigation_from_checkpoint_body(
             "graph resume skipped event=%s — still waiting_approval",
             event_id,
         )
-        return
+        return "skipped"
     if status_value in _NO_FULL_GRAPH_RESTART_STATUSES:
         if status_value in {EventStatus.CLOSED.value, EventStatus.FAILED.value}:
             logger.info(
@@ -788,12 +787,12 @@ async def _resume_investigation_from_checkpoint_body(
                 status_value,
                 event_id,
             )
-            return
+            return "skipped"
 
         # REPORTING: continue report phase only — never restart triage.
         if graph is None:
             await _resume_report_only_from_analysis(session_factory, event_id, agent)
-            return
+            return "ok"
 
         reporting_config: RunnableConfig = {"configurable": {"thread_id": event_id}}
         runtime = await get_workflow_runtime()
@@ -813,12 +812,12 @@ async def _resume_investigation_from_checkpoint_body(
         projection = EvidenceProjection(session_factory)
         with bind_evidence_projection(projection):
             await invoke_investigation_graph(graph, None, reporting_config)
-        return
+        return "ok"
 
     if graph is None:
         # Only safe for pre-graph statuses; post-analysis handled above.
         await _delegate_execute_investigation(session_factory, event_id)
-        return
+        return "ok"
 
     config: RunnableConfig = {"configurable": {"thread_id": event_id}}
     runtime = await get_workflow_runtime()
@@ -831,7 +830,7 @@ async def _resume_investigation_from_checkpoint_body(
     if not has_checkpoint:
         if status_value in _GRAPH_NEVER_STARTED_STATUSES:
             await _delegate_execute_investigation(session_factory, event_id)
-            return
+            return "ok"
         raise GraphResumeFailedError(
             f"no checkpoint for event in status {status_value}",
             event_id=event_id,
@@ -841,9 +840,11 @@ async def _resume_investigation_from_checkpoint_body(
     projection = EvidenceProjection(session_factory)
     with bind_evidence_projection(projection):
         await invoke_investigation_graph(graph, None, config)
+    return "ok"
 
 
 __all__ = [
+    "GraphResumeOutcome",
     "maybe_catchup_approval_resume_same_lease",
     "prepare_graph_resume_state",
     "resume_investigation_from_checkpoint",

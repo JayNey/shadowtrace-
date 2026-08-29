@@ -115,11 +115,13 @@ class SangforQueryAdapter(BaseToolAdapter):
         super().__init__(config)
 
     def capability_manifest(self) -> CapabilityManifest:
+        unavailable = self._tool_name in _UNAVAILABLE_REASONS
+        supported = CapabilityState.UNSUPPORTED if unavailable else CapabilityState.SUPPORTED
         return CapabilityManifest(
             provider_name=self.name,
-            online=True,
-            source_read=CapabilityState.SUPPORTED,
-            entity_response=CapabilityState.SUPPORTED,
+            online=not unavailable,
+            source_read=supported,
+            entity_response=supported,
             allowed_operations=[self._tool_name],
             supports_idempotency=True,
             allowed_execution_channels=[ExecutionChannel.TOOL_PROVIDER],

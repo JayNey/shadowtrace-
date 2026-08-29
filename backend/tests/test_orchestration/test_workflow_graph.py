@@ -835,6 +835,12 @@ def test_remaining_route_truth_tables() -> None:
     )
     assert route_after_verify(_base_state()) == ROUTE_REPORT
     assert (
+        route_after_verify(
+            _base_state(verify_overall_status=VerificationOverallStatus.FAILED.value)
+        )
+        == ROUTE_MANUAL
+    )
+    assert (
         route_after_writeback_recovery(_base_state(verify_need_writeback_recovery=True))
         == ROUTE_WRITEBACK
     )
@@ -3413,6 +3419,34 @@ async def test_execute_node_skips_plan_refresh_when_execution_ok_false() -> None
     assert result["execution_ok"] is False
     assert "response_plan" not in result
     assert result["event_status"] == EventStatus.VERIFYING.value
+
+
+@pytest.mark.asyncio
+async def test_execute_node_execution_ok_false_when_action_failed() -> None:
+    event_id = "evt-exec-failed-counts"
+
+    class _FailedSummaryExec:
+        async def execute_plan(self, *_a: Any, **_k: Any) -> Any:
+            return SimpleNamespace(
+                action_counts={ActionStatus.FAILED.value: 1, ActionStatus.SUCCESS.value: 0}
+            )
+
+    machine = FakeStateMachine(
+        status=EventStatus.EXECUTING_RESPONSE,
+        statuses={event_id: EventStatus.EXECUTING_RESPONSE},
+    )
+    services = _services(machine)
+    services["action_execution"] = _FailedSummaryExec()
+    graph = build_investigation_graph(_agents(), services)
+    result = await graph.nodes[NODE_EXECUTE].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.EXECUTING_RESPONSE.value,
+            response_plan=_pending_execute_plan(event_id),
+        )
+    )
+    assert result["execution_ok"] is False
+
 
 
 @pytest.mark.asyncio

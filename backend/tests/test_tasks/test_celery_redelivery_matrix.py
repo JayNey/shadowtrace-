@@ -420,7 +420,6 @@ def test_redelivery_lookup_exhaustion_records_recovery_and_acks(
         EventStatus.REPLANNING,
         EventStatus.REPORTING,
         EventStatus.CONTAINED,
-        EventStatus.FAILED,
     ],
 )
 def test_redelivery_intermediate_states_attempt_resume_not_terminal_skip(

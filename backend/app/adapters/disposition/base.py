@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.adapters.disposition.error_classification import (  # noqa: F401
@@ -116,6 +118,15 @@ class BaseDispositionAdapter(ABC):
         Default: unsupported (returns None).
         """
         _ = (command, receipt)
+        return None
+
+    async def observe_verification(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Optional Verify observation. Default: not this adapter (caller uses Mock)."""
+        _ = (tool_name, params)
         return None
 
     @abstractmethod

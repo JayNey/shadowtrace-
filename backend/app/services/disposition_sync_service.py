@@ -26,6 +26,7 @@ from app.adapters.disposition.error_classification import (
 from app.adapters.registry import DispositionAdapterRegistry
 from app.core.config import get_settings
 from app.core.errors import (
+    AdapterNotFoundError,
     DependencyUnavailableError,
     EventNotFoundError,
     GuardrailViolationError,
@@ -1586,7 +1587,10 @@ class DispositionSyncService:
         current = ActionStatus(action.status)
         if current is not ActionStatus.EXECUTING:
             return
-        if receipt.status in {WritebackStatus.CONFIRMED, WritebackStatus.ACCEPTED}:
+        if receipt.status is WritebackStatus.ACCEPTED:
+            # ACCEPTED is not a confirmed terminal writeback; stay EXECUTING.
+            return
+        if receipt.status is WritebackStatus.CONFIRMED:
             target = ActionStatus.SUCCESS
         elif receipt.status is WritebackStatus.PARTIAL:
             target = ActionStatus.PARTIAL_SUCCESS
@@ -2388,7 +2392,13 @@ class DispositionSyncService:
         payload = outbox.command_payload or {}
         locator = payload.get("source_locator") or {}
         product = str(locator.get("source_product") or "mock_xdr")
-        return self._adapters.get(product)
+        try:
+            return self._adapters.get(product)
+        except AdapterNotFoundError:
+            names = self._adapters.list_names()
+            if len(names) == 1:
+                return self._adapters.get(names[0])
+            raise
 
     async def _sync_writeback_summary(self, event_id: str) -> None:
         summary_payload: dict[str, Any] | None = None

@@ -1206,6 +1206,15 @@ class SangforDispositionAdapter(BaseDispositionAdapter):
         """No extra vendor URI; write/readback are the only probes this layer has."""
         return ConnectorStatus.UNKNOWN
 
+    async def observe_verification(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        from app.adapters.sangfor.verify_observation import observe_sangfor_verification
+
+        return await observe_sangfor_verification(tool_name, params, client=self._client)
+
     def _receipt(
         self,
         command: DispositionCommand,

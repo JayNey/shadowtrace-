@@ -231,6 +231,26 @@ def _build_sangfor_disposition(settings: Settings) -> BaseDispositionAdapter:
     )
 
 
+async def observe_disposition_verification(
+    tool_name: str,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Verify observation via the registered DispositionAdapter. Tools must not import sangfor."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    kind = _normalize(getattr(settings, "disposition_adapter_kind", None) or "")
+    if kind != KIND_SANGFOR:
+        return None
+    try:
+        adapter = _build_sangfor_disposition(settings)  # type: ignore[arg-type]
+        return await adapter.observe_verification(tool_name, params)
+    except Exception:
+        from app.adapters.sangfor.verify_observation import observe_sangfor_verification
+
+        return await observe_sangfor_verification(tool_name, params)
+
+
 def build_disposition_adapter_registry(settings: Settings) -> DispositionAdapterRegistry:
     """Register exactly one KIND. Production API and Celery must share this."""
     _reject_unregistered_disposition_mode(settings)
@@ -476,6 +496,7 @@ __all__ = [
     "disposition_kind",
     "disposition_provider_name",
     "live_auth_failed",
+    "observe_disposition_verification",
     "probe_sangfor_auth",
     "sangfor_credentials_configured",
     "source_adapter_component",

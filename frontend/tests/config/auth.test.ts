@@ -43,7 +43,7 @@ describe("config/auth", () => {
       "../../src/config/auth"
     );
     expect(currentAuthRoles()).toEqual(["analyst"]);
-    expect(canPromoteKnowledgeReviews()).toBe(false);
+    expect(canPromoteKnowledgeReviews()).toBe(true);
   });
 
   it("hasKnownAuthRoles: known dev token pins roles (single-token mode)", async () => {
