@@ -8,6 +8,27 @@ from app.models.enums import DispositionPolicy, SourceObjectKind
 
 # Source types that never require external writeback by business policy.
 _FILE_MANUAL_TYPES: frozenset[str] = frozenset({"file", "manual"})
+_LIVE_SOURCE_MODES: frozenset[str] = frozenset({"live", "sangfor_xdr", "live_xdr"})
+_LIVE_SOURCE_PRODUCTS: frozenset[str] = frozenset({"sangfor_xdr"})
+
+
+def is_live_ingest_source(
+    *,
+    source_type: str | None = None,
+    source_product: str | None = None,
+    source_mode: str | None = None,
+) -> bool:
+    """True when ingest is a live/vendor path that must not invent policy."""
+    normalized_type = (source_type or "").strip().lower()
+    if normalized_type in _FILE_MANUAL_TYPES:
+        return False
+    product = (source_product or "").strip().lower()
+    mode = (source_mode or "").strip().lower()
+    if product == "mock_xdr" or mode == "mock_xdr":
+        return False
+    if normalized_type == "live":
+        return True
+    return product in _LIVE_SOURCE_PRODUCTS or mode in _LIVE_SOURCE_MODES
 
 
 class SourcePolicyResolver:
@@ -49,7 +70,12 @@ class SourcePolicyResolver:
         if is_mock:
             return DispositionPolicy.REQUIRED
 
-        if live_configured:
+        live = live_configured or is_live_ingest_source(
+            source_type=source_type,
+            source_product=source_product,
+            source_mode=source_mode,
+        )
+        if live:
             # Live without an explicit connector default must not invent policy.
             raise ValueError(
                 "live connectors require explicit disposition_policy_default on the connector"

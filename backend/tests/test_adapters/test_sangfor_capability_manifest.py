@@ -8,7 +8,7 @@ from app.adapters.sangfor.capability_manifest import (
 )
 from app.adapters.sangfor.capability_overlay import SANGFOR_ADAPTER_KIND
 from app.core.config import Settings
-from app.models.enums import ExecutionOwner
+from app.models.enums import CapabilityState, ExecutionOwner
 
 
 def _empty_sangfor_settings() -> Settings:
@@ -31,6 +31,7 @@ def test_sangfor_manifest_keeps_isolate_and_is_not_mock() -> None:
     assert "isolate_host" in manifest.allowed_operations
     assert "disable_account" in manifest.allowed_operations
     assert "query_account_login" not in manifest.allowed_operations
+    assert manifest.source_read is CapabilityState.UNKNOWN
 
 
 def test_overrides_empty_for_mock_kind() -> None:

@@ -19,7 +19,7 @@ import {
   resolveWriteback,
 } from "../../services/eventApi";
 import { ApiError } from "../../services/apiClient";
-import { currentAuthRoles } from "../../config/auth";
+import { currentAuthRoles, hasKnownAuthRoles } from "../../config/auth";
 import type { Action } from "../../types/action";
 import type { EventDetailResponse, EventEvidenceResponse } from "../../types/event";
 import type { EventWriteback } from "../../hooks/useEventDetail";
@@ -85,9 +85,11 @@ export default function EventTodoBar({
   const [resolving, setResolving] = useState(false);
 
   const roles = currentAuthRoles();
+  const rolesKnown = hasKnownAuthRoles();
   // Backend close_event: require_roles(ROLE_ANALYST); admin bypasses via has_any_role.
-  const canCloseRole = roles.includes("analyst") || roles.includes("admin");
-  const canResolveRole = roles.includes("admin");
+  const canCloseRole =
+    !rolesKnown || roles.includes("analyst") || roles.includes("admin");
+  const canResolveRole = !rolesKnown || roles.includes("admin");
 
   const unknownAction = unknownActions(actions)[0];
   const unknownWriteback = unknownWritebacks(writebacks)[0];

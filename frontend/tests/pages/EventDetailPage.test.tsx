@@ -1341,6 +1341,7 @@ describe("EventDetailPage", () => {
 
   it("disables close for approver-only roles", async () => {
     vi.stubEnv("VITE_AUTH_ROLES", "approver");
+    vi.stubEnv("VITE_DEV_AUTH_TOKEN", "e2e-token");
     const detail = makeDetail({ status: "reporting" });
     detail.next_recommended_action = "close";
     detail.event.event_context_snapshot = {
@@ -1357,6 +1358,7 @@ describe("EventDetailPage", () => {
 
   it("disables resolve-unknown for non-admin roles", async () => {
     vi.stubEnv("VITE_AUTH_ROLES", "analyst");
+    vi.stubEnv("VITE_DEV_AUTH_TOKEN", "e2e-token");
     mockListActions.mockResolvedValue({
       data: {
         total: 1,

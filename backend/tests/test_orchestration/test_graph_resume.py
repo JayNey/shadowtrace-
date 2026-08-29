@@ -684,7 +684,7 @@ async def test_resume_closed_or_failed_without_graph_is_noop() -> None:
             "app.tasks.investigation_tasks.execute_investigation",
             new_callable=AsyncMock,
         ) as execute:
-            await resume_investigation_from_checkpoint(
+            outcome = await resume_investigation_from_checkpoint(
                 _SessionFactory(status),
                 f"evt-247-{status}",
                 get_super_agent=AsyncMock(return_value=agent),
@@ -692,6 +692,7 @@ async def test_resume_closed_or_failed_without_graph_is_noop() -> None:
                 lease_acquired=True,
             )
 
+        assert outcome == "skipped"
         execute.assert_not_awaited()
         agent.report_agent.execute.assert_not_awaited()
 
@@ -709,7 +710,7 @@ async def test_resume_closed_or_failed_with_graph_is_noop() -> None:
             "app.tasks.investigation_tasks.execute_investigation",
             new_callable=AsyncMock,
         ) as execute:
-            await resume_investigation_from_checkpoint(
+            outcome = await resume_investigation_from_checkpoint(
                 _SessionFactory(status),
                 f"evt-247-graph-{status}",
                 get_super_agent=AsyncMock(return_value=agent),
@@ -717,6 +718,7 @@ async def test_resume_closed_or_failed_with_graph_is_noop() -> None:
                 lease_acquired=True,
             )
 
+        assert outcome == "skipped"
         execute.assert_not_awaited()
     graph.aget_state.assert_not_called()
 
@@ -925,3 +927,24 @@ async def test_catchup_noop_when_checkpoint_not_halted() -> None:
 
     invoke.assert_not_awaited()
     graph.aupdate_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resume_waiting_approval_returns_skipped_not_ok() -> None:
+    agent = MagicMock()
+    agent._investigation_graph = MagicMock()
+
+    with patch(
+        "app.orchestration.graph_resume.invoke_investigation_graph",
+        new_callable=AsyncMock,
+    ) as invoke:
+        outcome = await resume_investigation_from_checkpoint(
+            _SessionFactory(EventStatus.WAITING_APPROVAL.value),
+            "evt-still-waiting",
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+            lease_acquired=True,
+        )
+
+    assert outcome == "skipped"
+    invoke.assert_not_awaited()

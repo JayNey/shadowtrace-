@@ -359,6 +359,30 @@ async def test_approval_plan_resume_deferred_requeues(
 
 
 @pytest.mark.asyncio
+async def test_approval_plan_resume_skipped_does_not_mark_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(
+        session_factory,
+        status=EventStatus.WAITING_APPROVAL,
+    )
+
+    async def _runner(_eid: str) -> str:
+        return "skipped"
+
+    service = ManualResolutionService(session_factory, resume_runner=_runner)
+    intent = await service.enqueue_approval_plan_resume_intent(event_id)
+    claimed = await service._claim_batch(limit=100)
+    assert intent.intent_id in claimed
+    ok = await service._run_claimed_intent(intent.intent_id)
+    assert ok is False
+    async with session_factory() as session:
+        row = await session.get(orm.GraphResumeIntent, intent.intent_id)
+        assert row is not None
+        assert row.status == GraphResumeIntentStatus.RETRY.value
+
+
+@pytest.mark.asyncio
 async def test_concurrent_resolutions_share_one_active_intent(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

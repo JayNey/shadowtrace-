@@ -934,6 +934,7 @@ class ApprovalEngine:
                         target.value,
                         exc_info=True,
                     )
+                    return "failed"
 
         if self._resume is not None:
             if is_in_investigation_graph(event_id=event_id):
@@ -964,6 +965,12 @@ class ApprovalEngine:
             if resume_result == "deferred":
                 await self._enqueue_approval_plan_resume(event_id)
                 return "deferred"
+            if resume_result == "skipped":
+                logger.warning(
+                    "resume_investigation skipped after plan advance event=%s",
+                    event_id,
+                )
+                return "failed"
             return "ok"
         logger.warning(
             "resume_investigation not injected; approval facts persisted event=%s",

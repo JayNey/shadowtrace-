@@ -1272,6 +1272,30 @@ async def test_live_connector_without_explicit_policy_fails_closed(
 
 
 @pytest.mark.asyncio
+async def test_sangfor_ingest_without_connector_policy_fails_closed(
+    event_service: EventService,
+) -> None:
+    sfx = _sfx()
+    with patch(
+        "app.services.event_service.get_settings",
+        return_value=SimpleNamespace(source_mode="sangfor_xdr"),
+    ):
+        with pytest.raises(ValidationError) as exc_info:
+            await event_service.ingest_source_object(
+                IngestableSource(
+                    reference=_ref(
+                        kind=SourceObjectKind.INCIDENT,
+                        object_id=f"SANGFOR-NULL-{sfx}",
+                        connector_id=f"conn-sangfor-{sfx}",
+                        product="sangfor_xdr",
+                    ),
+                    source_type="sangfor_xdr",
+                )
+            )
+    assert exc_info.value.error_code == "adapter_validation_error"
+
+
+@pytest.mark.asyncio
 async def test_live_connector_with_explicit_not_required_allowed(
     event_service: EventService,
     session_factory: async_sessionmaker[AsyncSession],

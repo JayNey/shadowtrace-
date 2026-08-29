@@ -157,7 +157,6 @@ async def test_resume_or_defer_decision_for_new_event(
         EventStatus.VERIFYING,
         EventStatus.REPORTING,
         EventStatus.CONTAINED,
-        EventStatus.FAILED,
     ],
 )
 @pytest.mark.asyncio

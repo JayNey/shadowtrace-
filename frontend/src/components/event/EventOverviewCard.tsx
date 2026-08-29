@@ -20,7 +20,7 @@ import {
 } from "antd";
 import { useMemo, useState } from "react";
 import type { ClassificationSource, EventDetailResponse, EventType } from "../../types/event";
-import { currentAuthRoles } from "../../config/auth";
+import { currentAuthRoles, hasKnownAuthRoles } from "../../config/auth";
 import { patchEventClassification } from "../../services/eventApi";
 import { ApiError } from "../../services/apiClient";
 import StatusBadge from "./StatusBadge";
@@ -68,7 +68,8 @@ interface Props {
 export default function EventOverviewCard({ detail, onRefresh }: Props) {
   const { event } = detail;
   const roles = currentAuthRoles();
-  const canReclassify = roles.includes("analyst") || roles.includes("admin");
+  const canReclassify =
+    !hasKnownAuthRoles() || roles.includes("analyst") || roles.includes("admin");
   const classificationSource = event.classification_source ?? "source";
   const lowConfidence = isLowConfidenceClassification(event.event_type, classificationSource);
 

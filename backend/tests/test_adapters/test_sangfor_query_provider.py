@@ -142,6 +142,25 @@ async def test_query_account_login_is_unavailable_on_live() -> None:
     assert result.data["degraded"] is True
 
 
+def test_query_account_login_manifest_not_supported() -> None:
+    from unittest.mock import MagicMock
+
+    from app.models.enums import CapabilityState
+
+    adapters = build_sangfor_query_adapters(
+        MagicMock(),
+        AdapterConfig(endpoint="https://xdr.example.invalid", enabled=True),
+    )
+    login = next(item for item in adapters if item._tool_name == "query_account_login")
+    manifest = login.capability_manifest()
+    assert manifest.online is False
+    assert manifest.source_read is CapabilityState.UNSUPPORTED
+    asset = next(item for item in adapters if item._tool_name == "query_asset_info")
+    asset_manifest = asset.capability_manifest()
+    assert asset_manifest.online is True
+    assert asset_manifest.source_read is CapabilityState.SUPPORTED
+
+
 @pytest.mark.asyncio
 async def test_query_edr_process_is_degraded_event_snapshot() -> None:
     async with _signed_client() as client:

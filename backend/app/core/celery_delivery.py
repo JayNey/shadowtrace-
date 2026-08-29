@@ -28,10 +28,12 @@ RedeliverySkipReason = Literal["terminal_event"]
 # Celery states that require manual/event lookup rather than trusting task result.
 _UNKNOWN_LOOKUP_STATES: frozenset[str] = frozenset({"RETRY", "REVOKED"})
 
-# Only CLOSED has no outbound edge — safe to ACK without further graph work.
+# CLOSED has no outbound edge. FAILED resume is a no-op; ACK instead of
+# reporting completed after skip (do not conflate with CONTAINED).
 REDELIVERY_ACK_TERMINAL_STATUSES: frozenset[EventStatus] = frozenset(
     {
         EventStatus.CLOSED,
+        EventStatus.FAILED,
     }
 )
 
@@ -54,7 +56,6 @@ REDELIVERY_RESUME_STATUSES: frozenset[EventStatus] = frozenset(
         EventStatus.REPLANNING,
         EventStatus.REPORTING,
         EventStatus.CONTAINED,
-        EventStatus.FAILED,
     }
 )
 

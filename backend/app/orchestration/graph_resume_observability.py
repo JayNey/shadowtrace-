@@ -217,6 +217,8 @@ async def execute_graph_resume_with_retry(
             )
             if outcome == "deferred":
                 return "deferred"
+            if outcome == "skipped":
+                return "skipped"
             await clear_graph_resume_failure(degraded_flags, event_id)
             return "ok"
         except SoftTimeLimitExceeded:

@@ -54,6 +54,15 @@ def test_verify_agent_has_no_vendor_uri() -> None:
     assert "isolate/list" not in text
 
 
+def test_verify_tools_do_not_import_sangfor_package() -> None:
+    src = (
+        Path(__file__).resolve().parents[2] / "app" / "tools" / "verify" / "_common.py"
+    )
+    text = src.read_text(encoding="utf-8")
+    assert "adapters.sangfor" not in text
+    assert "observe_sangfor_verification" not in text
+
+
 @pytest.mark.asyncio
 async def test_isolate_list_one_row_is_not_confirmed() -> None:
     client = _FakeClient(

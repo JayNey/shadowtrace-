@@ -1611,7 +1611,6 @@ def test_run_analysis_only_eager_executes_task(
         EventStatus.REPLANNING,
         EventStatus.REPORTING,
         EventStatus.CONTAINED,
-        EventStatus.FAILED,
     ],
 )
 @pytest.mark.asyncio
@@ -1672,6 +1671,69 @@ async def test_execute_redelivery_resume_deferred_is_skipped_not_completed(
         "event_id": "evt-redelivery-deferred",
         "reason": "lease_deferred",
     }
+
+
+@pytest.mark.asyncio
+async def test_execute_redelivery_resume_skipped_is_not_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.v1 import deps
+
+    resume_mock = AsyncMock(return_value="skipped")
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.execute_graph_resume_with_retry",
+        resume_mock,
+    )
+    monkeypatch.setattr(deps, "_get_degraded_flags", lambda: object())
+
+    result = await tasks.execute_redelivery_resume(
+        "evt-redelivery-skipped",
+        owner_id="owner-redelivery",
+        event_status=EventStatus.EXECUTING_RESPONSE,
+    )
+
+    assert result == {
+        "status": "skipped",
+        "event_id": "evt-redelivery-skipped",
+        "reason": "resume_skipped",
+    }
+
+
+@pytest.mark.asyncio
+async def test_execute_redelivery_resume_failed_is_terminal_skip_not_completed() -> None:
+    result = await tasks.execute_redelivery_resume(
+        "evt-redelivery-failed",
+        owner_id="owner-redelivery",
+        event_status=EventStatus.FAILED,
+    )
+    assert result == {
+        "status": "skipped",
+        "event_id": "evt-redelivery-failed",
+        "reason": "terminal_event",
+    }
+
+
+@pytest.mark.asyncio
+async def test_finalize_terminal_event_marks_skipped_not_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = MagicMock()
+    service.mark_retry = AsyncMock()
+    service.mark_skipped = AsyncMock()
+    service.mark_terminal = AsyncMock()
+    monkeypatch.setattr("app.db.session.get_session_factory", lambda: object())
+    monkeypatch.setattr(
+        "app.services.investigation_intent_service.InvestigationIntentService",
+        lambda _sf: service,
+    )
+    await tasks._finalize_intent_from_result(
+        "iin-failed",
+        {"status": "skipped", "reason": "terminal_event", "event_id": "evt-failed"},
+        broker_task_id="task-1",
+    )
+    service.mark_skipped.assert_awaited_once()
+    service.mark_retry.assert_not_called()
+    service.mark_terminal.assert_not_called()
 
 
 @pytest.mark.asyncio

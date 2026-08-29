@@ -542,11 +542,14 @@ async def test_enqueue_and_deliver_outbox(
         assert outbox_row.delivery_status == "delivered"
         action_row = await session.get(orm.Action, action_id)
         assert action_row is not None
-        assert action_row.status == ActionStatus.SUCCESS.value
         assert action_row.writeback_status in {
             WritebackStatus.ACCEPTED.value,
             WritebackStatus.CONFIRMED.value,
         }
+        if action_row.writeback_status == WritebackStatus.ACCEPTED.value:
+            assert action_row.status == ActionStatus.EXECUTING.value
+        else:
+            assert action_row.status == ActionStatus.SUCCESS.value
         receipt = await session.scalar(
             select(orm.DispositionReceipt).where(
                 orm.DispositionReceipt.writeback_id == record.writeback_id

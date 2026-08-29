@@ -421,6 +421,9 @@ def route_after_verify(state: InvestigationState) -> str:
         return ROUTE_WRITEBACK
     if state.get("verify_need_action_replan"):
         return ROUTE_REPLAN
+    overall = state.get("verify_overall_status")
+    if overall and overall != VerificationOverallStatus.SUCCESS.value:
+        return ROUTE_MANUAL
     # ISSUE-062 truth table: when all three flags are false → overall success → REPORT.
     # Disposition-only / required policy events use the same REPORTING path;
     # any deferred writeback that still needs waiting is handled via
@@ -446,6 +449,18 @@ def route_after_replan(state: InvestigationState) -> str:
     if state.get("escalated"):
         return ROUTE_REPORT
     return ROUTE_INVESTIGATE  # goes back to planner_node
+
+
+def _execution_summary_ok(summary: Any) -> bool:
+    """True when execute_plan returned a summary without FAILED/UNKNOWN actions."""
+    if summary is None:
+        return False
+    counts = getattr(summary, "action_counts", None)
+    if not isinstance(counts, dict):
+        return True
+    failed = int(counts.get(ActionStatus.FAILED.value, 0) or 0)
+    unknown = int(counts.get(ActionStatus.UNKNOWN.value, 0) or 0)
+    return failed == 0 and unknown == 0
 
 
 def _route_after_response(state: InvestigationState) -> str:
@@ -2035,8 +2050,7 @@ def build_investigation_graph(
                 state["event_id"],
                 plan_revision=plan_revision,
             )
-            # Track whether any IMMEDIATE actions were executed.
-            execution_ok = summary is not None
+            execution_ok = _execution_summary_ok(summary)
         except SoftTimeLimitExceeded:
             # ISSUE-314: side-effect phase soft-limit must reach task owner.
             raise

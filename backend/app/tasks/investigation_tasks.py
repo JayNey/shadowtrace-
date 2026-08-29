@@ -392,6 +392,8 @@ async def execute_redelivery_resume(
             "event_id": event_id,
             "reason": "waiting_approval",
         }
+    if event_status in {EventStatus.CLOSED, EventStatus.FAILED}:
+        return _skipped_delivery_result(event_id, reason="terminal_event")
 
     if analysis_only or event_status not in REDELIVERY_RESUME_STATUSES:
         if analysis_only:
@@ -421,6 +423,8 @@ async def execute_redelivery_resume(
             "event_id": event_id,
             "reason": "lease_deferred",
         }
+    if outcome == "skipped":
+        return _skipped_delivery_result(event_id, reason="resume_skipped")
     if lease_acquired:
         from app.api.v1.deps import get_event_lease
 

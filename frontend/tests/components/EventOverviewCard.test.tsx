@@ -12,6 +12,7 @@ import type { EventDetailResponse } from "../../src/types/event";
 
 const mockPatch = vi.fn();
 const mockCanRoles = vi.fn(() => ["analyst"]);
+const mockKnownRoles = vi.fn(() => true);
 
 vi.mock("../../src/services/eventApi", () => ({
   patchEventClassification: (...args: unknown[]) => mockPatch(...args),
@@ -19,6 +20,7 @@ vi.mock("../../src/services/eventApi", () => ({
 
 vi.mock("../../src/config/auth", () => ({
   currentAuthRoles: () => mockCanRoles(),
+  hasKnownAuthRoles: () => mockKnownRoles(),
 }));
 
 function makeDetail(
@@ -99,6 +101,7 @@ describe("EventOverviewCard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockCanRoles.mockReturnValue(["analyst"]);
+    mockKnownRoles.mockReturnValue(true);
     mockPatch.mockResolvedValue({
       data: {
         event_id: "evt-209",
@@ -124,6 +127,13 @@ describe("EventOverviewCard", () => {
     renderCard(makeDetail({ event_type: "account_anomaly", classification_source: "source" }));
     expect(screen.queryByTestId("reclassify-open")).not.toBeInTheDocument();
     expect(screen.queryByTestId("low-confidence-chip")).not.toBeInTheDocument();
+  });
+
+  it("keeps reclassify visible when roles are unknown", () => {
+    mockKnownRoles.mockReturnValue(false);
+    mockCanRoles.mockReturnValue(["approver"]);
+    renderCard(makeDetail());
+    expect(screen.getByTestId("reclassify-open")).toBeInTheDocument();
   });
 
   it("prefers risk_assessment severity and shows triage chip when divergent", () => {
