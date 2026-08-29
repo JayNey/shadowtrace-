@@ -455,7 +455,7 @@ def _field_exact_hit(needle: str, text: str) -> bool:
 
 
 def _hyphen_bounded(needle: str, hay: str) -> bool:
-    pattern = r"(?<![a-z0-9-])" + re.escape(needle) + r"(?![a-z0-9-])"
+    pattern = r"(?<![a-z0-9._-])" + re.escape(needle) + r"(?![a-z0-9._-])"
     return re.search(pattern, hay) is not None
 
 

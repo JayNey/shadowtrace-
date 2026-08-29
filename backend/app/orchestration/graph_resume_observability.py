@@ -196,6 +196,7 @@ async def execute_graph_resume_with_retry(
     get_workflow_runtime: GetWorkflowRuntime,
     degraded_flags: DegradedFlagService | None,
     lease_acquired: bool = False,
+    owner_id: str | None = None,
 ) -> ResumeStatus:
     """Resume with limited retries; record degraded + audit before raising."""
     if is_in_investigation_graph(event_id=event_id):
@@ -214,6 +215,7 @@ async def execute_graph_resume_with_retry(
                 get_super_agent=get_super_agent,
                 get_workflow_runtime=get_workflow_runtime,
                 lease_acquired=lease_acquired,
+                owner_id=owner_id,
             )
             if outcome == "deferred":
                 return "deferred"

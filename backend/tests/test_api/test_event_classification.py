@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1.deps import reset_deps
 from app.core.config import get_settings
+from app.core.errors import InvestigationInProgressError
 from app.db import models as orm
 from app.main import app
 from app.models.enums import EventStatus, EventType, Severity
@@ -298,6 +299,40 @@ async def test_reinvestigate_true_on_new_starts_pipeline(
     assert scheduled == [event_id]
     assert any("investigation_intent_accepted" in s for s in body["side_effects"])
     assert any("analysis_pipeline_scheduled" in s for s in body["side_effects"])
+
+
+@pytest.mark.asyncio
+async def test_reinvestigate_lease_contention_does_not_claim_started(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_id = await _create_event(event_service, title="Reinvestigate deferred")
+
+    async def _deferred(**kwargs: object) -> str:
+        del kwargs
+        raise InvestigationInProgressError(
+            message="investigation already in progress for this event",
+            error_code="investigation_in_progress",
+            details={"event_id": event_id},
+        )
+
+    monkeypatch.setattr("app.api.v1.events._schedule_investigation", _deferred)
+
+    resp = client.patch(
+        f"/api/v1/events/{event_id}/classification",
+        json={
+            "event_type": "malicious_process",
+            "reason": "reinvestigate while leased",
+            "reinvestigate": True,
+        },
+        headers=_hdr(),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["reinvestigate_requested"] is True
+    assert body["reinvestigate_started"] is False
+    assert any("dispatch_deferred_lease_contention" in s for s in body["side_effects"])
 
 
 @pytest.mark.asyncio

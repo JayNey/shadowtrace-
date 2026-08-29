@@ -121,6 +121,13 @@ export default function EventTodoBar({
       const closed = res.data;
       if (closed.external_unsynced) {
         message.warning("事件已结案，但外部状态尚未同步");
+      } else if (closed.background_side_effects_pending === true) {
+        message.warning("事件已结案，后台副作用仍在处理");
+      } else if (
+        typeof closed.outstanding_side_effect_count === "number" &&
+        closed.outstanding_side_effect_count > 0
+      ) {
+        message.warning("事件已结案，仍有未完成副作用");
       } else if (
         closed.background_side_effects_pending === undefined &&
         closed.outstanding_side_effect_count === undefined

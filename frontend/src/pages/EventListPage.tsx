@@ -93,7 +93,7 @@ export default function EventListPage() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [triggeringIds, setTriggeringIds] = useState<Set<string>>(new Set());
-  const [fullLoopAvailable, setFullLoopAvailable] = useState(true);
+  const [fullLoopAvailable, setFullLoopAvailable] = useState(false);
   const [investigationHealth, setInvestigationHealth] = useState<InvestigationHealthConfig | null>(
     null,
   );
@@ -271,7 +271,7 @@ export default function EventListPage() {
         const res = await getHealth();
         const investigation = res.data.investigation;
         setInvestigationHealth(investigation ?? null);
-        setFullLoopAvailable(investigation?.full_loop_available ?? true);
+        setFullLoopAvailable(investigation?.full_loop_available === true);
         setInvestigationHealthFailed(false);
       } catch {
         setInvestigationHealth(null);
@@ -552,7 +552,13 @@ export default function EventListPage() {
               data-testid="investigate-mode-full-loop"
             >
               分析并生成处置方案
-              {!fullLoopAvailable ? "（当前 ORCHESTRATION_MODE=analysis_only 不可用）" : ""}
+              {!fullLoopAvailable
+                ? investigationHealthFailed
+                  ? "（调查健康检查失败）"
+                  : investigationHealth?.orchestration_mode === "analysis_only"
+                    ? "（当前 ORCHESTRATION_MODE=analysis_only 不可用）"
+                    : "（完整调查暂不可用）"
+                : ""}
             </Radio>
           </Space>
         </Radio.Group>

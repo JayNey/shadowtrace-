@@ -1121,6 +1121,10 @@ async def test_execute_investigation_forwards_lease_acquired_to_agent(
         "app.services.evidence_projection.EvidenceProjection",
         lambda _factory: MagicMock(),
     )
+    monkeypatch.setattr(
+        "app.services.investigation_guidance.record_investigation_workflow_path",
+        AsyncMock(),
+    )
 
     result = await tasks.execute_investigation(
         "evt-lease-acquired",
@@ -1326,10 +1330,12 @@ async def test_execute_analysis_only_runs_pipeline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Success path: pipeline runs, renewal starts, and returns completed."""
-    calls: list[str] = []
+    seen: dict[str, Any] = {}
 
-    async def _fake_run(event_id: str, *, generate_report: bool = True) -> None:
-        calls.append(event_id)
+    async def _fake_run(event_id: str, **kwargs: Any) -> None:
+        seen["event_id"] = event_id
+        seen["generate_report"] = kwargs.get("generate_report")
+        seen["allow_resume"] = kwargs.get("allow_resume")
 
     pipeline = MagicMock()
     pipeline.run = _fake_run
@@ -1343,9 +1349,14 @@ async def test_execute_analysis_only_runs_pipeline(
         "evt-ao-001",
         owner_id="worker-test",
         lease_acquired=True,
+        allow_resume=True,
     )
     assert result == {"status": "completed", "event_id": "evt-ao-001"}
-    assert calls == ["evt-ao-001"]
+    assert seen == {
+        "event_id": "evt-ao-001",
+        "generate_report": True,
+        "allow_resume": True,
+    }
     fake_lease.start_renewal.assert_awaited_once()
 
 
@@ -1362,7 +1373,7 @@ async def test_execute_analysis_only_binds_evidence_projection(
         bound["projection"] = projection
         yield
 
-    async def _fake_run(_event_id: str, *, generate_report: bool = True) -> None:
+    async def _fake_run(_event_id: str, **kwargs: Any) -> None:
         return None
 
     pipeline = MagicMock()
@@ -1451,7 +1462,7 @@ async def test_execute_analysis_only_acquires_lease_when_not_preacquired(
     """When lease_acquired=False, the worker acquires the lease itself."""
     calls: list[str] = []
 
-    async def _fake_run(event_id: str, *, generate_report: bool = True) -> None:
+    async def _fake_run(event_id: str, **kwargs: Any) -> None:
         calls.append(event_id)
 
     pipeline = MagicMock()
@@ -1645,6 +1656,7 @@ async def test_execute_redelivery_resume_calls_checkpoint_resume_with_public_di(
     assert call_kwargs["get_super_agent"] is deps.get_super_agent
     assert call_kwargs["get_workflow_runtime"] is deps.get_workflow_runtime
     assert call_kwargs["degraded_flags"] is degraded_flags
+    assert call_kwargs["owner_id"] == "owner-redelivery"
 
 
 @pytest.mark.asyncio
@@ -1711,6 +1723,74 @@ async def test_execute_redelivery_resume_failed_is_terminal_skip_not_completed()
         "event_id": "evt-redelivery-failed",
         "reason": "terminal_event",
     }
+
+
+@pytest.mark.asyncio
+async def test_execute_redelivery_resume_analysis_only_mid_status_allows_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _fake_ao(event_id: str, **kwargs: Any) -> dict[str, str]:
+        captured.update(kwargs)
+        captured["event_id"] = event_id
+        return {"status": "completed", "event_id": event_id}
+
+    monkeypatch.setattr(tasks, "execute_analysis_only_investigation", _fake_ao)
+    result = await tasks.execute_redelivery_resume(
+        "evt-ao-triaging",
+        owner_id="owner-ao",
+        event_status=EventStatus.TRIAGING,
+        analysis_only=True,
+        lease_acquired=True,
+    )
+    assert result["status"] == "completed"
+    assert captured["allow_resume"] is True
+    assert captured["lease_acquired"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_redelivery_resume_analysis_only_new_does_not_allow_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _fake_ao(event_id: str, **kwargs: Any) -> dict[str, str]:
+        captured.update(kwargs)
+        captured["event_id"] = event_id
+        return {"status": "completed", "event_id": event_id}
+
+    monkeypatch.setattr(tasks, "execute_analysis_only_investigation", _fake_ao)
+    result = await tasks.execute_redelivery_resume(
+        "evt-ao-new",
+        owner_id="owner-ao",
+        event_status=EventStatus.NEW,
+        analysis_only=True,
+        lease_acquired=True,
+    )
+    assert result["status"] == "completed"
+    assert captured["allow_resume"] is False
+
+
+@pytest.mark.asyncio
+async def test_execute_redelivery_resume_waiting_approval_releases_inherited_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease = MagicMock()
+    lease.release = AsyncMock()
+    monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: lease)
+    result = await tasks.execute_redelivery_resume(
+        "evt-wait-lease",
+        owner_id="celery-task-wait",
+        event_status=EventStatus.WAITING_APPROVAL,
+        lease_acquired=True,
+    )
+    assert result == {
+        "status": "skipped",
+        "event_id": "evt-wait-lease",
+        "reason": "waiting_approval",
+    }
+    lease.release.assert_awaited_once_with("evt-wait-lease", "celery-task-wait")
 
 
 @pytest.mark.asyncio

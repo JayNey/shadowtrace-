@@ -741,7 +741,19 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 "target": action.target or "",
             }
             if job is not None:
-                params["parameters"] = {"job_id": job.job_id}
+                parameters: dict[str, Any] = {"job_id": job.job_id}
+                vendor_task = (job.provider_job_id or "").strip()
+                if not vendor_task:
+                    raw = job.raw_result if isinstance(job.raw_result, dict) else {}
+                    for key in ("taskId", "task_id"):
+                        value = raw.get(key)
+                        if isinstance(value, str) and value.strip():
+                            vendor_task = value.strip()
+                            break
+                if vendor_task:
+                    parameters["taskId"] = vendor_task
+                    parameters["task_id"] = vendor_task
+                params["parameters"] = parameters
 
             # Validate that params match the verification tool's contract.
             # Missing required params are caught early with a clear diagnostic

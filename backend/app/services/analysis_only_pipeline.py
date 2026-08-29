@@ -69,6 +69,41 @@ logger = logging.getLogger(__name__)
 
 _PIPELINE_OPERATOR = "AnalysisOnlyPipeline"
 
+# Forward order for analysis-only resume. Not EventStatus enum order (REPORTING
+# sits after FAILED in the enum).
+_ANALYSIS_STAGE_RANK: dict[EventStatus, int] = {
+    EventStatus.NEW: 0,
+    EventStatus.TRIAGING: 1,
+    EventStatus.COLLECTING_EVIDENCE: 2,
+    EventStatus.ANALYZING: 3,
+    EventStatus.SCORING: 4,
+    EventStatus.REPORTING: 5,
+    EventStatus.CLOSED: 6,
+}
+
+
+def _analysis_stage_at_or_past(current: EventStatus | None, target: EventStatus) -> bool:
+    if current is None:
+        return False
+    current_rank = _ANALYSIS_STAGE_RANK.get(current)
+    target_rank = _ANALYSIS_STAGE_RANK.get(target)
+    if current_rank is None or target_rank is None:
+        return False
+    return current_rank >= target_rank
+
+
+def _parse_persisted(model_cls: type[Any], payload: Any) -> Any | None:
+    if payload is None:
+        return None
+    if isinstance(payload, model_cls):
+        return payload
+    if isinstance(payload, dict):
+        try:
+            return model_cls.model_validate(payload)
+        except Exception:  # noqa: BLE001 — corrupt persisted JSON must not abort resume
+            return None
+    return None
+
 
 async def _read_persisted_final_verdict(
     event_service: Any | None,
@@ -193,6 +228,19 @@ async def run_rag_stage(
         return None, True
 
 
+@dataclass
+class _ResumeHydration:
+    triage_result: TriageResult | None = None
+    evidence_output: EvidenceOutput | None = None
+    rag_output: RAGOutput | None = None
+    graph_output: GraphOutput | None = None
+    rag_degraded: bool = False
+    risk_assessment: RiskAssessment | None = None
+    report: InvestigationReport | None = None
+    fp_adjudication: Any = None
+    alert_text: str = ""
+
+
 class AnalysisOnlyPipeline:
     """Temporary sequential analysis pipeline (pre-SuperAgent, ISSUE-054).
 
@@ -263,6 +311,7 @@ class AnalysisOnlyPipeline:
         raw_event_summary: str = "",
         hint_entities: Any | None = None,
         generate_report: bool = True,
+        allow_resume: bool = False,
     ) -> AnalysisOnlyPipelineResult:
         """Execute the analysis-only pipeline for *event_id*.
 
@@ -272,6 +321,10 @@ class AnalysisOnlyPipeline:
         reset contract (ISSUE-052), otherwise a re-investigation of the same
         event would start from stale counters and the in-process ``_states``
         dict would grow unboundedly.
+
+        *allow_resume*: Celery redelivery may continue from a mid-pipeline
+        status using persisted EventContext. First HTTP dispatch stays
+        NEW-only (ISSUE-183 concurrent loser still skips, not FAILED).
         """
         try:
             return await self._run(
@@ -279,6 +332,7 @@ class AnalysisOnlyPipeline:
                 raw_event_summary=raw_event_summary,
                 hint_entities=hint_entities,
                 generate_report=generate_report,
+                allow_resume=allow_resume,
             )
         finally:
             self._reset_convergence_guard(event_id)
@@ -304,6 +358,49 @@ class AnalysisOnlyPipeline:
                 exc_info=True,
             )
 
+    async def _hydrate_resume_outputs(
+        self,
+        event_id: str,
+        *,
+        allow_resume: bool,
+    ) -> _ResumeHydration:
+        if not allow_resume or self._context_store is None:
+            return _ResumeHydration()
+        try:
+            ctx = await self._context_store.get_full_context(event_id)
+        except Exception:
+            logger.debug(
+                "AnalysisOnlyPipeline: resume hydrate failed event=%s",
+                event_id,
+                exc_info=True,
+            )
+            return _ResumeHydration()
+        triage = _parse_persisted(TriageResult, getattr(ctx, "triage_result", None))
+        evidence = _parse_persisted(EvidenceOutput, getattr(ctx, "evidence_output", None))
+        rag = _parse_persisted(RAGOutput, getattr(ctx, "rag_output", None))
+        graph = _parse_persisted(GraphOutput, getattr(ctx, "graph_output", None))
+        risk = _parse_persisted(RiskAssessment, getattr(ctx, "risk_assessment", None))
+        report = getattr(ctx, "report", None)
+        if report is not None and not isinstance(report, InvestigationReport):
+            report = _parse_persisted(InvestigationReport, report)
+        alert_text = ""
+        event_summary = getattr(ctx, "event", None)
+        if event_summary is not None:
+            title = getattr(event_summary, "title", "") or ""
+            description = getattr(event_summary, "description", "") or ""
+            alert_text = f"{title}. {description}".strip(" .")
+        return _ResumeHydration(
+            triage_result=triage,
+            evidence_output=evidence,
+            rag_output=rag,
+            graph_output=graph,
+            rag_degraded=bool(rag.degraded) if rag is not None else False,
+            risk_assessment=risk,
+            report=report,
+            fp_adjudication=getattr(ctx, "fp_adjudication", None),
+            alert_text=alert_text,
+        )
+
     async def _run(
         self,
         event_id: str,
@@ -311,11 +408,13 @@ class AnalysisOnlyPipeline:
         raw_event_summary: str = "",
         hint_entities: Any | None = None,
         generate_report: bool = True,
+        allow_resume: bool = False,
     ) -> AnalysisOnlyPipelineResult:
         """Internal pipeline stages (``run()`` owns guard reset in ``finally``)."""
         assert_analysis_only_mode(self._settings)
 
         event = None
+        stage_cursor: EventStatus | None = None
         if self._event_service is not None and self._state_machine is not None:
             event = await self._event_service.get_event(event_id)
             if event is None:
@@ -323,9 +422,19 @@ class AnalysisOnlyPipeline:
                     f"event {event_id} not found",
                     error_code="event_not_found",
                 )
-            if event.status is not EventStatus.NEW:
+            stage_cursor = event.status
+            if event.status is EventStatus.NEW:
+                pass
+            elif not allow_resume:
                 raise InvalidStateTransitionError(
                     f"AnalysisOnlyPipeline requires event in NEW status, got {event.status.value}",
+                    current=event.status,
+                    target=EventStatus.TRIAGING,
+                    details={"event_id": event_id},
+                )
+            elif event.status in {EventStatus.CLOSED, EventStatus.FAILED}:
+                raise InvalidStateTransitionError(
+                    f"AnalysisOnlyPipeline cannot resume terminal status {event.status.value}",
                     current=event.status,
                     target=EventStatus.TRIAGING,
                     details={"event_id": event_id},
@@ -334,24 +443,45 @@ class AnalysisOnlyPipeline:
             # ISSUE-047 unit tests: event_service tracks verdicts only.
             pass
 
-        await self._transition(
-            event_id,
-            EventStatus.TRIAGING,
-            reason="analysis_pipeline:triage_start",
-        )
+        persisted = await self._hydrate_resume_outputs(event_id, allow_resume=allow_resume)
 
-        if event is not None and self._state_machine is not None and hasattr(event, "title"):
-            triage_result, alert_text = await self._run_triage(event_id, event)
-        else:
-            alert_text = raw_event_summary
-            triage_input = TriageAgentInput(
-                event_id=event_id,
-                raw_event_summary=raw_event_summary,
-                hint_entities=hint_entities if hint_entities is not None else EntitySet(),
+        async def _advance(
+            target: EventStatus,
+            *,
+            context: TransitionContext | None = None,
+            reason: str | None = None,
+        ) -> None:
+            nonlocal stage_cursor
+            if _analysis_stage_at_or_past(stage_cursor, target):
+                return
+            await self._transition(
+                event_id,
+                target,
+                context=context,
+                reason=reason,
             )
-            triage_result = await self._triage.execute(triage_input)
-            if not isinstance(triage_result, TriageResult):
-                raise TypeError("TriageAgent must return TriageResult")
+            stage_cursor = target
+
+        triage_result = persisted.triage_result
+        alert_text = persisted.alert_text or raw_event_summary
+        if triage_result is None:
+            await _advance(
+                EventStatus.TRIAGING,
+                reason="analysis_pipeline:triage_start",
+            )
+
+            if event is not None and self._state_machine is not None and hasattr(event, "title"):
+                triage_result, alert_text = await self._run_triage(event_id, event)
+            else:
+                alert_text = raw_event_summary
+                triage_input = TriageAgentInput(
+                    event_id=event_id,
+                    raw_event_summary=raw_event_summary,
+                    hint_entities=hint_entities if hint_entities is not None else EntitySet(),
+                )
+                triage_result = await self._triage.execute(triage_input)
+                if not isinstance(triage_result, TriageResult):
+                    raise TypeError("TriageAgent must return TriageResult")
 
         logger.info(
             "AnalysisOnlyPipeline triage complete event=%s type=%s severity=%s need_inv=%s",
@@ -364,8 +494,13 @@ class AnalysisOnlyPipeline:
         disposition_policy = DispositionPolicy.NOT_REQUIRED
         if event is not None and hasattr(event, "disposition_policy"):
             disposition_policy = event.disposition_policy
+        already_investigating = _analysis_stage_at_or_past(
+            stage_cursor,
+            EventStatus.COLLECTING_EVIDENCE,
+        )
         if (
-            not triage_result.need_investigation
+            not already_investigating
+            and not triage_result.need_investigation
             and disposition_policy == DispositionPolicy.NOT_REQUIRED
             and event is not None
             and self._state_machine is not None
@@ -378,112 +513,132 @@ class AnalysisOnlyPipeline:
                 generate_report=generate_report,
             )
 
-        await self._transition(
-            event_id,
-            EventStatus.COLLECTING_EVIDENCE,
-            context=TransitionContext(need_investigation=True),
-            reason="analysis_pipeline:evidence_collect",
-        )
-        evidence_output = await self._run_evidence(event_id, triage_result, alert_text=alert_text)
+        evidence_output = persisted.evidence_output
+        fp_adjudication = persisted.fp_adjudication
+        if evidence_output is None:
+            await _advance(
+                EventStatus.COLLECTING_EVIDENCE,
+                context=TransitionContext(need_investigation=True),
+                reason="analysis_pipeline:evidence_collect",
+            )
+            evidence_output = await self._run_evidence(
+                event_id, triage_result, alert_text=alert_text
+            )
+            fp_adjudication = await self._run_fp_adjudication(
+                event_id,
+                triage_result,
+                evidence_output,
+                event=event,
+            )
 
-        fp_adjudication = await self._run_fp_adjudication(
-            event_id,
-            triage_result,
-            evidence_output,
-            event=event,
-        )
+        rag_output = persisted.rag_output
+        graph_output = persisted.graph_output
+        rag_degraded = persisted.rag_degraded
+        if rag_output is None or (graph_output is None and self._graph is not None):
+            await _advance(
+                EventStatus.ANALYZING,
+                reason="analysis_pipeline:evidence_analyze",
+            )
+            source_snapshot = (
+                (await self._context_store.get_full_context(event_id)).source_snapshot
+                if self._context_store is not None and event is None
+                else None
+            )
+            if rag_output is None:
+                rag_task = run_rag_stage(
+                    self._rag,
+                    event_id=event_id,
+                    triage_result=triage_result,
+                    evidence_output=evidence_output,
+                    tenant_id=(
+                        event.creation_source_ref.source_tenant_id if event is not None else None
+                    ),
+                    principal="investigation:analysis_only_pipeline",
+                    source_snapshot=source_snapshot,
+                    occurred_at=getattr(event, "occurred_at", None) if event is not None else None,
+                )
+            else:
+                rag_degraded = bool(rag_output.degraded)
 
-        await self._transition(
-            event_id,
-            EventStatus.ANALYZING,
-            reason="analysis_pipeline:evidence_analyze",
-        )
-        source_snapshot = (
-            (await self._context_store.get_full_context(event_id)).source_snapshot
-            if self._context_store is not None and event is None
-            else None
-        )
-        rag_task = run_rag_stage(
-            self._rag,
-            event_id=event_id,
-            triage_result=triage_result,
-            evidence_output=evidence_output,
-            tenant_id=(event.creation_source_ref.source_tenant_id if event is not None else None),
-            principal="investigation:analysis_only_pipeline",
-            source_snapshot=source_snapshot,
-            occurred_at=getattr(event, "occurred_at", None) if event is not None else None,
-        )
-        rag_result, graph_output = await asyncio.gather(
-            rag_task,
-            self._run_graph(event_id, evidence_output),
-        )
-        rag_output, rag_degraded = rag_result
+                async def _reuse_rag() -> tuple[RAGOutput | None, bool]:
+                    return rag_output, rag_degraded
 
-        await self._transition(
-            event_id,
+                rag_task = _reuse_rag()
+            if graph_output is None:
+                rag_result, graph_output = await asyncio.gather(
+                    rag_task,
+                    self._run_graph(event_id, evidence_output),
+                )
+                rag_output, rag_degraded = rag_result
+            else:
+                rag_output, rag_degraded = await rag_task
+
+        await _advance(
             EventStatus.SCORING,
             reason="analysis_pipeline:risk_score",
         )
-        tenant_id = None
-        if event is not None:
-            tenant_id = getattr(
-                getattr(event, "creation_source_ref", None),
-                "source_tenant_id",
-                None,
-            )
-        if tenant_id is None and self._context_store is not None:
-            source_snapshot = await self._context_store.get(event_id, "source_snapshot")
-            tenant_id = resolve_tenant_id(source_snapshot)
-        if tenant_id:
-            projection_fields: dict[str, Any] = {
-                "triage_result": triage_result.model_dump(mode="json"),
-                "evidence_output": evidence_output.model_dump(mode="json"),
-            }
-            if rag_output is not None:
-                projection_fields["rag_output"] = rag_output.model_dump(mode="json")
-            if graph_output is not None:
-                projection_fields["graph_output"] = graph_output.model_dump(mode="json")
-            risk_assessment = await run_risk_score_with_ledger(
-                self._agent_task_service,
-                self._agent_artifact_service,
-                event_id=event_id,
-                tenant_id=tenant_id,
-                worker_principal="investigation:analysis_only_pipeline",
-                idempotency_key=f"risk-score:{event_id}",
-                content_projection_service=self._content_projection_service,
-                projection_fields=projection_fields,
-                execute=lambda: self._run_risk(
+        risk_assessment = persisted.risk_assessment
+        if risk_assessment is None:
+            tenant_id = None
+            if event is not None:
+                tenant_id = getattr(
+                    getattr(event, "creation_source_ref", None),
+                    "source_tenant_id",
+                    None,
+                )
+            if tenant_id is None and self._context_store is not None:
+                source_snapshot = await self._context_store.get(event_id, "source_snapshot")
+                tenant_id = resolve_tenant_id(source_snapshot)
+            if tenant_id:
+                projection_fields: dict[str, Any] = {
+                    "triage_result": triage_result.model_dump(mode="json"),
+                    "evidence_output": evidence_output.model_dump(mode="json"),
+                }
+                if rag_output is not None:
+                    projection_fields["rag_output"] = rag_output.model_dump(mode="json")
+                if graph_output is not None:
+                    projection_fields["graph_output"] = graph_output.model_dump(mode="json")
+                risk_assessment = await run_risk_score_with_ledger(
+                    self._agent_task_service,
+                    self._agent_artifact_service,
+                    event_id=event_id,
+                    tenant_id=tenant_id,
+                    worker_principal="investigation:analysis_only_pipeline",
+                    idempotency_key=f"risk-score:{event_id}",
+                    content_projection_service=self._content_projection_service,
+                    projection_fields=projection_fields,
+                    execute=lambda: self._run_risk(
+                        event_id,
+                        triage_result,
+                        evidence_output,
+                        rag_output,
+                        graph_output,
+                    ),
+                )
+            else:
+                risk_assessment = await self._run_risk(
                     event_id,
                     triage_result,
                     evidence_output,
                     rag_output,
                     graph_output,
-                ),
-            )
-        else:
-            risk_assessment = await self._run_risk(
-                event_id,
-                triage_result,
-                evidence_output,
-                rag_output,
-                graph_output,
-            )
+                )
         final_verdict = await _read_persisted_final_verdict(self._event_service, event_id)
 
         # ISSUE-242: generate/persist report *before* REPORTING so GET /report
         # cannot race a status=reporting window with no DB row.
-        report: InvestigationReport | None = None
+        report: InvestigationReport | None = persisted.report
         if generate_report:
-            report = await self._generate_and_mark_report(
-                event_id,
-                evidence_output,
-                risk_assessment,
-            )
+            if report is None:
+                report = await self._generate_and_mark_report(
+                    event_id,
+                    evidence_output,
+                    risk_assessment,
+                )
         else:
             await self._persist_report_skipped(event_id)
 
-        await self._transition(
-            event_id,
+        await _advance(
             EventStatus.REPORTING,
             reason=(
                 "analysis_pipeline:report_generate"
@@ -539,8 +694,7 @@ class AnalysisOnlyPipeline:
                 )
 
             await self._persist_analysis_only_complete(event_id)
-            await self._transition(
-                event_id,
+            await _advance(
                 EventStatus.CLOSED,
                 context=TransitionContext(
                     need_investigation=triage_result.need_investigation,

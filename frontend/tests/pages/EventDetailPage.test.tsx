@@ -1295,6 +1295,33 @@ describe("EventDetailPage", () => {
     );
   });
 
+  it("warns when close succeeds with pending side effects", async () => {
+    vi.stubEnv("VITE_AUTH_ROLES", "analyst");
+    const user = userEvent.setup();
+    const detail = makeDetail({ status: "reporting" });
+    detail.next_recommended_action = "close";
+    detail.event.event_context_snapshot = {
+      ...detail.event.event_context_snapshot!,
+      report: { report_id: "evt-70", summary: "ready" },
+    };
+    mockGetEvent.mockResolvedValue({ data: detail });
+    mockCloseEvent.mockResolvedValue({
+      data: {
+        event_id: "evt-70",
+        status: "closed",
+        background_side_effects_pending: true,
+        outstanding_side_effect_count: 1,
+      },
+    });
+
+    renderPage("/events/evt-70");
+    const closeButton = await screen.findByTestId("event-close-button");
+    await waitFor(() => expect(closeButton).not.toBeDisabled());
+    await user.click(closeButton);
+    await user.click(screen.getByRole("button", { name: "确认结案" }));
+    expect(await screen.findByText("事件已结案，后台副作用仍在处理")).toBeInTheDocument();
+  });
+
   it("resolves unknown action from todo bar", async () => {
     vi.stubEnv("VITE_AUTH_ROLES", "admin");
     const user = userEvent.setup();

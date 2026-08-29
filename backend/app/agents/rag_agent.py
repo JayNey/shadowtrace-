@@ -205,6 +205,7 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
         citations = _aggregate_citations(results)
 
         all_failed = all(r is None for r in results.values())
+        degraded_steps = _aggregate_degraded_steps(results)
         plan_payload = _build_knowledge_query_plan_payload(attack_plan, playbook_plan)
         output = RAGOutput(
             attack_techniques=attack_techniques,
@@ -215,7 +216,8 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
             citations=citations,
             knowledge_query_plan=plan_payload,
             retrieval_metrics=_aggregate_retrieval_metrics(results),
-            degraded=all_failed,
+            degraded=all_failed or bool(degraded_steps),
+            degraded_steps=degraded_steps,
         )
 
         # Persist to EventContext.
@@ -671,6 +673,19 @@ def _aggregate_citations(
                 )
             )
     return aggregated
+
+
+def _aggregate_degraded_steps(
+    results: dict[str, RetrievalResult | None],
+) -> list[str]:
+    seen: list[str] = []
+    for result in results.values():
+        if result is None:
+            continue
+        for step in result.degraded_steps:
+            if step and step not in seen:
+                seen.append(step)
+    return seen
 
 
 def _aggregate_retrieval_metrics(

@@ -368,6 +368,30 @@ def _celery_redelivery_retry(
     ) from exc
 
 
+async def _release_inherited_lease(
+    event_id: str,
+    owner_id: str,
+    *,
+    lease_acquired: bool,
+) -> None:
+    """Release a lease this delivery inherited, including early redelivery exits."""
+    if not lease_acquired:
+        return
+    from app.api.v1.deps import get_event_lease
+
+    try:
+        await get_event_lease().release(event_id, owner_id)
+    except SoftTimeLimitExceeded:
+        raise
+    except Exception:
+        logger.warning(
+            "redelivery resume lease release failed event=%s owner=%s",
+            event_id,
+            owner_id,
+            exc_info=True,
+        )
+
+
 async def execute_redelivery_resume(
     event_id: str,
     *,
@@ -387,22 +411,25 @@ async def execute_redelivery_resume(
     from app.orchestration.graph_resume_observability import execute_graph_resume_with_retry
 
     if event_status is EventStatus.WAITING_APPROVAL:
+        await _release_inherited_lease(event_id, owner_id, lease_acquired=lease_acquired)
         return {
             "status": "skipped",
             "event_id": event_id,
             "reason": "waiting_approval",
         }
     if event_status in {EventStatus.CLOSED, EventStatus.FAILED}:
+        await _release_inherited_lease(event_id, owner_id, lease_acquired=lease_acquired)
         return _skipped_delivery_result(event_id, reason="terminal_event")
 
-    if analysis_only or event_status not in REDELIVERY_RESUME_STATUSES:
-        if analysis_only:
-            return await execute_analysis_only_investigation(
-                event_id,
-                generate_report=generate_report,
-                owner_id=owner_id,
-                lease_acquired=lease_acquired,
-            )
+    if analysis_only:
+        return await execute_analysis_only_investigation(
+            event_id,
+            generate_report=generate_report,
+            owner_id=owner_id,
+            lease_acquired=lease_acquired,
+            allow_resume=event_status is not None and event_status is not EventStatus.NEW,
+        )
+    if event_status not in REDELIVERY_RESUME_STATUSES:
         return await execute_investigation(
             event_id,
             owner_id=owner_id,
@@ -416,6 +443,7 @@ async def execute_redelivery_resume(
         get_workflow_runtime=get_workflow_runtime,
         degraded_flags=_get_degraded_flags(),
         lease_acquired=lease_acquired,
+        owner_id=owner_id,
     )
     if outcome == "deferred":
         return {
@@ -425,20 +453,7 @@ async def execute_redelivery_resume(
         }
     if outcome == "skipped":
         return _skipped_delivery_result(event_id, reason="resume_skipped")
-    if lease_acquired:
-        from app.api.v1.deps import get_event_lease
-
-        try:
-            await get_event_lease().release(event_id, owner_id)
-        except SoftTimeLimitExceeded:
-            raise
-        except Exception:
-            logger.warning(
-                "redelivery resume lease release failed event=%s owner=%s",
-                event_id,
-                owner_id,
-                exc_info=True,
-            )
+    await _release_inherited_lease(event_id, owner_id, lease_acquired=lease_acquired)
     return {"status": "completed", "event_id": event_id}
 
 
@@ -841,6 +856,7 @@ async def execute_analysis_only_investigation(
     generate_report: bool = True,
     owner_id: str,
     lease_acquired: bool = False,
+    allow_resume: bool = False,
 ) -> dict[str, str]:
     """Run AnalysisOnlyPipeline (called from Celery worker via ``asyncio.run``).
 
@@ -899,7 +915,11 @@ async def execute_analysis_only_investigation(
         projection = EvidenceProjection(_get_session_factory())
         with bind_evidence_projection(projection):
             await _run_orchestration_with_renewal_watch(
-                pipeline.run(event_id, generate_report=generate_report),
+                pipeline.run(
+                    event_id,
+                    generate_report=generate_report,
+                    allow_resume=allow_resume,
+                ),
                 renewal_failed,
                 event_id=event_id,
             )

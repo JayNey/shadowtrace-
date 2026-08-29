@@ -1220,6 +1220,7 @@ async def update_event_classification(
                             "note:subsequent_response_plan_bumps_plan_revision",
                         ]
                     )
+                    reinvestigate_started = True
                 except InvestigationInProgressError:
                     # Durable intent already committed; lease contention is recoverable.
                     side_effects.extend(
@@ -1229,10 +1230,8 @@ async def update_event_classification(
                             "note:subsequent_response_plan_bumps_plan_revision",
                         ]
                     )
-                reinvestigate_started = True
             else:
                 side_effects.append("investigation_intent_replayed_no_reschedule")
-                reinvestigate_started = True
         else:
             side_effects.append(
                 "reinvestigate_not_started:status_not_new;"

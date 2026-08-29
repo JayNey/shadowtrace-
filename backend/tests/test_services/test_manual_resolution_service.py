@@ -359,6 +359,51 @@ async def test_approval_plan_resume_deferred_requeues(
 
 
 @pytest.mark.asyncio
+async def test_manual_hold_resume_deferred_requeues_without_clearing_hold(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+
+    async def _runner(_eid: str) -> str:
+        return "deferred"
+
+    service = ManualResolutionService(session_factory, resume_runner=_runner)
+    await service.enter_manual_hold(
+        event_id,
+        reason="verify_need_manual_resolution",
+        pending_ids=["wbk-1"],
+        checkpoint_id=event_id,
+        event_status=EventStatus.VERIFYING,
+    )
+    intent = await service.create_or_replay_resume_intent(
+        event_id,
+        resolution_source=RESOLUTION_SOURCE_ACTION_UNKNOWN,
+        subject_kind=SUBJECT_KIND_ACTION,
+        subject_id="act-deferred",
+        resolution="mark_success",
+        principal="analyst-1",
+    )
+    claimed = await service._claim_batch(limit=100)
+    assert intent.intent_id in claimed
+    ok = await service._run_claimed_intent(intent.intent_id)
+    assert ok is False
+    async with session_factory() as session:
+        row = await session.get(orm.GraphResumeIntent, intent.intent_id)
+        assert row is not None
+        assert row.status == GraphResumeIntentStatus.RETRY.value
+        substate = await session.scalar(
+            select(orm.EventContextJournal.value)
+            .where(
+                orm.EventContextJournal.event_id == event_id,
+                orm.EventContextJournal.field_name == "execution_substate",
+            )
+            .order_by(orm.EventContextJournal.version.desc())
+            .limit(1)
+        )
+    assert unwrap_journal_value(substate) == ExecutionSubstate.MANUAL_RESOLUTION.value
+
+
+@pytest.mark.asyncio
 async def test_approval_plan_resume_skipped_does_not_mark_terminal(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

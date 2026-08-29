@@ -119,7 +119,7 @@ def _job_id(params: dict[str, Any]) -> str | None:
 
 def _task_id(params: dict[str, Any]) -> str | None:
     options = _options(params)
-    for key in ("taskId", "task_id", "job_id"):
+    for key in ("taskId", "task_id"):
         value = options.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -182,7 +182,7 @@ async def observe_sangfor_verification(
     if _job_id(params) is None and tool_name != "check_virus_scan_status":
         return unverifiable_result(tool_name, detail="missing_job_id")
     if tool_name == "check_virus_scan_status" and _task_id(params) is None:
-        return unverifiable_result(tool_name, detail="missing_task_id")
+        return unverifiable_result(tool_name, detail="vendor_task_id_missing")
 
     resolved = await _resolve_client(client)
     if resolved is None:
@@ -243,8 +243,14 @@ async def _observe_block_rule(
 ) -> dict[str, Any]:
     tool_name = "check_domain_block_status" if require_dns else "check_ip_block_status"
     job_id = _job_id(params)
-    items = await _fetch_block_items(client, job_id=job_id)
-    matched = [item for item in items if (not require_dns or _rule_type(item) == DNS_RULE_TYPE)]
+    target = _target(params)
+    items = await _fetch_block_items(client, job_id=job_id, target=target)
+    matched = [
+        item
+        for item in items
+        if (not require_dns or _rule_type(item) == DNS_RULE_TYPE)
+        and (job_id or _item_matches_target(item, target))
+    ]
     verified = any(block_status_would_verify(_item_status(item)) for item in matched)
     if verified:
         return _tool_result(
@@ -264,10 +270,36 @@ async def _observe_block_rule(
     )
 
 
+def _item_matches_target(item: dict[str, Any], target: str) -> bool:
+    needle = target.strip().lower()
+    if not needle:
+        return False
+    candidates: list[Any] = [
+        item.get("hostIp"),
+        item.get("ip"),
+        item.get("ipAddress"),
+        item.get("domain"),
+        item.get("domainName"),
+        item.get("dstIp"),
+    ]
+    rule = item.get("blockIpRule")
+    if isinstance(rule, dict):
+        candidates.extend(
+            [
+                rule.get("ip"),
+                rule.get("domain"),
+                rule.get("value"),
+                rule.get("dstIp"),
+            ]
+        )
+    return any(isinstance(value, str) and value.strip().lower() == needle for value in candidates)
+
+
 async def _fetch_block_items(
     client: Any,
     *,
     job_id: str | None,
+    target: str | None = None,
 ) -> list[dict[str, Any]]:
     if job_id:
         detail = await client.request(
@@ -275,15 +307,17 @@ async def _fetch_block_items(
             BLOCK_DETAIL_PATH,
             json_body={"ids": [job_id]},
         )
-        items = _block_items(detail.data)
-        if items:
-            return items
+        return _block_items(detail.data)
+    scoped = (target or "").strip()
+    if not scoped:
+        return []
     listed = await client.request(
         "POST",
         BLOCK_LIST_PATH,
         json_body={
             "page": 1,
             "pageSize": _LIST_PAGE_SIZE,
+            "hostIp": scoped,
         },
     )
     return _block_items(listed.data)
@@ -291,7 +325,11 @@ async def _fetch_block_items(
 
 async def _observe_virus_scan(client: Any, params: dict[str, Any]) -> dict[str, Any]:
     task_id = _task_id(params)
-    assert task_id is not None
+    if task_id is None:
+        return unverifiable_result(
+            "check_virus_scan_status",
+            detail="vendor_task_id_missing",
+        )
     result = await client.request(
         "GET",
         VIRUS_SCAN_STATUS_PATH,
