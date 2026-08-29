@@ -12,6 +12,7 @@ from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
     ActionLevel,
+    ActionStatus,
     DispositionPolicy,
     EventType,
     ExecutionOwner,
@@ -117,6 +118,21 @@ def _action(**overrides: object) -> Action:
 def test_response_action_requires_single_owner() -> None:
     with pytest.raises(ValidationError):
         _action(execution_owner=None)
+
+
+def test_overlay_gap_isolate_may_persist_ownerless() -> None:
+    action = _action(
+        tool_name="isolate_host",
+        action_name="isolate host",
+        execution_owner=None,
+        writeback_required=True,
+        writeback_applicable=False,
+        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+    )
+    assert action.execution_owner is None
+    assert action.writeback_applicable is False
+    assert action.writeback_readiness is WritebackReadiness.NOT_REQUIRED
+    assert action.status is ActionStatus.PENDING
 
 
 def test_system_action_forbids_owner_and_writeback() -> None:

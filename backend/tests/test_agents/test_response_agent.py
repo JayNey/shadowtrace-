@@ -2242,6 +2242,21 @@ def test_expand_rule_candidates_block_ip_data_exfil_high_excludes_internal() -> 
     assert isolate_targets == {"WKS-DATA-031", "SRV-DB-STG-02"}
 
 
+def test_expand_rule_candidates_lateral_block_ip_includes_internal_dst() -> None:
+    entities = _exfil_entity_set()
+    rule_actions = get_rule_actions(EventType.LATERAL_MOVEMENT, Severity.HIGH)
+    candidates = expand_rule_candidates(
+        rule_actions,
+        entities,
+        include_internal_ip=True,
+    )
+    block_targets = {item.target for item in candidates if item.tool_name == "block_ip"}
+    assert "10.44.12.31" in block_targets
+    assert "10.44.20.88" in block_targets
+    assert "198.51.100.77" in block_targets
+    assert "198.51.100.44" not in block_targets
+
+
 @pytest.mark.asyncio
 async def test_rule_fallback_data_exfil_high_block_ip_external_dest_only() -> None:
     """ISSUE-339: agent.execute rule fallback must not emit RFC1918 or VPN src block_ip."""

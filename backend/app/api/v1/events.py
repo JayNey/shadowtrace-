@@ -1462,7 +1462,9 @@ async def set_event_final_verdict(
     )
     resume_status: Literal["queued", "not_held", "skipped"] = "skipped"
     if body.resume:
-        if guidance.execution_substate is ExecutionSubstate.MANUAL_RESOLUTION:
+        # Journal is authoritative for MANUAL_RESOLUTION. Snapshot guidance can
+        # lag a fast Verify pass, which would skip resume and freeze CLOSED.
+        try:
             intent = await manual_resolution.create_or_replay_resume_intent(
                 event_id,
                 resolution_source=RESOLUTION_SOURCE_ANALYST_VERDICT,
@@ -1479,7 +1481,10 @@ async def set_event_final_verdict(
                 trigger="analyst_final_verdict",
             )
             resume_status = "queued"
-        else:
+        except ValidationError as exc:
+            held_missing = "MANUAL_RESOLUTION" in str(exc) or "manual hold" in str(exc).lower()
+            if not held_missing:
+                raise
             resume_status = "not_held"
     return s.EventFinalVerdictResponse(
         event_id=event.event_id,

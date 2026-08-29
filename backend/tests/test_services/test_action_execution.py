@@ -458,6 +458,65 @@ async def test_empty_immediate_transitions_to_verifying(
 
 
 @pytest.mark.asyncio
+async def test_ownerless_isolate_not_claimable_and_execute_stays_approved(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    owned = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(
+            event_id=event_id,
+            execution_owner=ExecutionOwner.DIRECT_TOOL,
+            writeback_applicable=False,
+            writeback_required=True,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            disposition_source_ref=None,
+        ),
+    )
+    gap = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(
+            event_id=event_id,
+            tool_name="isolate_host",
+            action_name="isolate host",
+            action_level=ActionLevel.L3,
+            target_type="host",
+            target="PC-FIN-023",
+            execution_owner=None,
+            writeback_required=True,
+            writeback_applicable=False,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            disposition_source_ref=None,
+        ),
+    )
+    claimable = await execution_service._load_claimable_actions(event_id, 1)
+    ids = {item.action_id for item in claimable}
+    assert owned.action_id in ids
+    assert gap.action_id not in ids
+
+    executed = await execution_service.execute_action(gap.action_id)
+    assert executed.status is ActionStatus.APPROVED
+    assert executed.execution_owner is None
+    async with session_factory() as session:
+        jobs = (
+            await session.scalars(
+                select(orm.ActionExecutionJob).where(
+                    orm.ActionExecutionJob.action_id == gap.action_id
+                )
+            )
+        ).all()
+        assert jobs == []
+        row = await session.get(orm.Action, gap.action_id)
+        assert row is not None
+        assert row.status == ActionStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
 async def test_execute_plan_rejected_when_live_action_execution_frozen(
     execution_service: ActionExecutionService,
     monkeypatch: pytest.MonkeyPatch,
@@ -1524,3 +1583,46 @@ async def test_execute_plan_soft_limit_reraises_and_skips_outbox() -> None:
 
     svc._sync.process_ready_outboxes.assert_not_awaited()
     svc._build_summary.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_action_ownerless_does_not_claim_or_succeed() -> None:
+    from unittest.mock import AsyncMock
+
+    from app.models.action import Action
+    from app.models.enums import ActionCategory, ActionLevel, WritebackReadiness
+
+    svc = ActionExecutionService.__new__(ActionExecutionService)
+    action = Action.model_validate(
+        {
+            "action_id": "act-ownerless-1",
+            "event_id": "evt-ownerless-1",
+            "plan_revision": 1,
+            "action_fingerprint": "fp-ownerless-1",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "isolate host",
+            "tool_name": "isolate_host",
+            "action_level": ActionLevel.L3,
+            "execution_owner": None,
+            "status": ActionStatus.APPROVED,
+            "target_type": "host",
+            "target": "PC-FIN-023",
+            "writeback_required": True,
+            "writeback_applicable": False,
+            "writeback_readiness": WritebackReadiness.NOT_REQUIRED,
+        }
+    )
+    svc._load_action = AsyncMock(return_value=action)
+    svc._claim_action = AsyncMock()
+    svc._execute_xdr_managed = AsyncMock()
+    svc._execute_direct_tool = AsyncMock()
+    svc._fail_executing_action = AsyncMock()
+
+    result = await ActionExecutionService.execute_action(svc, action.action_id)
+
+    assert result.status is ActionStatus.APPROVED
+    assert result.execution_owner is None
+    svc._claim_action.assert_not_awaited()
+    svc._execute_xdr_managed.assert_not_awaited()
+    svc._execute_direct_tool.assert_not_awaited()
+    svc._fail_executing_action.assert_not_awaited()

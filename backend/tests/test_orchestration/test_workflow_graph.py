@@ -24,6 +24,7 @@ from app.models.agent_io import (
     GraphSummaryFeature,
     PlanBudget,
     PlanStep,
+    RAGOutput,
     ReportAgentInput,
     ReportPhaseStatus,
     ResponsePlan,
@@ -1042,8 +1043,56 @@ async def test_optional_rag_is_between_evidence_and_risk() -> None:
     edges = {(edge.source, edge.target) for edge in graph_view.edges}
     assert ("evidence_node", NODE_FP_ADJUDICATION) in edges
     assert (NODE_FP_ADJUDICATION, NODE_RAG) in edges
-    assert (NODE_RAG, NODE_GRAPH) in edges
+    assert (NODE_FP_ADJUDICATION, NODE_GRAPH) in edges
+    assert (NODE_RAG, NODE_RISK) in edges
     assert (NODE_GRAPH, NODE_RISK) in edges
+    assert (NODE_RAG, NODE_GRAPH) not in edges
+
+
+@pytest.mark.asyncio
+async def test_rag_and_graph_fan_in_both_reach_risk() -> None:
+    """Parallel RAG∥Graph must both land on RiskAgentInput (not last-write-wins)."""
+    rag_stub = StubAgent(RAGOutput())
+    graph_stub = StubAgent(
+        GraphOutput(
+            summary=GraphSummary(
+                features=[
+                    GraphSummaryFeature(
+                        feature_id="attack_path_0",
+                        feature_kind="attack_path",
+                        score_hint=60.0,
+                        evidence_ids=["evd-00000001"],
+                        provenance="graph_path",
+                    )
+                ]
+            )
+        )
+    )
+    risk_stub = StubAgent(
+        RiskAssessment(
+            risk_score=80,
+            severity=Severity.HIGH,
+            confidence=0.9,
+            scoring_mode=ScoringMode.RULE_ONLY,
+        )
+    )
+    agents = _agents()
+    agents["rag_agent"] = rag_stub
+    agents["graph_agent"] = graph_stub
+    agents["risk_agent"] = risk_stub
+    final = await build_investigation_graph(agents, _services()).ainvoke(
+        _base_state(defer_response_execution=True),
+        {"configurable": {"thread_id": "evt-rag-graph-parallel"}},
+    )
+    assert len(rag_stub.calls) == 1
+    assert len(graph_stub.calls) == 1
+    assert len(risk_stub.calls) == 1
+    assert risk_stub.calls[0].rag_output is not None
+    assert risk_stub.calls[0].graph_output is not None
+    assert NODE_RAG in final["node_trace"]
+    assert NODE_GRAPH in final["node_trace"]
+    assert final["node_trace"].index(NODE_RISK) > final["node_trace"].index(NODE_RAG)
+    assert final["node_trace"].index(NODE_RISK) > final["node_trace"].index(NODE_GRAPH)
 
 
 @pytest.mark.asyncio
@@ -1889,6 +1938,52 @@ async def test_approval_wait_node_skips_waiting_substate_when_already_executing(
     assert state["execution_substate"] == ExecutionSubstate.NONE.value
     assert state["needs_approval_wait"] is False
     assert ExecutionSubstate.WAITING_APPROVAL not in runtime.substates
+    assert ExecutionSubstate.NONE in runtime.substates
+
+
+@pytest.mark.asyncio
+async def test_approval_node_enters_execution_when_engine_already_advanced() -> None:
+    """L0/L1-only: plan_fully_decided may set EXECUTING_RESPONSE before this node."""
+
+    class _StrictRuntime(FakeRuntime):
+        async def set_execution_substate(
+            self,
+            event_id: str,
+            substate: ExecutionSubstate,
+            *,
+            event_status: EventStatus,
+        ) -> None:
+            if event_status is not EventStatus.EXECUTING_RESPONSE:
+                raise ValidationError(
+                    "caller EventStatus does not match authoritative state",
+                    details={
+                        "caller_status": event_status.value,
+                        "authoritative_status": EventStatus.EXECUTING_RESPONSE.value,
+                    },
+                )
+            await super().set_execution_substate(
+                event_id, substate, event_status=event_status
+            )
+
+    runtime = _StrictRuntime()
+    machine = FakeStateMachine(status=EventStatus.WAITING_APPROVAL)
+    services = _services(machine, runtime=runtime)
+    services["session_factory"] = _ScalarStatusSessionFactory(
+        EventStatus.EXECUTING_RESPONSE.value
+    )
+    services["approval_engine"] = FakeApprovalEngine(needs_wait=False, evaluated_count=2)
+    node = build_investigation_graph(_agents(), services).nodes[NODE_APPROVAL]
+    result = await node.ainvoke(
+        _base_state(
+            event_id="evt-l0-already-exec",
+            event_status=EventStatus.WAITING_APPROVAL.value,
+        )
+    )
+    state = result if isinstance(result, dict) else getattr(result, "values", result)
+    assert state["event_status"] == EventStatus.EXECUTING_RESPONSE.value
+    assert state["execution_substate"] == ExecutionSubstate.NONE.value
+    assert state["needs_approval_wait"] is False
+    assert machine.transitions == []
     assert ExecutionSubstate.NONE in runtime.substates
 
 

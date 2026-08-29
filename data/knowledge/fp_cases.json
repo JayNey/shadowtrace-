@@ -1,9 +1,9 @@
 [
   {
     "case_id": "case-00000001",
-    "pattern_summary": "运维账号在变更窗口内批量登录跳板机执行自动化改密脚本",
-    "alert_signature": "Bulk login by ops account during change window from jump host",
-    "entity_pattern": "account=ops-change-bot type=service_account; host=PC-OPS-JUMP-01 role=jump_host; behavior=bulk_login_in_window",
+    "pattern_summary": "account_anomaly valid accounts: 运维账号在变更窗口内批量登录跳板机执行自动化改密脚本",
+    "alert_signature": "Bulk login by ops-change-bot during change window from PC-OPS-JUMP-01",
+    "entity_pattern": "account=ops-change-bot type=service_account; host=PC-OPS-JUMP-01 role=jump_host; behavior=bulk_login_in_window; event_type=account_anomaly valid accounts change window",
     "fp_reason": "运维团队在已审批变更窗口内执行的合规批量改密操作，登录模式与变更工单时间窗口完全吻合",
     "confirmed_by": "security_admin",
     "confirmed_at": "2024-03-15T10:30:00Z"

@@ -49,6 +49,22 @@ def test_high_risk_confirmed_threat() -> None:
     assert resolver.resolve(_assessment(69)) is FinalVerdict.NONE
 
 
+def test_near_threshold_llm_confidence_confirms_threat() -> None:
+    resolver = VerdictResolver()
+    assessment = RiskAssessment(
+        risk_score=63,
+        severity=Severity.MEDIUM,
+        confidence=0.82,
+        scoring_mode=ScoringMode.LLM_AND_RULE,
+    )
+    assert resolver.resolve(assessment) is FinalVerdict.CONFIRMED_THREAT
+
+
+def test_near_threshold_rule_only_stays_none() -> None:
+    resolver = VerdictResolver()
+    assert resolver.resolve(_assessment(63)) is FinalVerdict.NONE
+
+
 def test_medium_fp_with_high_risk_is_possible_false_positive() -> None:
     """Medium FP signal wins over confirmed-threat score (fixed priority order)."""
     resolver = VerdictResolver()

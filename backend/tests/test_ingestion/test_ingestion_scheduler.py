@@ -133,6 +133,31 @@ async def test_run_once_skips_non_mock_source_modes(
 
 
 @pytest.mark.asyncio
+async def test_run_once_does_not_skip_sangfor_source_mode(
+    session_factory: async_sessionmaker[AsyncSession],
+    ingestion_event_service: EventService,
+) -> None:
+    suffix = _suffix()
+    connector_id = f"conn-s4-{suffix}"
+    base = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+    incident = _incident(f"INC-S4-{suffix}", connector_id, updated_at=base)
+    adapter = FakePagedAdapter(
+        f"adapter-s4-{suffix}",
+        _multi_kind_pages(incident_items=[incident], server_time=base, connector_id=connector_id),
+    )
+    scheduler = _scheduler(
+        session_factory=session_factory,
+        event_service=ingestion_event_service,
+        settings=_scheduler_settings(source_mode="sangfor_xdr", simulation_enabled=False),
+    )
+    with patch.object(scheduler, "_build_source_adapter", return_value=adapter):
+        result = await scheduler.run_once()
+    assert result.status == "completed"
+    assert result.summary is not None
+    assert result.summary.accepted == 1
+
+
+@pytest.mark.asyncio
 async def test_run_once_accepts_new_incident(
     session_factory: async_sessionmaker[AsyncSession],
     ingestion_event_service: EventService,
@@ -152,7 +177,7 @@ async def test_run_once_accepts_new_incident(
         settings=settings,
     )
 
-    with patch.object(scheduler, "_build_mock_adapter", return_value=adapter):
+    with patch.object(scheduler, "_build_source_adapter", return_value=adapter):
         result = await scheduler.run_once()
 
     assert result.status == "completed"
@@ -192,7 +217,7 @@ async def test_run_once_completed_with_degraded_summary_when_adapter_offline(
         settings=_scheduler_settings(),
     )
 
-    with patch.object(scheduler, "_build_mock_adapter", return_value=adapter):
+    with patch.object(scheduler, "_build_source_adapter", return_value=adapter):
         result = await scheduler.run_once()
 
     assert result.status == "completed"
@@ -221,7 +246,7 @@ async def test_run_once_second_poll_accepted_zero_without_new_data(
         settings=settings,
     )
 
-    with patch.object(scheduler, "_build_mock_adapter", return_value=adapter):
+    with patch.object(scheduler, "_build_source_adapter", return_value=adapter):
         first = await scheduler.run_once()
         second = await scheduler.run_once()
 
@@ -252,10 +277,10 @@ async def test_run_once_replay_same_incident_counts_duplicate(
         settings=settings,
     )
 
-    with patch.object(scheduler, "_build_mock_adapter", return_value=adapter):
+    with patch.object(scheduler, "_build_source_adapter", return_value=adapter):
         await scheduler.run_once()
         replay = FakePagedAdapter(f"adapter-dup-{suffix}", pages)
-        with patch.object(scheduler, "_build_mock_adapter", return_value=replay):
+        with patch.object(scheduler, "_build_source_adapter", return_value=replay):
             result = await scheduler.run_once()
 
     assert result.summary is not None
@@ -307,7 +332,7 @@ async def test_run_once_releases_lock_after_poll_failure(
     )
     lock_key = ingestion_poll_advisory_lock_key()
 
-    with patch.object(scheduler, "_build_mock_adapter", return_value=adapter):
+    with patch.object(scheduler, "_build_source_adapter", return_value=adapter):
         with patch.object(SourceIngester, "poll", side_effect=RuntimeError("poll failed")):
             result = await scheduler.run_once()
 
@@ -343,7 +368,7 @@ async def test_run_once_poll_failure_preserves_watermark(
         settings=settings,
     )
 
-    with patch.object(scheduler, "_build_mock_adapter", return_value=adapter):
+    with patch.object(scheduler, "_build_source_adapter", return_value=adapter):
         first = await scheduler.run_once()
     assert first.status == "completed"
     assert first.summary is not None and first.summary.accepted == 1
@@ -356,7 +381,7 @@ async def test_run_once_poll_failure_preserves_watermark(
     assert checkpoint_before is not None
     watermark_before = checkpoint_before.watermark
 
-    with patch.object(scheduler, "_build_mock_adapter", return_value=adapter):
+    with patch.object(scheduler, "_build_source_adapter", return_value=adapter):
         with patch.object(SourceIngester, "poll", side_effect=RuntimeError("poll failed")):
             failed = await scheduler.run_once()
 
@@ -391,7 +416,7 @@ async def test_run_once_closes_adapter_on_success(
         settings=_scheduler_settings(),
     )
 
-    with patch.object(scheduler, "_build_mock_adapter", return_value=adapter):
+    with patch.object(scheduler, "_build_source_adapter", return_value=adapter):
         result = await scheduler.run_once()
 
     assert result.status == "completed"
@@ -417,7 +442,7 @@ async def test_run_once_closes_adapter_on_poll_failure(
         settings=_scheduler_settings(),
     )
 
-    with patch.object(scheduler, "_build_mock_adapter", return_value=adapter):
+    with patch.object(scheduler, "_build_source_adapter", return_value=adapter):
         with patch.object(SourceIngester, "poll", side_effect=RuntimeError("poll failed")):
             result = await scheduler.run_once()
 
@@ -447,7 +472,7 @@ async def test_run_once_records_redis_stats(
         redis_client=redis_client,
     )
 
-    with patch.object(scheduler, "_build_mock_adapter", return_value=adapter):
+    with patch.object(scheduler, "_build_source_adapter", return_value=adapter):
         await scheduler.run_once()
 
     raw = redis_client.get_client()
@@ -580,7 +605,7 @@ async def test_scheduler_e2e_mock_xdr_incident_visible(
             event_service=ingestion_event_service,
             settings=_scheduler_settings(),
         )
-        with patch.object(scheduler, "_build_mock_adapter", return_value=adapter):
+        with patch.object(scheduler, "_build_source_adapter", return_value=adapter):
             result = await scheduler.run_once()
 
     assert result.status == "completed"

@@ -35,6 +35,10 @@ from app.models.source import SourceAlert, SourceAsset, SourceIncident, SourceLo
 # RFC5737 documentation range only.
 DOC_IP = "198.51.100.55"
 DOC_DOMAIN = "beacon-example.test"
+# Lateral-movement second host (pack currently had a single jump box).
+LATERAL_PIVOT_HOST = "SRV-CORE-002"
+LATERAL_JUMP_IP = "10.60.1.10"
+LATERAL_PIVOT_IP = "10.60.1.20"
 
 
 @dataclass(frozen=True)
@@ -74,7 +78,13 @@ HOST_COMPROMISE_SPEC = SystemScenarioSpec(
     risk_score=78,
     risk_min=70,
     risk_max=95,
-    allowed_actions=("isolate_host", "block_ip", "create_ticket", "notify_security_team"),
+    allowed_actions=(
+        "isolate_host",
+        "scan_host_for_virus",
+        "block_ip",
+        "create_ticket",
+        "notify_security_team",
+    ),
     incident_id="770011",
     alert_id="aabbccdd-0011-4000-8000-000000000011",
     asset_id="asset_host_compromise_007_long",
@@ -96,7 +106,13 @@ MALICIOUS_PROCESS_SPEC = SystemScenarioSpec(
     risk_score=76,
     risk_min=70,
     risk_max=95,
-    allowed_actions=("block_process", "quarantine_file", "isolate_host", "create_ticket"),
+    allowed_actions=(
+        "block_process",
+        "query_edr_process",
+        "quarantine_file",
+        "isolate_host",
+        "create_ticket",
+    ),
     incident_id="770012",
     alert_id="aabbccdd-0012-4000-8000-000000000012",
     asset_id="120012",
@@ -115,7 +131,7 @@ INSIDER_PRIVILEGE_ABUSE_SPEC = SystemScenarioSpec(
     disposition_policy=DispositionPolicy.REQUIRED,
     expected_verdict=FinalVerdict.CONFIRMED_THREAT,
     expected_severity=Severity.HIGH,
-    risk_score=74,
+    risk_score=85,
     risk_min=65,
     risk_max=95,
     allowed_actions=("disable_account", "force_logout", "create_ticket", "notify_security_team"),
@@ -241,17 +257,39 @@ def build_system_scenario(
         updated_at=base,
         object_type="endpoint",
     )
+    primary_ip = LATERAL_JUMP_IP if spec.scenario_id == "lateral_movement" else "10.60.1.10"
     assets = [
         SourceAsset(
             reference=asset_ref,
             numeric_asset_id=spec.asset_id[:8],
             hostname=spec.hostname,
-            ip="10.60.1.10",
+            ip=primary_ip,
             owner=spec.account,
             agent_status="online",
             asset_group="system",
         )
     ]
+    if spec.scenario_id == "lateral_movement":
+        pivot_asset_id = f"{spec.asset_id}-core"
+        pivot_ref = make_ref(
+            SourceObjectKind.ASSET,
+            pivot_asset_id,
+            connector_id=conn_disp.connector_id,
+            status_raw="managed",
+            updated_at=base,
+            object_type="endpoint",
+        )
+        assets.append(
+            SourceAsset(
+                reference=pivot_ref,
+                numeric_asset_id=pivot_asset_id[:8],
+                hostname=LATERAL_PIVOT_HOST,
+                ip=LATERAL_PIVOT_IP,
+                owner=spec.account,
+                agent_status="online",
+                asset_group="system",
+            )
+        )
     if selected_variant is ScenarioVariant.AGENT_NOT_INSTALLED:
         no_agent_ref = make_ref(
             SourceObjectKind.ASSET,
@@ -295,6 +333,15 @@ def build_system_scenario(
         status_raw="indexed",
         updated_at=base,
     )
+    log_normalized: dict[str, Any] = {
+        "hostname": spec.hostname,
+        "account": spec.account,
+        "process": proc,
+        "channel": "endpoint",
+    }
+    log_dst_ip = LATERAL_PIVOT_IP if spec.scenario_id == "lateral_movement" else None
+    if log_dst_ip:
+        log_normalized["dst_ip"] = log_dst_ip
     logs = [
         SourceLog(
             reference=log_ref,
@@ -302,12 +349,8 @@ def build_system_scenario(
             category="process",
             logged_at=base,
             src_ip="10.60.1.10",
-            normalized={
-                "hostname": spec.hostname,
-                "account": spec.account,
-                "process": proc,
-                "channel": "endpoint",
-            },
+            dst_ip=log_dst_ip,
+            normalized=log_normalized,
             raw_payload={"hostname": spec.hostname, "account": spec.account},
         )
     ]
@@ -326,17 +369,20 @@ def build_system_scenario(
         status_raw="open",
         updated_at=base,
     )
+    alert_normalized: dict[str, Any] = {
+            "event_type": spec.event_type,
+            "alert_type": spec.event_type,
+            "severity": spec.expected_severity.value,
+            "keyword": spec.keyword,
+        }
+    if spec.scenario_id == "lateral_movement":
+        alert_normalized["dst_ip"] = LATERAL_PIVOT_IP
     alert = SourceAlert(
         reference=alert_ref,
         incident_ref=incident_ref,
         source_ip="10.60.1.10",
         related_log_refs=[log_ref],
-        normalized={
-            "event_type": spec.event_type,
-            "alert_type": spec.event_type,
-            "severity": spec.expected_severity.value,
-            "keyword": spec.keyword,
-        },
+        normalized=alert_normalized,
     )
     incident = SourceIncident(
         reference=incident_ref,
@@ -396,6 +442,8 @@ def build_system_scenario(
 
 
 def _scenario_process_name(scenario_id: str) -> str:
+    if scenario_id == "insider_privilege_abuse":
+        return "net.exe"
     if scenario_id == "host_compromise":
         return "beacon.exe"
     if scenario_id == "malicious_process":
@@ -408,6 +456,7 @@ def _scenario_process_name(scenario_id: str) -> str:
 def _build_timeline(*, spec: SystemScenarioSpec, base: datetime, seed: int) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     proc = _scenario_process_name(spec.scenario_id)
+    src_ip = LATERAL_JUMP_IP if spec.scenario_id == "lateral_movement" else "10.60.1.10"
 
     for i in range(10):
         rows.append(
@@ -418,7 +467,8 @@ def _build_timeline(*, spec: SystemScenarioSpec, base: datetime, seed: int) -> l
                 base_time=base,
                 account=spec.account,
                 event_type="login" if i % 2 == 0 else "auth",
-                src_ip="10.60.1.10",
+                src_ip=src_ip,
+                hostname=spec.hostname,
                 result="success" if i < 8 else "failure",
                 is_key_event=True,
             )
@@ -447,7 +497,7 @@ def _build_timeline(*, spec: SystemScenarioSpec, base: datetime, seed: int) -> l
                 record_id=f"net-{spec.scenario_id}-{seed}-0001",
                 offset_s=120,
                 base_time=base,
-                src_ip="10.60.1.10",
+                src_ip=src_ip,
                 dst_ip=DOC_IP,
                 dst_port=443,
                 bytes_out=120_000 if spec.scenario_id != "other_unclassified" else 2_000,
@@ -514,6 +564,101 @@ def _build_timeline(*, spec: SystemScenarioSpec, base: datetime, seed: int) -> l
             ),
         ]
     )
+    if spec.scenario_id == "insider_privilege_abuse":
+        rows.extend(
+            [
+                event(
+                    channel="identity",
+                    record_id=f"id-priv-{spec.scenario_id}-{seed}-0100",
+                    offset_s=180,
+                    base_time=base,
+                    account=spec.account,
+                    event_type="privilege_escalation",
+                    target_group="Domain Admins",
+                    hostname=spec.hostname,
+                    result="success",
+                    is_key_event=True,
+                ),
+                event(
+                    channel="identity",
+                    record_id=f"id-priv-{spec.scenario_id}-{seed}-0101",
+                    offset_s=190,
+                    base_time=base,
+                    account=spec.account,
+                    event_type="group_add",
+                    target_group="Domain Admins",
+                    hostname=spec.hostname,
+                    result="success",
+                    is_key_event=True,
+                ),
+                event(
+                    channel="endpoint",
+                    record_id=f"ep-priv-{spec.scenario_id}-{seed}-0102",
+                    offset_s=200,
+                    base_time=base,
+                    hostname=spec.hostname,
+                    process=proc,
+                    account=spec.account,
+                    action="privilege_change",
+                    command_line="net localgroup administrators svc-admin-abuse /add",
+                    is_key_event=True,
+                ),
+            ]
+        )
+    if spec.scenario_id == "lateral_movement":
+        rows.extend(
+            [
+                event(
+                    channel="identity",
+                    record_id=f"id-rdp-{spec.scenario_id}-{seed}-0100",
+                    offset_s=210,
+                    base_time=base,
+                    account=spec.account,
+                    event_type="login",
+                    src_ip=LATERAL_JUMP_IP,
+                    hostname=LATERAL_PIVOT_HOST,
+                    protocol="rdp",
+                    result="success",
+                    is_key_event=True,
+                ),
+                event(
+                    channel="endpoint",
+                    record_id=f"ep-rdp-{spec.scenario_id}-{seed}-0101",
+                    offset_s=220,
+                    base_time=base,
+                    hostname=LATERAL_PIVOT_HOST,
+                    process=proc,
+                    account=spec.account,
+                    action="process_create",
+                    src_ip=LATERAL_JUMP_IP,
+                    dst_ip=LATERAL_PIVOT_IP,
+                    is_key_event=True,
+                ),
+                event(
+                    channel="network",
+                    record_id=f"net-rdp-{spec.scenario_id}-{seed}-0102",
+                    offset_s=215,
+                    base_time=base,
+                    src_ip=LATERAL_JUMP_IP,
+                    dst_ip=LATERAL_PIVOT_IP,
+                    dst_port=3389,
+                    bytes_out=48_000,
+                    hostname=spec.hostname,
+                    dst_hostname=LATERAL_PIVOT_HOST,
+                    is_key_event=True,
+                ),
+                event(
+                    channel="asset",
+                    record_id=f"asset-pivot-{spec.scenario_id}-{seed}-0103",
+                    offset_s=0,
+                    base_time=base,
+                    numeric_asset_id=f"{spec.asset_id}-core"[:8],
+                    hostname=LATERAL_PIVOT_HOST,
+                    agent_status="online",
+                    is_key_event=True,
+                ),
+            ]
+        )
     return rows
 
 
@@ -560,6 +705,7 @@ def build_other_unclassified(
 __all__ = [
     "INSIDER_PRIVILEGE_ABUSE_SPEC",
     "LATERAL_MOVEMENT_SPEC",
+    "LATERAL_PIVOT_HOST",
     "HOST_COMPROMISE_SPEC",
     "MALICIOUS_PROCESS_SPEC",
     "OTHER_UNCLASSIFIED_SPEC",

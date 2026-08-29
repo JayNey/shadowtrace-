@@ -333,6 +333,10 @@ def _action_side_effect_blocks_convergence(
 
     job = jobs_by_action.get(action_row.action_id)
 
+    if not (action_row.execution_owner or "").strip():
+        # Overlay gap: owner=None is pending-manual, not an in-flight job gate.
+        return None, policy
+
     if policy is SideEffectConvergencePolicy.EXECUTION_JOB_ONLY:
         if _job_terminal_success(job):
             return None, policy

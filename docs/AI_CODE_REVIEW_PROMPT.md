@@ -6,15 +6,15 @@
 
 1. 目标 **GitHub Issue 全文**（目标 / 文件范围 / 统一命名 / 实现步骤 / 验收标准 / 测试与验证 / 降级策略）
 2. `README.md` 与 `ShadowTrace 工程实施拆解方案.md` **简介第 1–4 节**（命名、状态机、写回语义、目录与 API）
-3. `docs/AI_ISSUE_EXECUTION_PROMPT.md` 中的当前阶段约束（无真实 XDR，Mock 优先）
+3. `docs/AI_ISSUE_EXECUTION_PROMPT.md` 中的当前阶段约束（P0 仍 Mock；Adapter 以挑战杯 OpenAPI 为权威；Agent 禁厂商字符串）
 4. 仓库 `main` 上已有代码与测试（不得无证据假设「别处已实现」）
 若 `main` 上缺少 Issue「文件范围」中的交付物，直接判定 **需求未满足 / Blocker**，不要假装审查不存在的实现。
 
 
-- **没有真实 XDR / 安全 GPT 环境**；厂商接口均为未验证猜测。
-- P0 合格标准是 **MockXDR + MockToolProvider + Mock Disposition** 契约闭环，不是真机联调。
-- 硬编码深信服私有 REST / operation_code、打开 live 开关冒充成功、分析内容经 DispositionAdapter 出站 → 一律按 **Blocker** 或高危 **Should-Fix**。
-- live Adapter 只允许契约、能力 `UNKNOWN`、`writeback_unsupported`、失败转人工；不得静默回退 Mock 后返回成功。
+- **P0 合格标准仍是 MockXDR + MockToolProvider + Mock Disposition** 契约闭环（隔离等功能不减），不是真机联调。Cutover-Ready ≠ 真机验证。
+- 挑战杯 OpenAPI 是 **Adapter** 权威（`contracts/vendor/sangfor_xdr`、`adapters/sangfor`）。按对齐计划改 Adapter **不是** Blocker。
+- Agent 硬编码深信服私有 REST / `dealStatus` / `uuId` / operation_code → **Blocker**。打开 live 开关冒充成功、分析内容经 DispositionAdapter 出站 → 一律按 **Blocker** 或高危 **Should-Fix**。
+- live 静默回退 Mock 后返回成功仍是 **Blocker**。不得声称已对接生产 XDR，也不得把 live 调查 query 写成已完整（Layer 8b 未接线）。
 
 ## 审查原则
 

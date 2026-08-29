@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.adapters.factory import MOCK_TOOL_PROVIDER, disposition_provider_name
 from app.core.config import get_settings, is_mock_tool_mode
 from app.core.errors import EventNotFoundError, InvalidStateTransitionError, ValidationError
 from app.core.event_bus import EventBus
@@ -22,6 +23,7 @@ from app.models.disposition import SourceObjectLocator
 from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
+    ActionLevel,
     ActionStatus,
     EventStatus,
     ExecutionJobStatus,
@@ -213,6 +215,22 @@ class ActionExecutionService:
         # and _assert_precreated_job share the same store as AES Db persistence.
         ensure_executor_job_store(self._executor, self._job_store)
 
+    def _xdr_job_provider_name(self) -> str:
+        return disposition_provider_name(get_settings())
+
+    def _direct_tool_job_provider_name(self, action: Action) -> str:
+        settings = get_settings()
+        if is_mock_tool_mode(settings.tool_mode):
+            return MOCK_TOOL_PROVIDER
+        registry = getattr(self._executor, "registry", None)
+        if registry is None or action.execution_owner is None:
+            raise ValidationError(
+                "live Direct Tool execution requires a ToolRegistry binding",
+                details={"tool_name": action.tool_name},
+            )
+        binding = registry.resolve_binding(action.tool_name, action.execution_owner, [])
+        return binding.provider_name
+
     async def get_actions_by_event(self, event_id: str) -> list[Action]:
         async with self._session_factory() as session:
             rows = (
@@ -263,13 +281,18 @@ class ActionExecutionService:
     async def execute_action(
         self, action_id: str, *, operator: str = _EXECUTION_OPERATOR
     ) -> Action:
+        current = await self._load_action(action_id)
+        if current.execution_owner is None:
+            return current
         claimed = await self._claim_action(action_id)
         await self._sync_execution_substate(
             claimed.event_id,
             ExecutionSubstate.WAITING_EXECUTION,
         )
         try:
-            if claimed.execution_owner is ExecutionOwner.XDR_MANAGED:
+            if claimed.execution_owner is None:
+                await self._restore_approved_ownerless(action_id)
+            elif claimed.execution_owner is ExecutionOwner.XDR_MANAGED:
                 await self._execute_xdr_managed(claimed, operator=operator)
             elif claimed.execution_owner is ExecutionOwner.DIRECT_TOOL:
                 await self._execute_direct_tool(claimed, operator=operator)
@@ -536,7 +559,7 @@ class ActionExecutionService:
                         job_id=job_id,
                         event_id=action.event_id,
                         action_id=action.action_id,
-                        provider_name="mock_xdr",
+                        provider_name=self._xdr_job_provider_name(),
                         idempotency_key=idempotency_key,
                         status=ExecutionJobStatus.RUNNING.value,
                         claimed_by=operator,
@@ -618,7 +641,7 @@ class ActionExecutionService:
                         job_id=job_id,
                         event_id=action.event_id,
                         action_id=action.action_id,
-                        provider_name="mock_tool_provider",
+                        provider_name=self._direct_tool_job_provider_name(action),
                         idempotency_key=idempotency_key,
                         status=ExecutionJobStatus.RUNNING.value,
                         claimed_by=operator,
@@ -807,10 +830,41 @@ class ActionExecutionService:
                                 ActionCategory.ROLLBACK.value,
                             )
                         ),
+                        orm.Action.execution_owner.is_not(None),
                     )
                 )
             ).all()
         return [_action_from_row(row) for row in rows]
+
+    async def _load_action(self, action_id: str) -> Action:
+        async with self._session_factory() as session:
+            row = await session.get(orm.Action, action_id)
+            if row is None:
+                raise EventNotFoundError(
+                    f"action not found: {action_id}",
+                    details={"action_id": action_id},
+                )
+            return _action_from_row(row)
+
+    async def _restore_approved_ownerless(self, action_id: str) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(orm.Action, action_id, with_for_update=True)
+                if row is None:
+                    return
+                current = ActionStatus(row.status)
+                if current is not ActionStatus.EXECUTING:
+                    return
+                validate_action_status_transition(
+                    ActionCategory(row.action_category),
+                    current,
+                    ActionStatus.APPROVED,
+                    action_level=ActionLevel(row.action_level),
+                    has_approval_evidence=True,
+                    lease_expired_reclaim=True,
+                )
+                row.status = ActionStatus.APPROVED.value
+                row.updated_at = datetime.now(UTC)
 
     async def _current_revision(self, event_id: str) -> int:
         async with self._session_factory() as session:

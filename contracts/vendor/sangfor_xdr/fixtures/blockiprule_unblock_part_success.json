@@ -1,0 +1,11 @@
+{
+  "code": "Part Success",
+  "message": "部分成功",
+  "data": {
+    "success": 1,
+    "fail": 1,
+    "errorMessage": "该设备的版本不支持该联动动作，请升级设备",
+    "successIds": ["ok-1"],
+    "failIds": ["fail-1"]
+  }
+}

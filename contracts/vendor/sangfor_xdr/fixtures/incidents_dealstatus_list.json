@@ -1,0 +1,12 @@
+{
+  "code": "Success",
+  "message": "请求成功",
+  "data": {
+    "item": [
+      {
+        "uuId": "incident-wire-001",
+        "dealStatus": 6
+      }
+    ]
+  }
+}

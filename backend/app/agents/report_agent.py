@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -19,7 +20,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app.agents.base import BaseAgent
-from app.agents.prompts.report_prompt import build_report_messages
+from app.agents.prompts.report_prompt import ReportGenerateLLMResponse, build_report_messages
 from app.agents.report_llm_failure import llm_failure_metadata
 from app.agents.report_section_builder import (
     ACTIONS_STATUS_SUMMARY_LABEL,
@@ -114,6 +115,27 @@ _EVIDENCE_LIMITED_MERGE_PREFIXES = (
 )
 _ACTIONS_MERGE_PREFIXES = (f"{ACTIONS_STATUS_SUMMARY_LABEL}:",)
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+_CITATION_TOKEN_RE = re.compile(r"\bcit-[A-Za-z0-9_-]+\b")
+
+
+def _known_citation_ids(rag: dict[str, Any] | None) -> set[str]:
+    if not isinstance(rag, dict):
+        return set()
+    return {
+        str(item.get("citation_id"))
+        for item in (rag.get("citations") or [])
+        if isinstance(item, dict) and item.get("citation_id")
+    }
+
+
+def drop_unknown_citation_tokens(text: str, known: set[str]) -> str:
+    """Remove invented ``cit-`` tokens so OutputGuard citation_present can pass."""
+
+    def _keep(match: re.Match[str]) -> str:
+        token = match.group(0)
+        return token if token in known else ""
+
+    return _CITATION_TOKEN_RE.sub(_keep, text)
 
 
 def _is_llm_timeout_failure(exc: BaseException) -> bool:
@@ -332,6 +354,16 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 )
                 generated_by = GENERATED_BY_TEMPLATE
 
+        known_cites = _known_citation_ids(rag if isinstance(rag, dict) else None)
+        title = drop_unknown_citation_tokens(title, known_cites)
+        summary = drop_unknown_citation_tokens(summary, known_cites)
+        draft_sections = [
+            section.model_copy(
+                update={"content": drop_unknown_citation_tokens(section.content, known_cites)}
+            )
+            for section in draft_sections
+        ]
+
         # Hash canonical body (pre-fingerprint); final markdown includes appendix sha line.
         body_markdown = self._render_markdown(
             title=title,
@@ -482,6 +514,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 source_snapshot=source_snapshot,
             ),
             json_mode=True,
+            response_model=ReportGenerateLLMResponse,
             max_tokens=8192,
             timeout=self.llm_timeout_seconds,
         )

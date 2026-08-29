@@ -1,0 +1,22 @@
+{
+  "code": "Success",
+  "message": "请求成功",
+  "data": {
+    "total": 1,
+    "page": 1,
+    "pageSize": 5,
+    "item": [
+      {
+        "name": "主机进程存在危险行为",
+        "uuId": "incident-wire-001",
+        "description": "fixture incident for Sangfor wire mock",
+        "incidentSeverity": 2,
+        "hostIp": "10.20.30.23",
+        "hostAssetId": 1,
+        "dealStatus": 10,
+        "gptResult": 115,
+        "gptResultDescription": "主机失陷活动"
+      }
+    ]
+  }
+}

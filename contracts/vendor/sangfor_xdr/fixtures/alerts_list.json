@@ -1,0 +1,18 @@
+{
+  "code": "Success",
+  "message": "请求成功",
+  "data": {
+    "total": 1,
+    "page": 1,
+    "pageSize": 100,
+    "item": [
+      {
+        "uuId": "alert-wire-001",
+        "name": "永恒之蓝",
+        "severity": 50,
+        "alertDealStatus": 1,
+        "hostIp": "10.20.30.23"
+      }
+    ]
+  }
+}

@@ -1,0 +1,164 @@
+{
+  "source": "挑战杯物料/OpenAPIDocument/python/authCodeDemo/aksk_py3.py",
+  "note": "Test credentials only. Python header names. Go cross-check is Signature hex, not header key case.",
+  "ak": "test-ak-01xxxxxx",
+  "sk": "test-sk-01-not-prod",
+  "sign_date": "20260428T112837Z",
+  "auth_code": {
+    "hex": "6369642d317c6578616d706c652e636f6d7c636c69656e742d617c5844527c312e302e307c31302e302e302e317c616c6c7c6578747c646573637c37366137316539643663393931346263373631373339383635636537393236657c666631393162626264343766653535396338663464353039303762626133333437656334363136633235386537333838333935653066393732623331323938397c76317c3434337c7461696c",
+    "expected_ak": "test-ak-01xxxxxx",
+    "expected_sk": "test-sk-01-not-prod",
+    "iv": "00000000000000000000000000000000",
+    "ak_ciphertext_hex": "76a71e9d6c9914bc761739865ce7926e",
+    "sk_ciphertext_hex": "ff191bbbd47fe559c8f4d50907bba3347ec4616c258e7388395e0f972b312989",
+    "note": "AES-256-CBC all-zero IV; ciphertext hex has no IV prefix"
+  },
+  "cases": {
+    "post_json_spaces_and_key_order": {
+      "note": "Space stripping + signed-byte sort: same multiset of non-space bytes ⇒ same payload hash",
+      "a": {
+        "method": "POST",
+        "url": "https://xdr.example.com/api/xdr/v1/incidents/list",
+        "params": {},
+        "payload": "{ \"b\": 1, \"a\": 2 }",
+        "canonical_query": "",
+        "payload_hash": "A213E352F8E9804205D3C4B13D56A09A4B5108616A67246E1ADF53AA1A3C2182",
+        "signature": "6B51F9F75D4C3BA7BC94FC253D87D511EE93F3B6F2930B31E7A27E011906A44D",
+        "authorization": "algorithm=HMAC-SHA256, Access=test-ak-01xxxxxx, SignedHeaders=content-type;sdk-content-type;sdk-host;sign-date, Signature=6B51F9F75D4C3BA7BC94FC253D87D511EE93F3B6F2930B31E7A27E011906A44D",
+        "signed_headers": "content-type;sdk-content-type;sdk-host;sign-date"
+      },
+      "b": {
+        "method": "POST",
+        "url": "https://xdr.example.com/api/xdr/v1/incidents/list",
+        "params": {},
+        "payload": "{\"a\":2,\"b\":1}",
+        "canonical_query": "",
+        "payload_hash": "A213E352F8E9804205D3C4B13D56A09A4B5108616A67246E1ADF53AA1A3C2182",
+        "signature": "6B51F9F75D4C3BA7BC94FC253D87D511EE93F3B6F2930B31E7A27E011906A44D",
+        "authorization": "algorithm=HMAC-SHA256, Access=test-ak-01xxxxxx, SignedHeaders=content-type;sdk-content-type;sdk-host;sign-date, Signature=6B51F9F75D4C3BA7BC94FC253D87D511EE93F3B6F2930B31E7A27E011906A44D",
+        "signed_headers": "content-type;sdk-content-type;sdk-host;sign-date"
+      },
+      "c": {
+        "method": "POST",
+        "url": "https://xdr.example.com/api/xdr/v1/incidents/list",
+        "params": {},
+        "payload": "{\"b\":1,\"a\":2}",
+        "canonical_query": "",
+        "payload_hash": "A213E352F8E9804205D3C4B13D56A09A4B5108616A67246E1ADF53AA1A3C2182",
+        "signature": "6B51F9F75D4C3BA7BC94FC253D87D511EE93F3B6F2930B31E7A27E011906A44D",
+        "authorization": "algorithm=HMAC-SHA256, Access=test-ak-01xxxxxx, SignedHeaders=content-type;sdk-content-type;sdk-host;sign-date, Signature=6B51F9F75D4C3BA7BC94FC253D87D511EE93F3B6F2930B31E7A27E011906A44D",
+        "signed_headers": "content-type;sdk-content-type;sdk-host;sign-date"
+      }
+    },
+    "query_equals_percent3d": {
+      "note": "urlencode then %3D→= ; filter=a=b must not stay percent-encoded in canonical query",
+      "method": "GET",
+      "url": "https://xdr.example.com/api/xdr/v1/assets/list",
+      "params": {
+        "filter": "a=b",
+        "z": "1"
+      },
+      "payload": "",
+      "canonical_query": "filter=a=b&z=1",
+      "payload_hash": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "signature": "9E6921C4584B3175FA5363E29EB7DA3621172390D1F85F6FE88515B13CB60E6D",
+      "authorization": "algorithm=HMAC-SHA256, Access=test-ak-01xxxxxx, SignedHeaders=content-type;sdk-content-type;sdk-host;sign-date, Signature=9E6921C4584B3175FA5363E29EB7DA3621172390D1F85F6FE88515B13CB60E6D",
+      "signed_headers": "content-type;sdk-content-type;sdk-host;sign-date"
+    },
+    "params_none_vs_empty": {
+      "none": {
+        "method": "POST",
+        "url": "https://xdr.example.com/api/xdr/v1/incidents/list",
+        "params": null,
+        "payload": "",
+        "canonical_query": "",
+        "payload_hash": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+        "signature": "29C55CB6A6305D8155B6D04D8169467B79B4A264704AA2B3F3E65834E3DD187F",
+        "authorization": "algorithm=HMAC-SHA256, Access=test-ak-01xxxxxx, SignedHeaders=content-type;sdk-content-type;sdk-host;sign-date, Signature=29C55CB6A6305D8155B6D04D8169467B79B4A264704AA2B3F3E65834E3DD187F",
+        "signed_headers": "content-type;sdk-content-type;sdk-host;sign-date"
+      },
+      "empty": {
+        "method": "POST",
+        "url": "https://xdr.example.com/api/xdr/v1/incidents/list",
+        "params": {},
+        "payload": "",
+        "canonical_query": "",
+        "payload_hash": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+        "signature": "29C55CB6A6305D8155B6D04D8169467B79B4A264704AA2B3F3E65834E3DD187F",
+        "authorization": "algorithm=HMAC-SHA256, Access=test-ak-01xxxxxx, SignedHeaders=content-type;sdk-content-type;sdk-host;sign-date, Signature=29C55CB6A6305D8155B6D04D8169467B79B4A264704AA2B3F3E65834E3DD187F",
+        "signed_headers": "content-type;sdk-content-type;sdk-host;sign-date"
+      }
+    },
+    "empty_json_object_vs_payload": {
+      "no_payload": {
+        "method": "POST",
+        "url": "https://xdr.example.com/api/xdr/v1/incidents/list",
+        "params": {},
+        "payload": "",
+        "canonical_query": "",
+        "payload_hash": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+        "signature": "29C55CB6A6305D8155B6D04D8169467B79B4A264704AA2B3F3E65834E3DD187F",
+        "authorization": "algorithm=HMAC-SHA256, Access=test-ak-01xxxxxx, SignedHeaders=content-type;sdk-content-type;sdk-host;sign-date, Signature=29C55CB6A6305D8155B6D04D8169467B79B4A264704AA2B3F3E65834E3DD187F",
+        "signed_headers": "content-type;sdk-content-type;sdk-host;sign-date"
+      },
+      "empty_object": {
+        "method": "POST",
+        "url": "https://xdr.example.com/api/xdr/v1/incidents/list",
+        "params": {},
+        "payload": "",
+        "canonical_query": "",
+        "payload_hash": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+        "signature": "29C55CB6A6305D8155B6D04D8169467B79B4A264704AA2B3F3E65834E3DD187F",
+        "authorization": "algorithm=HMAC-SHA256, Access=test-ak-01xxxxxx, SignedHeaders=content-type;sdk-content-type;sdk-host;sign-date, Signature=29C55CB6A6305D8155B6D04D8169467B79B4A264704AA2B3F3E65834E3DD187F",
+        "signed_headers": "content-type;sdk-content-type;sdk-host;sign-date"
+      },
+      "literal_braces": {
+        "method": "POST",
+        "url": "https://xdr.example.com/api/xdr/v1/incidents/list",
+        "params": {},
+        "payload": "{}",
+        "canonical_query": "",
+        "payload_hash": "44136FA355B3678A1146AD16F7E8649E94FB4FC21FE77E8310C060F61CAAFF8A",
+        "signature": "B681480656CEEF76DB610ADC32F309CC28FB69AB44333AE718D0EF8B8871E83E",
+        "authorization": "algorithm=HMAC-SHA256, Access=test-ak-01xxxxxx, SignedHeaders=content-type;sdk-content-type;sdk-host;sign-date, Signature=B681480656CEEF76DB610ADC32F309CC28FB69AB44333AE718D0EF8B8871E83E",
+        "signed_headers": "content-type;sdk-content-type;sdk-host;sign-date"
+      }
+    },
+    "path_trailing_slash": {
+      "without": {
+        "method": "POST",
+        "url": "https://xdr.example.com/api/xdr/v1/assets/list",
+        "params": {},
+        "payload": "",
+        "canonical_query": "",
+        "payload_hash": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+        "signature": "67510B14EAA747CC4BE249DF5EEBD359DB4F211BB76A4F49DC5AB65C08700462",
+        "authorization": "algorithm=HMAC-SHA256, Access=test-ak-01xxxxxx, SignedHeaders=content-type;sdk-content-type;sdk-host;sign-date, Signature=67510B14EAA747CC4BE249DF5EEBD359DB4F211BB76A4F49DC5AB65C08700462",
+        "signed_headers": "content-type;sdk-content-type;sdk-host;sign-date"
+      },
+      "with": {
+        "method": "POST",
+        "url": "https://xdr.example.com/api/xdr/v1/assets/list/",
+        "params": {},
+        "payload": "",
+        "canonical_query": "",
+        "payload_hash": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+        "signature": "67510B14EAA747CC4BE249DF5EEBD359DB4F211BB76A4F49DC5AB65C08700462",
+        "authorization": "algorithm=HMAC-SHA256, Access=test-ak-01xxxxxx, SignedHeaders=content-type;sdk-content-type;sdk-host;sign-date, Signature=67510B14EAA747CC4BE249DF5EEBD359DB4F211BB76A4F49DC5AB65C08700462",
+        "signed_headers": "content-type;sdk-content-type;sdk-host;sign-date"
+      }
+    }
+  },
+  "go_cross": {
+    "note": "Same AK/SK and canonical input yield the same Signature hex as Python. Go uses header key authorization and Algorithm=; this vector locks the hex only.",
+    "signature": "B14E459A545613BA98CA6052D9D877932A6FB182CC7520B33C68B14AA522C407",
+    "method": "POST",
+    "url": "https://xdr.example.com/api/xdr/v1/incidents/list",
+    "params": {
+      "q": "x=y"
+    },
+    "payload": "{\"k\": 1}",
+    "payload_hash": "E8D0BE78DEA957C23D2034FF0A10909255A4BA894D0D320C1615C2052BB2B5BE",
+    "canonical_query": "q=x=y"
+  }
+}

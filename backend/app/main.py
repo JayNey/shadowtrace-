@@ -52,6 +52,22 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     assert_orchestration_mode(settings)
 
+    try:
+        from app.adapters.factory import build_sangfor_live_query_adapters
+        from app.tools.registry import tool_registry
+
+        query_adapters = build_sangfor_live_query_adapters(settings)
+        if query_adapters:
+            await tool_registry.auto_discover_for_mode(
+                tool_mode=settings.tool_mode,
+                adapters=query_adapters,
+                simulation_enabled=settings.simulation_enabled,
+                allow_live_side_effects=settings.allow_live_side_effects,
+            )
+    except Exception:
+        logger.exception("Sangfor live query provider registration failed")
+        raise
+
     # Start the Redis→Socket.IO bridge background task.
     await _socketio_manager.start()
 

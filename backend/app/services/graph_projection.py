@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -10,6 +11,9 @@ from app.graph.path_rank import PathRankSignals, rank_attack_paths
 
 MAX_PATH_DEPTH = 6
 MAX_ATTACK_PATHS = 3
+# Rank a bounded candidate pool, not discovery-order first-N. 8× keeps KAPR
+# quality without fully expanding dense evidence cliques.
+_PATH_CANDIDATE_MULTIPLIER = 8
 
 
 def compute_central_entities(
@@ -55,11 +59,14 @@ def find_attack_paths(
         adjacency[source].sort(key=lambda item: _timestamp_or_min(item[1].occurred_at))
 
     paths: list[list[str]] = []
+    budget = max(max_paths * _PATH_CANDIDATE_MULTIPLIER, max_paths)
     for node in nodes:
+        if len(paths) >= budget:
+            break
         for path in _dfs_chain(node.node_id, adjacency, [], max_depth):
             if len(path) >= 2:
                 paths.append(path)
-            if len(paths) >= max_paths * 3:
+            if len(paths) >= budget:
                 break
 
     seen: set[str] = set()
@@ -79,12 +86,12 @@ def _dfs_chain(
     visited: list[str],
     max_depth: int,
     last_timestamp: datetime | None = None,
-) -> list[list[str]]:
+) -> Iterator[list[str]]:
     if len(visited) >= max_depth:
-        return []
+        return
 
     next_visited = [*visited, current]
-    results = [next_visited]
+    yield next_visited
     for neighbor, edge in adjacency.get(current, []):
         if neighbor in next_visited:
             continue
@@ -95,16 +102,13 @@ def _dfs_chain(
             and edge_timestamp < last_timestamp
         ):
             continue
-        results.extend(
-            _dfs_chain(
-                neighbor,
-                adjacency,
-                next_visited,
-                max_depth,
-                edge_timestamp or last_timestamp,
-            )
+        yield from _dfs_chain(
+            neighbor,
+            adjacency,
+            next_visited,
+            max_depth,
+            edge_timestamp or last_timestamp,
         )
-    return results
 
 
 def _timestamp_or_min(timestamp: datetime | None) -> datetime:

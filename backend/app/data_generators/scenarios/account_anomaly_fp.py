@@ -174,6 +174,7 @@ def build_account_anomaly_fp(
         related_alert_refs=[alert_ref],
         impacted_asset_refs=[asset_ref],
         normalized={
+            "event_type": "account_anomaly",
             "risk_score": 18,
             "fp_rule_match": True,
             "scenario": SCENARIO_ID,

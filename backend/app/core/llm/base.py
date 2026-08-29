@@ -10,7 +10,7 @@ import re
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
@@ -19,6 +19,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import LLMError, ShadowTraceError
+from app.core.llm.json_extract import (
+    JsonExtractError,
+    coerce_payload_for_model,
+    extract_json_object,
+)
 from app.core.sanitization import redact_sensitive_text
 from app.core.telemetry import traced_operation
 from app.db import models as orm
@@ -683,15 +688,15 @@ class BaseLLMClient(ABC):
             if error is None:
                 assert raw is not None
                 try:
-                    parsed = (
-                        self._parse(
+                    if json_mode:
+                        parsed, payload = self._parse(
                             raw.content,
                             response_model,
                             finish_reason=raw.finish_reason,
                         )
-                        if json_mode
-                        else None
-                    )
+                        canonical = json.dumps(payload, ensure_ascii=False)
+                        if canonical != raw.content:
+                            raw = replace(raw, content=canonical)
                     await self._charge_budget(raw, event_id=event_id, agent_name=agent_name)
                     status = "success"
                 except SoftTimeLimitExceeded:
@@ -772,7 +777,7 @@ class BaseLLMClient(ABC):
         response_model: type[BaseModel] | None,
         *,
         finish_reason: str | None = None,
-    ) -> BaseModel | None:
+    ) -> tuple[BaseModel | None, dict[str, Any]]:
         if not content or not content.strip():
             raise LLMInvalidJSONError(
                 "LLM returned empty structured output",
@@ -782,23 +787,22 @@ class BaseLLMClient(ABC):
                 finish_reason=finish_reason,
             )
         try:
-            payload = json.loads(content)
-            if not isinstance(payload, dict):
-                raise ValueError("top-level JSON must be an object")
-            return response_model.model_validate(payload) if response_model is not None else None
-        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            payload = extract_json_object(content)
+            payload = coerce_payload_for_model(payload, response_model)
+            parsed = response_model.model_validate(payload) if response_model is not None else None
+            return parsed, payload
+        except (JsonExtractError, ValidationError, ValueError) as exc:
             if isinstance(exc, ValidationError):
                 error_class = "schema_validation"
                 validation_error = json.dumps(
                     exc.errors(include_input=False, include_url=False),
                     ensure_ascii=False,
                 )
-            elif isinstance(exc, json.JSONDecodeError):
-                error_class = "invalid_json"
-                # Keep detail short and free of the offending body.
-                validation_error = (
-                    f"JSONDecodeError: {exc.msg} (line {exc.lineno} column {exc.colno})"
+            elif isinstance(exc, JsonExtractError):
+                error_class = (
+                    exc.error_class if exc.error_class in LLM_CALL_ERROR_CLASSES else "invalid_json"
                 )
+                validation_error = str(exc)
             else:
                 # Non-object top-level JSON is a structural/schema mismatch.
                 error_class = "schema_validation"

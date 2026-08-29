@@ -41,6 +41,7 @@ frontend/playwright-report/
 # Local / temp
 tmp/
 .worktrees/
+artifacts/sangfor-first-contact/
 *.local
 .env.local
 .github_token

@@ -78,6 +78,9 @@ async def load_and_activate_playbook_release(
             provenance=provenance,
         )
         active = await service.activate_release(staged.release_id)
+        # Idempotent activate returns early; rematerialize so chunk metadata
+        # (e.g. embedding_release_id) stays aligned with the query-plan filter.
+        await playbook_kb.materialize_release(active)
         verified = await service.get_active_release()
         if verified is None or verified.release_id != active.release_id:
             raise RuntimeError(

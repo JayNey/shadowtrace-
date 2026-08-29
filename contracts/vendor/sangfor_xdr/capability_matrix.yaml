@@ -1,0 +1,973 @@
+# Sangfor XDR capability matrix (Layer 0)
+#
+# in_loop / role / disposition_intent are product-loop decisions, not a
+# mechanical copy of catalog.json. Catalog remains the URI/field contract.
+#
+# overlay (later layers) must NOT apply this matrix to KIND=mock.
+# unsupported_write rows have no vendor create URI — do not invent paths.
+# Canonical Mock and kernel tool names stay complete (isolate_host, etc.).
+
+source: contracts/vendor/sangfor_xdr/catalog.json
+plan: docs/sangfor-xdr-alignment-plan.md
+catalog_operation_count: 129
+operations:
+
+  - internal_name: alerts_proof
+    method: "GET"
+    path: "/api/xdr/v1/alerts/:uuid/proof"
+    in_loop: p1
+    role: query
+    disposition_intent: "—"
+    notes: "路径参数 restfulParam.paramKey=uuId。失败记 data_quality，不让整个 poll 崩。"
+  - internal_name: post_v1_alerts_aggregation
+    method: "POST"
+    path: "/api/xdr/v1/alerts/aggregation"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_alerts_attcktechniques
+    method: "GET"
+    path: "/api/xdr/v1/alerts/attcktechniques"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_alerts_branchstats
+    method: "POST"
+    path: "/api/xdr/v1/alerts/branchstats"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: alerts_dealstatus
+    method: "POST"
+    path: "/api/xdr/v1/alerts/dealstatus"
+    in_loop: p2
+    role: write
+    disposition_intent: "EVENT_STATUS_UPDATE"
+    notes: "告警处置写入（本计划 P0 不做）。码表不是事件的 0/10/40…。readback 必须走 alerts/list + uuIds，读 item.alertDealStatus（1/2/3）。"
+  - internal_name: alerts_dealstatus_list
+    method: "POST"
+    path: "/api/xdr/v1/alerts/dealstatus/list"
+    in_loop: p2
+    role: query
+    disposition_intent: "EVENT_STATUS_UPDATE"
+    notes: "请求体在导出里为空，不能假装已有按事件 ID 过滤。告警 readback 不要用本接口，用 alerts/list 的 alertDealStatus。"
+  - internal_name: post_v1_alerts_disposal_record_statistics
+    method: "POST"
+    path: "/api/xdr/v1/alerts/disposal/record/statistics"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_alerts_ipInfos
+    method: "POST"
+    path: "/api/xdr/v1/alerts/ipInfos"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_alerts_ipinfosstats
+    method: "POST"
+    path: "/api/xdr/v1/alerts/ipinfosstats"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: alerts_list
+    method: "POST"
+    path: "/api/xdr/v1/alerts/list"
+    in_loop: p1
+    role: source
+    disposition_intent: "—"
+    notes: "告警只读。处置筛选用 alertDealStatus（1/2/3），禁止读 item.dealStatus。可用 uuIds 精确拉。severity 是 0–100 分数，不是事件 -1/1–4。"
+  - internal_name: post_v1_alerts_list_attrescorrect
+    method: "POST"
+    path: "/api/xdr/v1/alerts/list/attrescorrect"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: analysislog_networksecurity_count
+    method: "POST"
+    path: "/api/xdr/v1/analysislog/networksecurity/count"
+    in_loop: p1
+    role: query
+    disposition_intent: "—"
+    notes: "伴随 list 的总数查询。data.total。筛选条件须与 list 相同。"
+  - internal_name: analysislog_networksecurity_list
+    method: "POST"
+    path: "/api/xdr/v1/analysislog/networksecurity/list"
+    in_loop: p1
+    role: source
+    disposition_intent: "—"
+    notes: "data 只有 page/pageSize/item，无 total。has_more 优先同条件调 /count；count 失败则回退 len(item)==pageSize。禁止给 list 夹具捏 total。"
+  - internal_name: post_v1_assets
+    method: "POST"
+    path: "/api/xdr/v1/assets"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_assets_aggregation_business
+    method: "POST"
+    path: "/api/xdr/v1/assets/aggregation/business"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_assets_approve_ignore
+    method: "POST"
+    path: "/api/xdr/v1/assets/approve/ignore"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_assets_approve_indepot
+    method: "POST"
+    path: "/api/xdr/v1/assets/approve/indepot"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_assets_approve_waitapprove
+    method: "POST"
+    path: "/api/xdr/v1/assets/approve/waitapprove"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: delete_v1_assets_assetadapter
+    method: "DELETE"
+    path: "/api/xdr/v1/assets/assetadapter"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_assets_assetadapter
+    method: "POST"
+    path: "/api/xdr/v1/assets/assetadapter"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_assets_assetclass
+    method: "GET"
+    path: "/api/xdr/v1/assets/assetclass"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_assets_assetsource
+    method: "POST"
+    path: "/api/xdr/v1/assets/assetsource"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_assets_custom_list
+    method: "GET"
+    path: "/api/xdr/v1/assets/custom/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_assets_department
+    method: "GET"
+    path: "/api/xdr/v1/assets/department"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_assets_depot_incheckinfo
+    method: "GET"
+    path: "/api/xdr/v1/assets/depot/incheckinfo"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_assets_ipsegmenttree
+    method: "POST"
+    path: "/api/xdr/v1/assets/ipsegmenttree"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: delete_v1_assets_list
+    method: "DELETE"
+    path: "/api/xdr/v1/assets/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: assets_list
+    method: "POST"
+    path: "/api/xdr/v1/assets/list"
+    in_loop: p1
+    role: source
+    disposition_intent: "—"
+    notes: "GET 语义的 POST。page/pageSize。勿与 DELETE/PUT /assets/list 混淆。code 示例值是 InvalidParameter，夹具要覆盖 HTTP 200 但业务失败。"
+  - internal_name: put_v1_assets_list
+    method: "PUT"
+    path: "/api/xdr/v1/assets/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_assets_sourcedevice
+    method: "GET"
+    path: "/api/xdr/v1/assets/sourcedevice"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_assets_total
+    method: "POST"
+    path: "/api/xdr/v1/assets/total"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_assets_uploadasset
+    method: "POST"
+    path: "/api/xdr/v1/assets/uploadasset"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_assets_user
+    method: "GET"
+    path: "/api/xdr/v1/assets/user"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_assets_user
+    method: "POST"
+    path: "/api/xdr/v1/assets/user"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_areasinfo
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/areasinfo"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_bigscreen_asset_details
+    method: "GET"
+    path: "/api/xdr/v1/bigscreen/asset/details"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_asset_trendsdetails
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/asset/trendsdetails"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_bigscreen_branchlist
+    method: "GET"
+    path: "/api/xdr/v1/bigscreen/branchlist"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_branchs_accessInfo
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/branchs/accessInfo"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_branchs_assets_details
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/branchs/assets/details"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_branchs_detailInfo
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/branchs/detailInfo"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_branchs_incidents_list
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/branchs/incidents/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "大屏按资产组拉事件，字段是 branchId/incidentSeverity，不是 Source 主合同。"
+  - internal_name: post_v1_bigscreen_branchs_order_list
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/branchs/order/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_branchs_riskoverview
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/branchs/riskoverview"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_bigscreen_branchs_total
+    method: "GET"
+    path: "/api/xdr/v1/bigscreen/branchs/total"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_branchs_vuls_list
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/branchs/vuls/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_bigscreen_devlist
+    method: "GET"
+    path: "/api/xdr/v1/bigscreen/devlist"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_setting
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/setting"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: delete_v1_bigscreen_setting_{customScreenId}
+    method: "DELETE"
+    path: "/api/xdr/v1/bigscreen/setting/{customScreenId}"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_bigscreen_topologymap_defaultinfo
+    method: "GET"
+    path: "/api/xdr/v1/bigscreen/topologymap/defaultinfo"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_topologymap_defaultstatus
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/topologymap/defaultstatus"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_total_devcount
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/total/devcount"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_total_riskdealcount
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/total/riskdealcount"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_total_score
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/total/score"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_trends_asset
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/trends/asset"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_trends_firewalldev
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/trends/firewalldev"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_trends_flawdev
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/trends/flawdev"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_trends_flowdev
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/trends/flowdev"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_trends_incident
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/trends/incident"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_trends_order
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/trends/order"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_trends_terminaldev
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/trends/terminaldev"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_bigscreen_trends_vuls
+    method: "POST"
+    path: "/api/xdr/v1/bigscreen/trends/vuls"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: blockdevice_list
+    method: "POST"
+    path: "/api/xdr/v1/device/blockdevice/list"
+    in_loop: p1
+    role: query
+    disposition_intent: "—"
+    notes: "封禁设备库存。请求 type[]：AF / EDR / EDR LITE / SAAS EDR / SAAS EDR LITE。响应 deviceId/deviceName/deviceType/gatewayId；创建封禁前改名为 devices[].devId/devName/devType。deviceStatus=offline/not_active 默认不纳入自动 devices[]。"
+  - internal_name: post_v1_incident_labelInfo
+    method: "POST"
+    path: "/api/xdr/v1/incident/labelInfo"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "单数 incident。AI 学习中心打标外发，不是事件列表。code 示例可为 200。"
+  - internal_name: incidents_entities_dns
+    method: "GET"
+    path: "/api/xdr/v1/incidents/:uuid/entities/dns"
+    in_loop: p1
+    role: query
+    disposition_intent: "—"
+    notes: "路径参数名 uuId。无 /entities/account。"
+  - internal_name: incidents_entities_file
+    method: "GET"
+    path: "/api/xdr/v1/incidents/:uuid/entities/file"
+    in_loop: p1
+    role: query
+    disposition_intent: "—"
+    notes: "路径参数名 uuId。事件文件快照，不是舰队 EDR 文件审计。"
+  - internal_name: incidents_entities_host
+    method: "GET"
+    path: "/api/xdr/v1/incidents/:uuid/entities/host"
+    in_loop: p1
+    role: query
+    disposition_intent: "—"
+    notes: "路径参数名 uuId。"
+  - internal_name: incidents_entities_innerip
+    method: "GET"
+    path: "/api/xdr/v1/incidents/:uuid/entities/innerip"
+    in_loop: p1
+    role: query
+    disposition_intent: "—"
+    notes: "路径参数名 uuId。"
+  - internal_name: incidents_entities_ip
+    method: "GET"
+    path: "/api/xdr/v1/incidents/:uuid/entities/ip"
+    in_loop: p1
+    role: query
+    disposition_intent: "—"
+    notes: "路径参数名 uuId。"
+  - internal_name: incidents_entities_process
+    method: "GET"
+    path: "/api/xdr/v1/incidents/:uuid/entities/process"
+    in_loop: p1
+    role: query
+    disposition_intent: "—"
+    notes: "路径参数名 uuId。事件进程快照，不是舰队 EDR 检索。"
+  - internal_name: incidents_proof
+    method: "GET"
+    path: "/api/xdr/v1/incidents/:uuid/proof"
+    in_loop: p1
+    role: query
+    disposition_intent: "—"
+    notes: "路径参数名 uuId。失败记 data_quality。"
+  - internal_name: post_v1_incidents_aggregation
+    method: "POST"
+    path: "/api/xdr/v1/incidents/aggregation"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: incidents_dealstatus
+    method: "POST"
+    path: "/api/xdr/v1/incidents/dealstatus"
+    in_loop: p0
+    role: write
+    disposition_intent: "EVENT_STATUS_UPDATE"
+    notes: "事件处置写入。请求 uuIds（不是 ids）+ dealStatus JSON 整数 TMG 码：0 待处置 / 10 处置中 / 40 已处置 / 50 已挂起 / 60 接受风险 / 70 已遏制。code 必须 Success；succeededNum != total 不得 CONFIRMED。"
+  - internal_name: incidents_dealstatus_list
+    method: "POST"
+    path: "/api/xdr/v1/incidents/dealstatus/list"
+    in_loop: p0
+    role: query
+    disposition_intent: "EVENT_STATUS_UPDATE"
+    notes: "事件处置 readback。请求字段是 ids（不是 uuIds）。返回 data.item[].uuId + 库内 dealStatus 1–6（1待处置 2处置中 3处置完成 4挂起 5已忽略 6已遏制）。写入 70 读回 6。无分页 total。CONFIRMED 必须来自此查询枚举，不是写入响应。"
+  - internal_name: get_v1_incidents_gpt_isenabled
+    method: "GET"
+    path: "/api/xdr/v1/incidents/gpt/isenabled"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "GPT 授权状态。真接口，本计划 out。禁止把 FastGPT/共创模块引进 Adapter。"
+  - internal_name: incidents_list
+    method: "POST"
+    path: "/api/xdr/v1/incidents/list"
+    in_loop: p0
+    role: source
+    disposition_intent: "—"
+    notes: "SourceIncident 列表。必带 startTimestamp/endTimestamp/timeField/page/pageSize（pageSize 5–200）。has_more 用 data.total。筛选多为可空，勿把示例数组当必填。item.uuId 原样；description 进 normalized/raw，禁止 SourceIncident.description；gptResult 只进 raw_payload，禁止 gpt_verdict_label。"
+  - internal_name: post_v1_incidents_rules_list
+    method: "POST"
+    path: "/api/xdr/v1/incidents/rules/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_incidents_trends
+    method: "POST"
+    path: "/api/xdr/v1/incidents/trends"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_inspection_cluster
+    method: "GET"
+    path: "/api/xdr/v1/inspection/cluster"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_inspection_latest_cluster
+    method: "GET"
+    path: "/api/xdr/v1/inspection/latest/cluster"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: orders_create
+    method: "POST"
+    path: "/api/xdr/v1/orders"
+    in_loop: p2
+    role: write
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "建工单。processTemplateId 仅配置（示例 incidentBulletin）。nextAssigneeIds 在导出里 paramNotNull=0（必填）；缺模板或缺责任人则不调用。创建响应 data.orderId 为整数。list item 只有 workflowId（UUID），没有 orderId。禁止用 list.workflowId 匹配创建 orderId。Job SUCCESS 只表示已创建，不是结案。"
+  - internal_name: post_v1_orders_aggregation
+    method: "POST"
+    path: "/api/xdr/v1/orders/aggregation"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: orders_list
+    method: "POST"
+    path: "/api/xdr/v1/orders/list"
+    in_loop: p2
+    role: query
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "仅 POST list（禁止 GET /orders/list）。code 示例可为空串。不对 orderId。"
+  - internal_name: post_v1_orders_stats
+    method: "POST"
+    path: "/api/xdr/v1/orders/stats"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: blockiprule_detail
+    method: "POST"
+    path: "/api/xdr/v1/responses/blockiprule/detail"
+    in_loop: p1
+    role: query
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "请求 ids。创建响应 data.ids 作为后续 detail/list 的规则 ID。"
+  - internal_name: block_ip_endpoint
+    method: "POST"
+    path: "/api/xdr/v1/responses/blockiprule/endpoint"
+    in_loop: p1
+    role: write
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "端侧封禁 IP。plugIpList + direction 字符串 SRC_IP/DST_IP/SRC_DST_IP。禁止把 DNS/URL 塞进 endpoint。devices[] 用 devId/devName/devType（来自 blockdevice/list 的 deviceId 必须改名）。"
+  - internal_name: blockiprule_list
+    method: "POST"
+    path: "/api/xdr/v1/responses/blockiprule/list"
+    in_loop: p1
+    role: query
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "封禁策略查询。pageSize 枚举 10/20/50/100，不要发事件列表的 5。item.status 字面量含空格：'block success' / 'block ip in deal' / 'part block success' / 'block failed' / 'unblocked' 等。list 响应 direction 是整数 1/2/3，禁止回填创建体。"
+  - internal_name: block_ip_network
+    method: "POST"
+    path: "/api/xdr/v1/responses/blockiprule/network"
+    in_loop: p1
+    role: write
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "网侧封禁 IP。blockIpRule.type=SRC_IP 或 DST_IP；mode 默认 in；view 必须是字符串数组 JSON，如 [\"1.2.3.4\"]，禁止单字符串。devices[] 用 devId/devName/devType。"
+  - internal_name: block_domain_network
+    method: "POST"
+    path: "/api/xdr/v1/responses/blockiprule/network"
+    in_loop: p1
+    role: write
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "网侧封禁域名。仅 network + blockIpRule.type=DNS。SANGFOR_BLOCK_CHANNEL=endpoint 不得套到域名/URL。view 为域名字符串数组。"
+  - internal_name: blockiprule_reblock
+    method: "POST"
+    path: "/api/xdr/v1/responses/blockiprule/reblock"
+    in_loop: p1
+    role: write
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "再次封禁。code 含 Success / Part Success / Failed。Part Success 不得整单 CONFIRMED。"
+  - internal_name: blockiprule_unblock
+    method: "POST"
+    path: "/api/xdr/v1/responses/blockiprule/unblock"
+    in_loop: p2
+    role: compensate
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "解封。code 含 Success / Part Success / Failed。Part Success 不得整单 CONFIRMED。"
+  - internal_name: disposefilerule
+    method: "POST"
+    path: "/api/xdr/v1/responses/disposefilerule"
+    in_loop: p2
+    role: compensate
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "解除文件处置。code 可为 Part Success（含空格），不得整单 CONFIRMED。"
+  - internal_name: isolate_list
+    method: "POST"
+    path: "/api/xdr/v1/responses/host/isolate/list"
+    in_loop: p1
+    role: query
+    disposition_intent: "—"
+    notes: "只读隔离策略查询，可按 hostIp。不能创建隔离。isolateStatus 无枚举（UNVERIFIED）。查到一行不得 CONFIRMED。解除隔离用 list 的 item.id 作为 unisolate 的 ids。"
+  - internal_name: isolate_unisolate
+    method: "POST"
+    path: "/api/xdr/v1/responses/host/unisolate"
+    in_loop: p2
+    role: compensate
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "解除隔离。请求 ids = 隔离策略 ID（isolate/list 的 item.id），不是 hostname。ids 按 JSON 数组发。不是创建隔离。"
+  - internal_name: post_v1_responses_trustfile_list
+    method: "POST"
+    path: "/api/xdr/v1/responses/trustfile/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "信任文件列表。真接口，本计划默认不做。"
+  - internal_name: post_v1_responses_trustfilerule
+    method: "POST"
+    path: "/api/xdr/v1/responses/trustfilerule"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "信任文件移除。真接口，本计划默认不做。"
+  - internal_name: virusscantask_create
+    method: "POST"
+    path: "/api/xdr/v1/responses/virusscantask"
+    in_loop: p1
+    role: write
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "病毒扫描创建。source 默认 GPT_MANUAL（XDR 枚举，不是 FastGPT 集成）。禁止默认 GPT_AUTO。code 示例为空串：HTTP 2xx + data.taskId 即传输成功，不得强求 Success。CONFIRMED 看 GET :taskId 的 data.status。"
+  - internal_name: virusscantask_status
+    method: "GET"
+    path: "/api/xdr/v1/responses/virusscantask/:taskId"
+    in_loop: p1
+    role: query
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "restfulParam 在导出里是空数组，仍必须把 URI 里的 :taskId 换成任务 ID。code 示例为空串。Job 终态走 read_entity_effect_completion，禁止 VerifyAgent 轮询当完成器。"
+  - internal_name: post_v1_riskassets_list
+    method: "POST"
+    path: "/api/xdr/v1/riskassets/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_riskassets_trends
+    method: "POST"
+    path: "/api/xdr/v1/riskassets/trends"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_rule_manage_alerts_list
+    method: "POST"
+    path: "/api/xdr/v1/rule/manage/alerts/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: securitylog_list
+    method: "POST"
+    path: "/api/xdr/v1/securitylog/list"
+    in_loop: p2
+    role: source
+    disposition_intent: "—"
+    notes: "按 ID 批量：有 uuIds。仅当 uuIds 与时间都省略时默认当前前 10 分钟。"
+  - internal_name: post_v1_siem_strategies_list
+    method: "POST"
+    path: "/api/xdr/v1/siem/strategies/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_soar_playbooks_execution_statistics
+    method: "POST"
+    path: "/api/xdr/v1/soar/playbooks/execution/statistics"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_soar_playbooks_histories_list
+    method: "POST"
+    path: "/api/xdr/v1/soar/playbooks/histories/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "SOAR 剧本执行历史。真接口，本计划不接，避免和第二套编排缠在一起。"
+  - internal_name: post_v1_soar_playbooks_histories_run_trend
+    method: "POST"
+    path: "/api/xdr/v1/soar/playbooks/histories/run/trend"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_soar_playbooks_histories_tasks_list
+    method: "POST"
+    path: "/api/xdr/v1/soar/playbooks/histories/tasks/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_soar_playbooks_statistics
+    method: "POST"
+    path: "/api/xdr/v1/soar/playbooks/statistics"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_vuls_asset_aggregation
+    method: "POST"
+    path: "/api/xdr/v1/vuls/asset/aggregation"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_vuls_asset_stats
+    method: "POST"
+    path: "/api/xdr/v1/vuls/asset/stats"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_vuls_baseline_list
+    method: "POST"
+    path: "/api/xdr/v1/vuls/baseline/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: patch_v1_vuls_fixstatus
+    method: "PATCH"
+    path: "/api/xdr/v1/vuls/fixstatus"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_vuls_optionfield
+    method: "POST"
+    path: "/api/xdr/v1/vuls/optionfield"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_vuls_risk
+    method: "POST"
+    path: "/api/xdr/v1/vuls/risk"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_vuls_risk_aggregation
+    method: "POST"
+    path: "/api/xdr/v1/vuls/risk/aggregation"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_vuls_risk_aggregation_attackType
+    method: "POST"
+    path: "/api/xdr/v1/vuls/risk/aggregation/attackType"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_vuls_risk_aggregation_baselineLevel
+    method: "POST"
+    path: "/api/xdr/v1/vuls/risk/aggregation/baselineLevel"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_vuls_risk_aggregation_count
+    method: "POST"
+    path: "/api/xdr/v1/vuls/risk/aggregation/count"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_vuls_risk_aggregation_loopholeLevel
+    method: "POST"
+    path: "/api/xdr/v1/vuls/risk/aggregation/loopholeLevel"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_vuls_risk_attacktype
+    method: "GET"
+    path: "/api/xdr/v1/vuls/risk/attacktype"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_vuls_risk_list
+    method: "POST"
+    path: "/api/xdr/v1/vuls/risk/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_vuls_risk_threattag
+    method: "GET"
+    path: "/api/xdr/v1/vuls/risk/threattag"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_vuls_risk_trends
+    method: "POST"
+    path: "/api/xdr/v1/vuls/risk/trends"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: get_v1_vuls_sourcedevice
+    method: "GET"
+    path: "/api/xdr/v1/vuls/sourcedevice"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: delete_v1_whitelists
+    method: "DELETE"
+    path: "/api/xdr/v1/whitelists"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_whitelists
+    method: "POST"
+    path: "/api/xdr/v1/whitelists"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "白名单写入。真接口，默认不做。"
+  - internal_name: put_v1_whitelists_id
+    method: "PUT"
+    path: "/api/xdr/v1/whitelists/:id"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: put_v1_whitelists_id_status
+    method: "PUT"
+    path: "/api/xdr/v1/whitelists/:id/status"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "真接口，ShadowTrace 闭环本计划不实现。"
+  - internal_name: post_v1_whitelists_list
+    method: "POST"
+    path: "/api/xdr/v1/whitelists/list"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "白名单列表。真接口，默认不做。"
+  - internal_name: post_v2_assets_vpc
+    method: "POST"
+    path: "/api/xdr/v2/assets/vpc"
+    in_loop: out
+    role: ignore
+    disposition_intent: "—"
+    notes: "唯一 v2 URI。资产写入，本计划不实现。catalog 必须原样收录。"
+  - internal_name: isolate_host_create
+    method: null
+    path: null
+    in_loop: p1
+    role: unsupported_write
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "开放列表没有隔离创建 URI（只有 isolate/list 与 unisolate）。禁止发明 path。内核 isolate_host 与 Canonical Mock 仍实现。live overlay 去掉 XDR_MANAGED 和 DIRECT_TOOL；能力缺口走 §1.7（execution_owner=None），禁止套 WritebackReadiness.CAPABILITY_UNSUPPORTED。"
+  - internal_name: disable_account
+    method: null
+    path: null
+    in_loop: p1
+    role: unsupported_write
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "无对等写接口。保留 Action；live 双 owner 都去掉。Canonical Mock 仍执行。"
+  - internal_name: force_logout
+    method: null
+    path: null
+    in_loop: p1
+    role: unsupported_write
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "无对等写接口。保留 Action；live 双 owner 都去掉。"
+  - internal_name: reset_password
+    method: null
+    path: null
+    in_loop: p1
+    role: unsupported_write
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "无对等写接口。保留 Action；live 双 owner 都去掉。"
+  - internal_name: revoke_token
+    method: null
+    path: null
+    in_loop: p1
+    role: unsupported_write
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "无对等写接口。保留 Action；live 双 owner 都去掉。"
+  - internal_name: block_process
+    method: null
+    path: null
+    in_loop: p1
+    role: unsupported_write
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "无对等写接口。保留 Action；live 双 owner 都去掉。Canonical Mock 仍执行。"
+  - internal_name: quarantine_file_create
+    method: null
+    path: null
+    in_loop: p1
+    role: unsupported_write
+    disposition_intent: "ENTITY_ACTION_SUBMIT"
+    notes: "无文件隔离创建 URI。解除走 p2 disposefilerule。禁止发明创建 path。"

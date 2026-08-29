@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -17,6 +18,9 @@ from app.core.llm.base import (
 )
 from app.core.llm.url_utils import normalize_llm_base_url
 
+_REASONING_PART_TYPES = frozenset({"reasoning", "thinking", "reason"})
+_ANSWER_PART_TYPES = frozenset({"text", "output_text", "json", "output_json"})
+
 
 def _normalize_message_content(content: Any) -> str:
     """Normalize provider content to a string; null/parts become empty or joined text."""
@@ -26,18 +30,57 @@ def _normalize_message_content(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts: list[str] = []
+        answer_parts: list[str] = []
+        reasoning_parts: list[str] = []
         for item in content:
             if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-                elif item.get("type") == "text" and isinstance(item.get("content"), str):
-                    parts.append(item["content"])
-        return "".join(parts)
+                answer_parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            part_type = str(item.get("type") or "").strip().lower()
+            text = item.get("text")
+            if not isinstance(text, str):
+                nested = item.get("content")
+                text = nested if isinstance(nested, str) else ""
+            if not text:
+                continue
+            if part_type in _REASONING_PART_TYPES:
+                reasoning_parts.append(text)
+            elif part_type in _ANSWER_PART_TYPES or not part_type:
+                answer_parts.append(text)
+            else:
+                answer_parts.append(text)
+        if answer_parts:
+            return "".join(answer_parts)
+        return "".join(reasoning_parts)
     raise TypeError("message content must be a string, null, or content parts")
+
+
+def _completion_text(message: dict[str, Any]) -> str:
+    """Prefer visible content; fall back to reasoning fields used by glm thinking."""
+
+    content = _normalize_message_content(message.get("content"))
+    if content.strip():
+        return content
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        alt = message.get(key)
+        if isinstance(alt, str) and alt.strip():
+            return alt
+    return content
+
+
+def _should_disable_thinking(*, model_name: str, base_url: str) -> bool:
+    model = model_name.strip().lower()
+    host = urlparse(base_url).netloc.lower()
+    return (
+        model.startswith("glm")
+        or "glm-" in model
+        or "volces.com" in host
+        or "volcengine" in host
+        or host.startswith("ark.")
+        or ".ark." in host
+    )
 
 
 class OpenAICompatibleLLMClient(BaseLLMClient):
@@ -90,14 +133,14 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+            if _should_disable_thinking(model_name=model_name, base_url=self._base_url):
+                # glm-5.x thinking mode leaves content empty / non-JSON; structured
+                # agents need the answer channel, not the chain-of-thought channel.
+                payload["thinking"] = {"type": "disabled"}
         headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
         try:
-            response = await client.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-            )
+            response = await self._post_chat(client, payload, headers)
         except httpx.TimeoutException as exc:
             raise LLMTimeoutError(
                 "LLM request timed out", details={"model_name": model_name}
@@ -106,6 +149,24 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
             raise LLMProviderError(
                 "LLM transport failed", details={"model_name": model_name}
             ) from exc
+
+        if (
+            json_mode
+            and response.status_code >= 400
+            and "thinking" in payload
+            and response.status_code not in {401, 403, 429}
+        ):
+            payload.pop("thinking", None)
+            try:
+                response = await self._post_chat(client, payload, headers)
+            except httpx.TimeoutException as exc:
+                raise LLMTimeoutError(
+                    "LLM request timed out", details={"model_name": model_name}
+                ) from exc
+            except httpx.TransportError as exc:
+                raise LLMProviderError(
+                    "LLM transport failed", details={"model_name": model_name}
+                ) from exc
 
         if response.status_code in {401, 403}:
             raise LLMAuthError(
@@ -127,7 +188,7 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
             body = response.json()
             choice = body["choices"][0]
             message = choice["message"]
-            content = _normalize_message_content(message.get("content"))
+            content = _completion_text(message)
             finish_reason = choice.get("finish_reason")
             if finish_reason is not None and not isinstance(finish_reason, str):
                 finish_reason = str(finish_reason)
@@ -150,6 +211,18 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
             completion_tokens=completion_tokens,
             total_tokens=total_tokens or prompt_tokens + completion_tokens,
             finish_reason=finish_reason,
+        )
+
+    async def _post_chat(
+        self,
+        client: httpx.AsyncClient,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        return await client.post(
+            f"{self._base_url}/chat/completions",
+            json=payload,
+            headers=headers,
         )
 
     async def probe_chat(self, *, model_name: str | None = None) -> ProviderResponse:

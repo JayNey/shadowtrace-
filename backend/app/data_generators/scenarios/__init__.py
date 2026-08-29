@@ -60,16 +60,29 @@ def build_scenario(
     seed: int = 42,
     variant: ScenarioVariant | str = ScenarioVariant.NORMAL,
     instance: int = 0,
+    closed_loop: bool = False,
 ) -> MockXDRScenario:
     try:
         builder = SCENARIO_BUILDERS[scenario_id]
     except KeyError as exc:
         known = ", ".join(sorted(SCENARIO_BUILDERS))
         raise KeyError(f"unknown scenario {scenario_id!r}; known: {known}") from exc
+    kwargs: dict[str, Any] = {
+        "seed": seed,
+        "variant": normalize_variant(variant),
+        "instance": instance,
+    }
+    if closed_loop:
+        kwargs["closed_loop"] = True
     try:
-        scenario = builder(seed=seed, variant=normalize_variant(variant), instance=instance)
+        scenario = builder(**kwargs)
     except TypeError:
-        scenario = builder(seed=seed, variant=normalize_variant(variant))
+        kwargs.pop("closed_loop", None)
+        try:
+            scenario = builder(**kwargs)
+        except TypeError:
+            kwargs.pop("instance", None)
+            scenario = builder(**kwargs)
     return scenario
 
 

@@ -102,6 +102,36 @@ class AttackKBService:
         await self._store.upsert_chunks(KB_NAME, chunks)
         return len(chunks)
 
+    async def stamp_release_on_chunks(
+        self,
+        *,
+        release_id: str,
+        embedding_release_id: str,
+    ) -> int:
+        """Pin existing attack_kb rows to a knowledge query-plan release filter."""
+        sql = text(
+            """
+            UPDATE knowledge_chunk
+            SET metadata = COALESCE(metadata, '{}'::jsonb)
+                || jsonb_build_object(
+                    'release_id', CAST(:release_id AS text),
+                    'embedding_release_id', CAST(:embedding_release_id AS text)
+                )
+            WHERE kb_name = :kb_name
+            """
+        )
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    sql,
+                    {
+                        "kb_name": KB_NAME,
+                        "release_id": release_id,
+                        "embedding_release_id": embedding_release_id,
+                    },
+                )
+                return int(result.rowcount or 0)
+
     async def get_technique(self, technique_id: str) -> dict[str, Any] | None:
         """Look up a technique by its MITRE ATT&CK technique ID (e.g. T1078)."""
         sql = text(

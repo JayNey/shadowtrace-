@@ -75,6 +75,8 @@ def list_all_event_actions(
 def assert_strict_closed_acceptance_once(
     client: DynamicEvalClient,
     event_id: str,
+    *,
+    require_llm_generated_report: bool = False,
 ) -> dict[str, Any]:
     """ISSUE-301 strict profile: CLOSED + report + writeback gate convergence."""
     detail = get_event_detail(client, event_id)
@@ -107,6 +109,8 @@ def assert_strict_closed_acceptance_once(
             raise RuntimeError(
                 f"strict profile: report_quality={report_quality!r} for {event_id}"
             )
+        if require_llm_generated_report:
+            assert_report_generated_by_llm(report_obj, event_id=event_id)
 
     if detail.get("writeback_required"):
         readiness = str(detail.get("writeback_readiness") or "")
@@ -167,7 +171,22 @@ def assert_strict_closed_acceptance_once(
             if isinstance(report_data.get("report"), dict)
             else None
         ),
+        "generated_by": (
+            (report_data.get("report") or {}).get("generated_by")
+            if isinstance(report_data.get("report"), dict)
+            else None
+        ),
     }
+
+
+def assert_report_generated_by_llm(report_obj: dict[str, Any], *, event_id: str) -> None:
+    """EventType-8 gate: template / missing generated_by fails. Demo path does not call this."""
+    generated_by = str(report_obj.get("generated_by") or "")
+    if generated_by != "llm":
+        raise RuntimeError(
+            f"eventtype8 suite requires report.generated_by='llm' for {event_id}, "
+            f"got {generated_by!r}"
+        )
 
 
 def strict_assert_budget(*, max_wait_s: float, elapsed_s: float) -> float:
@@ -187,13 +206,18 @@ def assert_strict_closed_acceptance(
     *,
     max_wait_s: float = STRICT_ASSERT_MIN_WAIT_S,
     poll_interval_s: float = STRICT_ASSERT_POLL_S,
+    require_llm_generated_report: bool = False,
 ) -> dict[str, Any]:
     """Strict CLOSED acceptance with bounded retry for post-close convergence lag."""
     deadline = time.monotonic() + max_wait_s
     last_error: RuntimeError | None = None
     while True:
         try:
-            return assert_strict_closed_acceptance_once(client, event_id)
+            return assert_strict_closed_acceptance_once(
+                client,
+                event_id,
+                require_llm_generated_report=require_llm_generated_report,
+            )
         except RuntimeError as exc:
             last_error = exc
             if time.monotonic() >= deadline:

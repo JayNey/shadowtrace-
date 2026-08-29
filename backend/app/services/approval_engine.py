@@ -31,6 +31,7 @@ from app.models.enums import (
     ActionLevel,
     ActionStatus,
     EventStatus,
+    ExecutionOwner,
     Severity,
     WritebackReadiness,
 )
@@ -183,6 +184,9 @@ def evaluate_hard_gates(
     manifest: CapabilityManifest,
 ) -> ApprovalDecision | None:
     """Return auto_reject/require_approval when hard gates fail; None if gates pass."""
+    if action.execution_owner is None:
+        # Overlay capability gap: persist owner=None as pending-manual, not AUTO_REJECT.
+        return None
     if action.tool_name != TERMINAL_DISPOSITION_TOOL:
         if action.tool_name not in manifest.allowed_operations:
             return ApprovalDecision(

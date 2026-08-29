@@ -433,6 +433,33 @@ async def test_storyline_id_format() -> None:
 # ====================================================================== #
 
 
+async def test_defer_llm_persists_rule_storyline_without_calling_llm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_list = _main_scenario_evidence()
+    ctx = _make_event_context(evidence_list=evidence_list, techniques=_main_techniques())
+
+    class _CountingLLM(_GoldenLLMClient):
+        def __init__(self) -> None:
+            self.chat_calls = 0
+
+        async def chat(self, messages: list[LLMMessage], **kwargs: Any) -> LLMResponse:
+            self.chat_calls += 1
+            return await super().chat(messages, **kwargs)
+
+    llm_client = _CountingLLM()
+    svc = StorylineService(llm_client=llm_client, working_memory=_FakeWorkingMemory())
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        "app.services.storyline_service._enqueue_storyline_refine",
+        lambda event_id: enqueued.append(event_id),
+    )
+    storyline = await svc.generate(ctx, defer_llm=True)
+    assert storyline.generated_by == StorylineGeneratedBy.RULE
+    assert enqueued == [storyline.event_id]
+    assert llm_client.chat_calls == 0
+
+
 async def test_llm_path_golden_response() -> None:
     """LLM path produces storyline from golden response."""
     evidence_list = _main_scenario_evidence()

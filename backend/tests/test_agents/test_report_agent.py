@@ -18,6 +18,7 @@ from app.agents.report_agent import (
     GENERATED_BY_TEMPLATE,
     MIN_REPORT_LLM_TIMEOUT_SECONDS,
     ReportAgent,
+    drop_unknown_citation_tokens,
     generate_report_action_fingerprint,
 )
 from app.agents.report_llm_failure import llm_failure_metadata
@@ -427,6 +428,16 @@ def event_service() -> _FakeEventService:
 @pytest.fixture
 def event_bus() -> _FakeEventBus:
     return _FakeEventBus()
+
+
+def test_drop_unknown_citation_tokens_keeps_rag_ids_only() -> None:
+    known = {"cit-2eb3158a"}
+    text = "Grounded cit-2eb3158a versus invented cit-b83d0f5f."
+    assert drop_unknown_citation_tokens(text, known) == "Grounded cit-2eb3158a versus invented ."
+
+
+def test_drop_unknown_citation_tokens_clears_all_when_rag_empty() -> None:
+    assert "cit-" not in drop_unknown_citation_tokens("see cit-91423537", set())
 
 
 def test_section_keys_are_exactly_fifteen_fixed_order() -> None:

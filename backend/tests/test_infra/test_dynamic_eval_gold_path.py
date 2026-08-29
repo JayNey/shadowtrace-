@@ -129,6 +129,70 @@ def test_map_gold_final_verdict_never_none(full_loop_mod) -> None:
     assert full_loop_mod.map_gold_final_verdict(decision="reject") == "false_positive"
 
 
+def test_maybe_submit_analyst_final_verdict_posts_on_planning_response(full_loop_mod) -> None:
+    posted: list[tuple[str, dict[str, Any]]] = []
+
+    class _Client:
+        def get_json(self, path: str) -> dict[str, Any]:
+            return {
+                "event": {
+                    "event_id": "evt-plan",
+                    "status": "planning_response",
+                    "final_verdict": "possible_false_positive",
+                },
+                "final_verdict": "possible_false_positive",
+            }
+
+        def post_json(self, path: str, body: dict[str, Any] | None = None) -> None:
+            posted.append((path, body or {}))
+
+    submitted: set[str] = set()
+    assert (
+        full_loop_mod.maybe_submit_analyst_final_verdict(
+            _Client(),
+            "evt-plan",
+            require_closed=True,
+            decision="approve",
+            submitted=submitted,
+        )
+        is True
+    )
+    assert posted[0][1]["final_verdict"] == "confirmed_threat"
+
+
+def test_maybe_submit_analyst_final_verdict_posts_on_waiting_approval(full_loop_mod) -> None:
+    posted: list[tuple[str, dict[str, Any]]] = []
+
+    class _Client:
+        def get_json(self, path: str) -> dict[str, Any]:
+            return {
+                "event": {
+                    "event_id": "evt-wait",
+                    "status": "waiting_approval",
+                    "final_verdict": "none",
+                },
+                "execution_substate": "waiting_approval",
+                "final_verdict": "none",
+            }
+
+        def post_json(self, path: str, body: dict[str, Any] | None = None) -> None:
+            posted.append((path, body or {}))
+
+    submitted: set[str] = set()
+    assert (
+        full_loop_mod.maybe_submit_analyst_final_verdict(
+            _Client(),
+            "evt-wait",
+            require_closed=True,
+            decision="approve",
+            submitted=submitted,
+        )
+        is True
+    )
+    assert posted[0][1]["final_verdict"] == "confirmed_threat"
+    assert posted[0][1]["resume"] is True
+
+
 def test_maybe_submit_analyst_final_verdict_posts_on_verifying_hold(full_loop_mod) -> None:
     posted: list[tuple[str, dict[str, Any]]] = []
 
@@ -187,6 +251,29 @@ def test_maybe_submit_analyst_final_verdict_skips_when_already_terminal(full_loo
             require_closed=True,
             decision="approve",
             submitted=set(),
+        )
+        is False
+    )
+
+
+def test_maybe_submit_analyst_final_verdict_skips_entity_response_scenarios(
+    full_loop_mod,
+) -> None:
+    class _Client:
+        def get_json(self, path: str) -> dict[str, Any]:
+            raise AssertionError("must not GET when skip_entity_response")
+
+        def post_json(self, path: str, body: dict[str, Any] | None = None) -> None:
+            raise AssertionError("must not post confirmed_threat for skip_entity_response")
+
+    assert (
+        full_loop_mod.maybe_submit_analyst_final_verdict(
+            _Client(),
+            "evt-other",
+            require_closed=True,
+            decision="approve",
+            submitted=set(),
+            skip_entity_response=True,
         )
         is False
     )
@@ -497,12 +584,19 @@ def test_makefile_eval_full_loop_target() -> None:
     text = MAKEFILE_PATH.read_text(encoding="utf-8")
     assert "eval-full-loop:" in text
     assert "eval-full-loop-matrix:" in text
+    assert "eval-eventtype-8:" in text
     assert "dynamic_eval_full_loop.py" in text
     assert "dynamic_eval_matrix.py" in text
     assert "--seed-via-compose" in text
     assert "--fresh-volumes" in text
     assert "EVAL_MATRIX_PROFILE_BY_SCENARIO" in text
     assert "BOOTSTRAP_GENERATE_REPORT" in text
+    full_loop_recipe = text[text.index("eval-full-loop:") : text.index("eval-full-loop-matrix:")]
+    assert "--suite eventtype8" not in full_loop_recipe
+    eventtype8_recipe = text[text.index("eval-eventtype-8:") :]
+    assert "--suite eventtype8" in eventtype8_recipe
+    assert "--require-closed" in eventtype8_recipe
+    assert "--seed-via-compose" in eventtype8_recipe
 
 
 def test_deployment_docs_gold_path_honesty() -> None:
@@ -862,3 +956,316 @@ def test_run_gold_loop_fails_fast_when_waiting_without_actions(full_loop_mod) ->
             poll_interval_s=0.01,
             max_wait_s=5,
         )
+
+
+def test_gold_scenarios_remain_three_demo_ids(full_loop_mod) -> None:
+    assert full_loop_mod.GOLD_SCENARIOS == (
+        "insider_data_exfiltration",
+        "account_anomaly_fp",
+        "suspicious_domain_access",
+    )
+    assert len(full_loop_mod.GOLD_SCENARIOS) == 3
+
+
+def test_seed_via_compose_passes_eventtype8_suite(full_loop_mod) -> None:
+    captured: list[list[str]] = []
+
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        captured.append(list(cmd))
+        return type(
+            "Proc",
+            (),
+            {"returncode": 0, "stdout": '{"accepted": 1, "event_ids": ["evt-x"]}', "stderr": ""},
+        )()
+
+    with patch.object(full_loop_mod.subprocess, "run", side_effect=_fake_run):
+        with patch.object(full_loop_mod, "_compose_cmd", return_value=["docker", "compose"]):
+            full_loop_mod.seed_via_compose(
+                scenario="suspicious_domain_access",
+                mock_xdr_url="http://mock-xdr:8100",
+                seed=42,
+                suite="eventtype8",
+            )
+    cmd = captured[0]
+    assert cmd[cmd.index("--suite") + 1] == "eventtype8"
+
+
+def test_seed_via_compose_demo_suite_keeps_demo_flag(full_loop_mod) -> None:
+    captured: list[list[str]] = []
+
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        captured.append(list(cmd))
+        return type(
+            "Proc",
+            (),
+            {"returncode": 0, "stdout": '{"accepted": 1, "event_ids": ["evt-x"]}', "stderr": ""},
+        )()
+
+    with patch.object(full_loop_mod.subprocess, "run", side_effect=_fake_run):
+        with patch.object(full_loop_mod, "_compose_cmd", return_value=["docker", "compose"]):
+            full_loop_mod.seed_via_compose(
+                scenario="suspicious_domain_access",
+                mock_xdr_url="http://mock-xdr:8100",
+                seed=42,
+            )
+    cmd = captured[0]
+    assert cmd[cmd.index("--suite") + 1] == "demo"
+
+
+def test_analysis_only_cannot_combine_with_require_closed(full_loop_mod) -> None:
+    with pytest.raises(SystemExit, match="cannot be combined"):
+        full_loop_mod.main(
+            [
+                "--analysis-only",
+                "--require-closed",
+                "--event-id",
+                "evt-x",
+                "--skip-baseline-preflight",
+            ]
+        )
+
+
+def test_eventtype8_rejects_analysis_only(full_loop_mod) -> None:
+    with pytest.raises(SystemExit, match="analysis-only"):
+        full_loop_mod.main(
+            [
+                "--suite",
+                "eventtype8",
+                "--analysis-only",
+                "--event-id",
+                "evt-x",
+                "--skip-baseline-preflight",
+            ]
+        )
+
+
+def test_eventtype8_refuses_mock_llm_health_mode(full_loop_mod) -> None:
+    with patch.object(full_loop_mod, "DynamicEvalClient") as client_cls:
+        client = client_cls.return_value
+        client.get_json.return_value = {
+            "llm": {"mode": "mock"},
+            "playbook_resources": {"status": "ready"},
+        }
+        with pytest.raises(SystemExit, match="MockLLM"):
+            full_loop_mod.main(
+                [
+                    "--suite",
+                    "eventtype8",
+                    "--event-id",
+                    "evt-x",
+                    "--skip-baseline-preflight",
+                ]
+            )
+
+
+def test_demo_suite_does_not_refuse_mock_llm(full_loop_mod) -> None:
+    with patch.object(full_loop_mod, "DynamicEvalClient") as client_cls:
+        client = client_cls.return_value
+        client.get_json.return_value = {
+            "llm": {"mode": "mock"},
+            "playbook_resources": {"status": "ready"},
+        }
+        with patch.object(
+            full_loop_mod,
+            "run_gold_loop",
+            return_value={
+                "final_statuses": {"evt-x": "closed"},
+                "elapsed_s": 1,
+                "approval_timeout_used": False,
+                "status_trace": {},
+                "decisions": {},
+            },
+        ):
+            rc = full_loop_mod.main(
+                [
+                    "--event-id",
+                    "evt-x",
+                    "--skip-baseline-preflight",
+                    "--json",
+                ]
+            )
+    assert rc == 0
+
+
+def test_assert_report_generated_by_llm_rejects_template(full_loop_mod) -> None:
+    with pytest.raises(RuntimeError, match="generated_by"):
+        full_loop_mod.assert_report_generated_by_llm(
+            {"generated_by": "template"},
+            event_id="evt-1",
+        )
+
+
+def test_assert_report_generated_by_llm_accepts_llm(full_loop_mod) -> None:
+    full_loop_mod.assert_report_generated_by_llm(
+        {"generated_by": "llm"},
+        event_id="evt-1",
+    )
+
+
+def test_strict_closed_template_fails_when_llm_report_required(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if "/actions" in path:
+                return {"items": []}
+            return {
+                "event": {"event_id": "evt-tmpl", "status": "closed"},
+                "writeback_required": False,
+                "writeback_readiness": "not_required",
+            }
+
+        def request(self, method: str, path: str):
+            from dynamic_eval_approve import ApiResponse
+
+            return ApiResponse(
+                status=200,
+                data={"report": {"report_quality": "full", "generated_by": "template"}},
+            )
+
+    with pytest.raises(RuntimeError, match="generated_by"):
+        full_loop_mod.assert_strict_closed_acceptance(
+            _Client(),
+            "evt-tmpl",
+            max_wait_s=0.0,
+            require_llm_generated_report=True,
+        )
+
+
+def test_strict_closed_llm_report_passes_when_required(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if "/actions" in path:
+                return {"items": []}
+            return {
+                "event": {"event_id": "evt-llm", "status": "closed"},
+                "writeback_required": False,
+                "writeback_readiness": "not_required",
+            }
+
+        def request(self, method: str, path: str):
+            from dynamic_eval_approve import ApiResponse
+
+            return ApiResponse(
+                status=200,
+                data={"report": {"report_quality": "full", "generated_by": "llm"}},
+            )
+
+    result = full_loop_mod.assert_strict_closed_acceptance(
+        _Client(),
+        "evt-llm",
+        max_wait_s=0.0,
+        require_llm_generated_report=True,
+    )
+    assert result["generated_by"] == "llm"
+
+
+def test_demo_suite_rejects_eventtype8_only_scenario(full_loop_mod) -> None:
+    with pytest.raises(SystemExit, match="not in suite=demo"):
+        full_loop_mod.main(
+            [
+                "--scenario",
+                "host_compromise",
+                "--event-id",
+                "evt-x",
+                "--skip-baseline-preflight",
+            ]
+        )
+
+
+def test_strict_closed_template_ok_when_llm_report_not_required(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if "/actions" in path:
+                return {"items": []}
+            return {
+                "event": {"event_id": "evt-tmpl-demo", "status": "closed"},
+                "writeback_required": False,
+                "writeback_readiness": "not_required",
+            }
+
+        def request(self, method: str, path: str):
+            from dynamic_eval_approve import ApiResponse
+
+            return ApiResponse(
+                status=200,
+                data={"report": {"report_quality": "full", "generated_by": "template"}},
+            )
+
+    result = full_loop_mod.assert_strict_closed_acceptance(
+        _Client(),
+        "evt-tmpl-demo",
+        max_wait_s=0.0,
+        require_llm_generated_report=False,
+    )
+    assert result["generated_by"] == "template"
+
+
+def test_demo_suite_does_not_call_eventtype8_mock_column(full_loop_mod) -> None:
+    with patch.object(full_loop_mod, "DynamicEvalClient") as client_cls:
+        client = client_cls.return_value
+        client.get_json.return_value = {
+            "llm": {"mode": "mock"},
+            "playbook_resources": {"status": "ready"},
+        }
+        with patch.object(
+            full_loop_mod,
+            "run_gold_loop",
+            return_value={
+                "final_statuses": {"evt-x": "closed"},
+                "elapsed_s": 1,
+                "approval_timeout_used": False,
+                "status_trace": {},
+                "decisions": {},
+            },
+        ):
+            with patch.object(full_loop_mod, "run_eventtype8_mock_column_gate") as gate:
+                rc = full_loop_mod.main(
+                    [
+                        "--event-id",
+                        "evt-x",
+                        "--skip-baseline-preflight",
+                        "--json",
+                    ]
+                )
+    assert rc == 0
+    gate.assert_not_called()
+
+
+def test_eventtype8_suite_calls_mock_column_gate(full_loop_mod, monkeypatch) -> None:
+    monkeypatch.delenv("LLM_MODE", raising=False)
+    monkeypatch.setenv("LLM_MODE", "openai")
+    with patch.object(full_loop_mod, "DynamicEvalClient") as client_cls:
+        client = client_cls.return_value
+        client.get_json.return_value = {
+            "llm": {"mode": "openai"},
+            "playbook_resources": {"status": "ready"},
+        }
+        with patch.object(
+            full_loop_mod,
+            "run_gold_loop",
+            return_value={
+                "final_statuses": {"evt-x": "closed"},
+                "elapsed_s": 1,
+                "approval_timeout_used": False,
+                "status_trace": {},
+                "decisions": {},
+            },
+        ):
+            with patch.object(
+                full_loop_mod,
+                "run_eventtype8_mock_column_gate",
+                return_value={"scenario": "insider_data_exfiltration", "column": "mock_xdr"},
+            ) as gate:
+                rc = full_loop_mod.main(
+                    [
+                        "--suite",
+                        "eventtype8",
+                        "--event-id",
+                        "evt-x",
+                        "--skip-baseline-preflight",
+                        "--json",
+                    ]
+                )
+    assert rc == 0
+    gate.assert_called()
+    assert gate.call_args.args[1] == "evt-x"
+    assert gate.call_args.args[2] == "insider_data_exfiltration"

@@ -18,10 +18,10 @@ from app.agents.prompts.risk_prompt import (
 from app.agents.risk_llm_admissibility import classify_llm_risk_response
 from app.agents.risk_rubric import LlmFactorChoice, land_factor_score, resolve_factor_choice
 from app.agents.risk_scoring_engine import (
-    FACTOR_WEIGHTS,
     RiskScoringEngine,
     apply_evidence_limited_adjustments,
     augment_factors_for_evidence_limited,
+    factor_weights_for,
     severity_from_score,
 )
 from app.agents.verdict_resolver import VerdictResolver
@@ -35,7 +35,7 @@ from app.models.agent_io import (
     RiskFactor,
     ScoringMode,
 )
-from app.models.enums import FinalVerdict
+from app.models.enums import EventType, FinalVerdict
 from app.services.risk_verdict_projection import (
     EVIDENCE_LIMITED_DEMOTED_FROM_CONFIRMED_THREAT,
 )
@@ -147,7 +147,12 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
                 llm_admissibility = LlmAdmissibility.INVALID
                 scoring_mode = ScoringMode.RULE_ONLY
 
-        factors = self._merge_factors(rule_scores, llm_choices, scoring_mode)
+        factors = self._merge_factors(
+            rule_scores,
+            llm_choices,
+            scoring_mode,
+            event_type=input.triage_result.event_type,
+        )
         risk_score = int(round(sum(factor.weighted_score for factor in factors)))
         risk_score = max(0, min(100, risk_score))
         severity = severity_from_score(risk_score)
@@ -398,10 +403,12 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         rule_scores: dict[str, tuple[float, str]],
         llm_choices: dict[str, LlmFactorChoice] | None,
         scoring_mode: ScoringMode,
+        event_type: EventType | None = None,
     ) -> list[RiskFactor]:
+        weights = factor_weights_for(event_type)
         factors: list[RiskFactor] = []
         for name in FACTOR_NAMES:
-            weight = FACTOR_WEIGHTS[name]
+            weight = weights[name]
             rule_score, rule_reason = rule_scores[name]
             if scoring_mode is ScoringMode.LLM_AND_RULE and llm_choices is not None:
                 merged, reasoning = land_factor_score(rule_score, llm_choices[name])

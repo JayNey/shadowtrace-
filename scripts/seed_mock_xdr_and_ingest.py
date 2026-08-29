@@ -57,9 +57,16 @@ from app.mock_xdr.state import MOCK_XDR_DEFAULT_READ_TOKEN, MOCK_XDR_DEFAULT_WRI
 
 
 async def _seed_mock_xdr(
-    *, mock_xdr_url: str, scenario_id: str, seed: int, instance: int = 0
+    *,
+    mock_xdr_url: str,
+    scenario_id: str,
+    seed: int,
+    instance: int = 0,
+    closed_loop: bool = False,
 ) -> dict:
-    scenario = build_scenario(scenario_id, seed=seed, instance=instance)
+    scenario = build_scenario(
+        scenario_id, seed=seed, instance=instance, closed_loop=closed_loop
+    )
     seed_url = f"{mock_xdr_url.rstrip('/')}/mock-xdr/v1/control/seed"
     payload = scenario.model_dump(mode="json")
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -118,6 +125,7 @@ async def _run(
     seed: int,
     seed_only: bool,
     instance: int = 0,
+    closed_loop: bool = False,
 ) -> int:
     if scenario_id not in SCENARIO_BUILDERS:
         raise SystemExit(f"unknown scenario: {scenario_id!r}")
@@ -127,6 +135,7 @@ async def _run(
         scenario_id=scenario_id,
         seed=seed,
         instance=instance,
+        closed_loop=closed_loop,
     )
     logger.info(
         "mock-xdr seeded scenario=%s counts=%s",
@@ -182,7 +191,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only seed mock-xdr control plane; skip SourceAdapter poll (ISSUE-107 scheduler smoke)",
     )
+    parser.add_argument(
+        "--suite",
+        choices=("demo", "eventtype8"),
+        default="demo",
+        help="demo keeps domain pack at expected_verdict=none; eventtype8 upgrades domain to closed_loop",
+    )
     args = parser.parse_args(argv)
+    closed_loop = str(args.suite) == "eventtype8"
     return asyncio.run(
         _run(
             scenario_id=args.scenario,
@@ -190,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             seed_only=args.seed_only,
             instance=int(args.instance),
+            closed_loop=closed_loop,
         )
     )
 

@@ -1,0 +1,17 @@
+{
+  "code": "Success",
+  "message": "请求成功",
+  "data": {
+    "page": 1,
+    "pageSize": 5,
+    "item": [
+      {
+        "uuId": "network_security_log-wire-001",
+        "srcIp": "10.20.30.23",
+        "dstIp": "203.0.113.88",
+        "productType": "AF",
+        "recordTimestamp": 1647065958
+      }
+    ]
+  }
+}

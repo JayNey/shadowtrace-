@@ -13,7 +13,7 @@ from urllib.parse import parse_qsl, urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.sanitization import is_sensitive_key
-from app.models.enums import CapabilityState, ExecutionJobStatus, ExecutionOwner
+from app.models.enums import CapabilityState, ExecutionJobStatus, ExecutionOwner, ToolCategory
 from app.models.execution import ActionExecutionJob
 from app.models.tool_meta import (
     CapabilityManifest,
@@ -155,11 +155,15 @@ def _adapter_implementation(adapter: BaseToolAdapter) -> Any:
             return result.model_dump(mode="json")
 
         result = await adapter.execute(params, context.idempotency_key)
+        data = dict(result.data)
+        # Query tools use extra=forbid EvidenceQueryData; simulated stays on raw_result.
+        if adapter.tool_meta.tool_category is not ToolCategory.QUERY:
+            data["simulated"] = adapter.simulated
         result = result.model_copy(
             update={
                 "provider_name": adapter.name,
                 "job_id": result.job_id or context.execution_job_id,
-                "data": {**result.data, "simulated": adapter.simulated},
+                "data": data,
                 "raw_result": {**result.raw_result, "simulated": adapter.simulated},
             }
         )

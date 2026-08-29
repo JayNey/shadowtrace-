@@ -58,7 +58,8 @@ class ChatReference(BaseModel):
 
 
 class ChatAnswer(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # LLM wire output: ignore extra keys glm-5.x sometimes adds.
+    model_config = ConfigDict(extra="ignore")
 
     answer: str = Field(min_length=1, max_length=8000)
     references: list[ChatReference] = Field(default_factory=list, max_length=50)

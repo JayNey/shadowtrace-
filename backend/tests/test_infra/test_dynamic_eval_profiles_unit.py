@@ -56,6 +56,35 @@ def test_insider_profile_is_strict_full_loop_only(profiles_mod) -> None:
     assert profile.pressure == "none"
 
 
+def test_scenario_eval_profiles_remain_issue313_three(profiles_mod) -> None:
+    assert set(profiles_mod.SCENARIO_EVAL_PROFILES) == {
+        "insider_data_exfiltration",
+        "account_anomaly_fp",
+        "suspicious_domain_access",
+    }
+    assert profiles_mod.profile_for_scenario("account_anomaly_fp").semantic == "analysis_only_fp"
+    with pytest.raises(KeyError, match="unknown scenario profile"):
+        profiles_mod.profile_for_scenario("host_compromise")
+
+
+def test_eventtype8_profiles_are_full_loop_strict(profiles_mod) -> None:
+    assert len(profiles_mod.EVENTTYPE8_SCENARIOS) == 8
+    assert profiles_mod.allowed_scenarios_for_suite("demo") == (
+        "insider_data_exfiltration",
+        "account_anomaly_fp",
+        "suspicious_domain_access",
+    )
+    assert (
+        profiles_mod.allowed_scenarios_for_suite("eventtype8")
+        == profiles_mod.EVENTTYPE8_SCENARIOS
+    )
+    for scenario in profiles_mod.EVENTTYPE8_SCENARIOS:
+        profile = profiles_mod.eventtype8_profile_for_scenario(scenario)
+        assert profile.semantic == "full_loop_strict"
+        assert profile.pressure == "none"
+        assert profile.pressure_blocks_pass is False
+
+
 def test_format_eval_failure_includes_status_trace(diagnostics_mod) -> None:
     message = diagnostics_mod.format_eval_failure_message(
         headline="semantic gate failed",

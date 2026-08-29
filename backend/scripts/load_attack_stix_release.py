@@ -27,8 +27,10 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 from app.core.config import Settings  # noqa: E402
+from app.core.embedding.release import build_embedding_release  # noqa: E402
 from app.core.embedding.service import EmbeddingService  # noqa: E402
 from app.models.knowledge_release import ATTACK_CORPUS_ID  # noqa: E402
+from app.services.attack_kb_service import AttackKBService  # noqa: E402
 from app.services.knowledge_release_resolver import default_attack_provenance  # noqa: E402
 from app.services.knowledge_release_service import KnowledgeReleaseService  # noqa: E402
 from app.services.knowledge_store import KnowledgeStore  # noqa: E402
@@ -78,6 +80,15 @@ async def _main() -> None:
         if active is None or active.release_id != activated.release_id:
             print("Active release verification failed")
             sys.exit(1)
+        embedding_release_id = active.embedding_release_id or build_embedding_release(
+            settings
+        ).release_id
+        attack_kb = AttackKBService(store, session_factory)
+        stamped = await attack_kb.stamp_release_on_chunks(
+            release_id=active.release_id,
+            embedding_release_id=embedding_release_id,
+        )
+        print(f"Stamped {stamped} attack_kb chunks with {active.release_id}/{embedding_release_id}")
     finally:
         await embed_service.close()
         await engine.dispose()

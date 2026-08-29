@@ -56,15 +56,21 @@ from dynamic_eval_diagnostics import (  # noqa: E402
     format_eval_failure_message,
 )
 from dynamic_eval_profiles import (  # noqa: E402
+    EVENTTYPE8_SCENARIOS,
     profile_for_scenario,
     scenario_requires_demo_baseline,
+)
+from eventtype8_suite_expectations import (  # noqa: E402
+    assert_eventtype8_mock_column,
+    column_expectation,
 )
 from strict_closed_acceptance import (  # noqa: E402
     STRICT_ASSERT_POLL_S as _STRICT_ASSERT_POLL_S,
 )
 from strict_closed_acceptance import (  # noqa: E402
+    assert_report_generated_by_llm,  # noqa: F401  # re-export for gold-path tests
     assert_strict_closed_acceptance,
-    list_all_event_actions,  # noqa: F401  # re-export for gold-path tests
+    list_all_event_actions,
 )
 from strict_closed_acceptance import (  # noqa: E402
     strict_assert_budget as _strict_assert_budget,
@@ -76,6 +82,30 @@ GOLD_SCENARIOS = (
     "account_anomaly_fp",
     "suspicious_domain_access",
 )
+
+_MOCK_LLM_MODES = frozenset({"mock"})
+
+
+def allowed_scenarios_for_suite(suite: str) -> tuple[str, ...]:
+    if suite == "eventtype8":
+        return EVENTTYPE8_SCENARIOS
+    return GOLD_SCENARIOS
+
+
+def llm_mode_from_health(health: dict[str, Any] | None) -> str:
+    llm = (health or {}).get("llm") or {}
+    return str(llm.get("mode") or "").strip().lower()
+
+
+def assert_eventtype8_real_llm(health: dict[str, Any] | None) -> None:
+    """EventType-8 refuses MockLLM. Demo suite does not call this."""
+    mode = llm_mode_from_health(health)
+    env_mode = str(os.environ.get("LLM_MODE") or "").strip().lower()
+    if mode in _MOCK_LLM_MODES or env_mode in _MOCK_LLM_MODES:
+        raise SystemExit(
+            "eventtype8 suite refuses MockLLM "
+            f"(health.llm.mode={mode!r} LLM_MODE={env_mode!r})"
+        )
 
 # Event statuses that mean the pipeline is still progressing (do not approve yet).
 _IN_FLIGHT = frozenset(
@@ -185,6 +215,7 @@ def seed_via_compose(
     mock_xdr_url: str,
     seed: int,
     instance: int = 0,
+    suite: str = "demo",
 ) -> dict[str, Any]:
     """Seed mock-xdr + SourceAdapter ingest inside the backend container."""
     cmd = _compose_cmd() + [
@@ -201,6 +232,8 @@ def seed_via_compose(
         str(seed),
         "--instance",
         str(instance),
+        "--suite",
+        suite,
     ]
     print(f"[dynamic-eval] seeding via compose: scenario={scenario}", file=sys.stderr, flush=True)
     proc = subprocess.run(cmd, cwd=_ROOT_DIR, capture_output=True, text=True, check=False)
@@ -219,6 +252,121 @@ def seed_via_compose(
             f"(summary={summary!r}). Refusing to continue gold path."
         )
     return summary
+
+
+def _in_backend_container() -> bool:
+    return Path("/.dockerenv").exists()
+
+
+def load_eventtype8_persist_bundle(event_id: str) -> dict[str, Any]:
+    """Read EventContext rag_output/graph_output. In-container dump, else compose exec."""
+    if _in_backend_container():
+        from dump_eventtype8_persist import dump_persist_sync
+
+        return dump_persist_sync(event_id)
+    dump_src = _SCRIPTS_DIR / "dump_eventtype8_persist.py"
+    script = dump_src.read_text(encoding="utf-8")
+    # Pipe the host script so an un-rebuilt image still has the dump helper.
+    cmd = _compose_cmd() + [
+        "exec",
+        "-T",
+        "backend",
+        "python3",
+        "-",
+        "--event-id",
+        event_id,
+    ]
+    proc = subprocess.run(
+        cmd,
+        cwd=_ROOT_DIR,
+        input=script,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "dump_eventtype8_persist failed "
+            f"(exit={proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
+        )
+    objects = extract_json_objects(proc.stdout)
+    for obj in reversed(objects):
+        if obj.get("event_id") == event_id or "rag_output" in obj or "graph_output" in obj:
+            return obj
+    raise RuntimeError(
+        f"dump_eventtype8_persist emitted no persist bundle for {event_id}: {proc.stdout!r}"
+    )
+
+
+def list_all_event_tool_calls(client: DynamicEvalClient, event_id: str) -> list[dict[str, Any]]:
+    page = 1
+    collected: list[dict[str, Any]] = []
+    while page <= 50:
+        payload = client.get_json(
+            f"/api/v1/events/{event_id}/tool-calls?page={page}&page_size=100"
+        )
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            break
+        page_items = [item for item in items if isinstance(item, dict)]
+        collected.extend(page_items)
+        total = payload.get("total") if isinstance(payload, dict) else None
+        if total is not None and len(collected) >= int(total):
+            break
+        if len(page_items) < 100:
+            break
+        page += 1
+    return collected
+
+
+def list_decision_trace_entries(client: DynamicEvalClient, event_id: str) -> list[dict[str, Any]]:
+    page = 1
+    collected: list[dict[str, Any]] = []
+    while page <= 50:
+        payload = client.get_json(
+            f"/api/v1/events/{event_id}/decision-trace?page={page}&page_size=200"
+        )
+        items = payload.get("entries") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            break
+        page_items = [item for item in items if isinstance(item, dict)]
+        collected.extend(page_items)
+        total = payload.get("total") if isinstance(payload, dict) else None
+        if total is not None and len(collected) >= int(total):
+            break
+        if len(page_items) < 200:
+            break
+        page += 1
+    return collected
+
+
+def run_eventtype8_mock_column_gate(
+    client: DynamicEvalClient,
+    event_id: str,
+    scenario: str,
+    *,
+    persist_bundle: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """A-column mock_xdr persist + Job SUCCESS. Demo suite must not call this."""
+    event = get_event(client, event_id)
+    snapshot = event.get("event_context_snapshot")
+    if not isinstance(snapshot, dict):
+        snapshot = None
+    bundle = persist_bundle if persist_bundle is not None else load_eventtype8_persist_bundle(
+        event_id
+    )
+    rag = bundle.get("rag_output") if isinstance(bundle, dict) else None
+    graph = bundle.get("graph_output") if isinstance(bundle, dict) else None
+    return assert_eventtype8_mock_column(
+        scenario,
+        snapshot=snapshot,
+        rag_output=rag if isinstance(rag, dict) else None,
+        graph_output=graph if isinstance(graph, dict) else None,
+        actions=list_all_event_actions(client, event_id),
+        tool_calls=list_all_event_tool_calls(client, event_id),
+        llm_trace_entries=list_decision_trace_entries(client, event_id),
+        event_id=event_id,
+    )
 
 
 def extract_json_objects(text: str) -> list[dict[str, Any]]:
@@ -280,6 +428,15 @@ def get_event(client: DynamicEvalClient, event_id: str) -> dict[str, Any]:
 
 
 _TERMINAL_ANALYST_VERDICTS = frozenset({"false_positive", "confirmed_threat"})
+# After RiskAgent (may write possible_false_positive) and before Verify Phase 2.
+_VERDICT_SUBMIT_STATUSES = frozenset(
+    {
+        "planning_response",
+        "waiting_approval",
+        "executing_response",
+        "verifying",
+    }
+)
 
 
 def map_gold_final_verdict(*, decision: str) -> str:
@@ -299,8 +456,20 @@ def maybe_submit_analyst_final_verdict(
     require_closed: bool,
     decision: str,
     submitted: set[str],
+    skip_entity_response: bool = False,
 ) -> bool:
-    """Unblock VERIFYING + manual_resolution holds that need a terminal verdict."""
+    """Post a terminal verdict after RiskAgent and before Verify Phase 2.
+
+    RiskAgent may persist ``possible_false_positive``. Verify then skips
+    terminal writeback (``verdict_not_terminal``). Submit during
+    planning_response / waiting_approval so Phase 2 can activate.
+
+    FP / ``other`` skip entity response: do not force ``confirmed_threat``.
+    That verdict is wrong for ``not_required`` + ``expected_verdict=none``,
+    and resume=true races L0/L1 ``plan_fully_decided``.
+    """
+    if skip_entity_response:
+        return False
     if not require_closed or event_id in submitted:
         return False
     payload = client.get_json(f"/api/v1/events/{event_id}")
@@ -308,9 +477,8 @@ def maybe_submit_analyst_final_verdict(
         return False
     event = unwrap_event_detail_payload(payload, expected_event_id=event_id)
     status = str(event.get("status") or "")
-    substate = str(payload.get("execution_substate") or "")
     verdict = str(payload.get("final_verdict") or event.get("final_verdict") or "")
-    if status != "verifying" or substate != "manual_resolution":
+    if status not in _VERDICT_SUBMIT_STATUSES:
         return False
     if verdict in _TERMINAL_ANALYST_VERDICTS:
         return False
@@ -805,6 +973,8 @@ def run_gold_loop(
     poll_interval_s: float,
     max_wait_s: float,
     require_closed: bool = False,
+    require_llm_generated_report: bool = False,
+    skip_analyst_terminal_verdict: bool = False,
 ) -> dict[str, Any]:
     """Drive investigate → scripted approve/reject → non-FAILED assertion."""
     started = time.monotonic()
@@ -888,6 +1058,22 @@ def run_gold_loop(
             else:
                 waiting_stall[event_id] = 0
 
+            # Post terminal verdict before approve so Verify Phase 2 does not
+            # race a possible_false_positive leftover from RiskAgent.
+            if maybe_submit_analyst_final_verdict(
+                client,
+                event_id,
+                require_closed=require_closed,
+                decision=decision,
+                submitted=verdict_submitted,
+                skip_entity_response=skip_analyst_terminal_verdict,
+            ):
+                all_done = False
+                _progress(
+                    f"[dynamic-eval] scripted final-verdict on {event_id} "
+                    f"({map_gold_final_verdict(decision=decision)})"
+                )
+
             if pending:
                 all_done = False
                 # Avoid re-deciding the same action_id in a tight loop.
@@ -909,19 +1095,6 @@ def run_gold_loop(
                         f"[dynamic-eval] scripted {decision} on {event_id}: "
                         f"{len(outcomes)} action(s)"
                     )
-
-            if maybe_submit_analyst_final_verdict(
-                client,
-                event_id,
-                require_closed=require_closed,
-                decision=decision,
-                submitted=verdict_submitted,
-            ):
-                all_done = False
-                _progress(
-                    f"[dynamic-eval] scripted final-verdict on {event_id} "
-                    f"({map_gold_final_verdict(decision=decision)})"
-                )
 
             if _terminal_enough(status, require_closed=require_closed) and not pending:
                 continue
@@ -961,6 +1134,7 @@ def run_gold_loop(
                 event_id,
                 max_wait_s=strict_budget,
                 poll_interval_s=min(poll_interval_s, _STRICT_ASSERT_POLL_S),
+                require_llm_generated_report=require_llm_generated_report,
             )
 
     return {
@@ -987,9 +1161,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--token", default="bootstrap-token")
     parser.add_argument(
+        "--suite",
+        choices=("demo", "eventtype8"),
+        default="demo",
+        help="demo: GOLD_SCENARIOS (default). eventtype8: 8 EventType full_loop_strict suite",
+    )
+    parser.add_argument(
         "--scenario",
         default="insider_data_exfiltration",
-        choices=GOLD_SCENARIOS,
         help="Mock-xdr scenario to seed (default: insider_data_exfiltration)",
     )
     parser.add_argument(
@@ -1115,8 +1294,19 @@ def _preflight_change_window_baseline(client: DynamicEvalClient, *, scenario: st
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    suite = str(args.suite)
+    allowed = allowed_scenarios_for_suite(suite)
+    if str(args.scenario) not in allowed:
+        raise SystemExit(
+            f"scenario {args.scenario!r} is not in suite={suite} "
+            f"allowed={list(allowed)}"
+        )
+    if suite == "eventtype8" and args.analysis_only:
+        raise SystemExit("--suite eventtype8 cannot be combined with --analysis-only")
     if args.analysis_only and args.require_closed:
         raise SystemExit("--analysis-only cannot be combined with --require-closed")
+    if suite == "eventtype8":
+        args.require_closed = True
     if args.require_closed and not args.generate_report:
         raise SystemExit(
             "--require-closed requires report generation; omit --no-generate-report"
@@ -1155,6 +1345,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # Health / playbook readiness (demo honesty).
     health = client.get_json("/api/v1/health")
+    if suite == "eventtype8":
+        assert_eventtype8_real_llm(health)
     pb = (health or {}).get("playbook_resources") or {}
     if pb.get("status") and pb.get("status") != "ready":
         print(
@@ -1177,6 +1369,7 @@ def main(argv: list[str] | None = None) -> int:
                 mock_xdr_url=args.mock_xdr_url,
                 seed=args.seed,
                 instance=int(args.instance),
+                suite=suite,
             )
             raw_ids = seed_summary.get("event_ids")
             if isinstance(raw_ids, list):
@@ -1234,6 +1427,11 @@ def main(argv: list[str] | None = None) -> int:
             scenario=str(args.scenario),
         )
     else:
+        skip_analyst_terminal_verdict = False
+        if suite == "eventtype8":
+            skip_analyst_terminal_verdict = column_expectation(
+                str(args.scenario), "mock_xdr"
+            ).skip_entity_response
         result = run_gold_loop(
             client,
             event_ids=event_ids,
@@ -1242,6 +1440,8 @@ def main(argv: list[str] | None = None) -> int:
             poll_interval_s=float(args.poll_interval_s),
             max_wait_s=float(args.max_wait_s),
             require_closed=bool(args.require_closed),
+            require_llm_generated_report=(suite == "eventtype8"),
+            skip_analyst_terminal_verdict=skip_analyst_terminal_verdict,
         )
         if str(args.scenario) == "account_anomaly_fp":
             pressure_assertions: dict[str, Any] = {}
@@ -1253,8 +1453,18 @@ def main(argv: list[str] | None = None) -> int:
                     decisions=result.get("decisions", {}).get(event_id),
                 )
             result["pressure_assertions"] = pressure_assertions
+        if suite == "eventtype8":
+            eventtype8_assertions: dict[str, Any] = {}
+            for event_id in event_ids:
+                eventtype8_assertions[event_id] = run_eventtype8_mock_column_gate(
+                    client,
+                    event_id,
+                    str(args.scenario),
+                )
+            result["eventtype8_mock_column"] = eventtype8_assertions
     result["seed_summary"] = seed_summary
     result["scenario"] = args.scenario
+    result["suite"] = suite
     result["event_ids"] = event_ids
     result["require_closed"] = bool(args.require_closed)
     result["analysis_only"] = bool(args.analysis_only)

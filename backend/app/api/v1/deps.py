@@ -418,19 +418,9 @@ DetectionPromotionDep = Annotated[Any, Depends(get_detection_promotion_service)]
 def _get_adapter_registry() -> Any:
     global _adapter_registry
     if _adapter_registry is None:
-        from app.adapters.mock_xdr import MockXDRDispositionAdapter
-        from app.adapters.registry import DispositionAdapterRegistry
+        from app.adapters.factory import build_disposition_adapter_registry
 
-        settings = get_settings()
-        registry = DispositionAdapterRegistry()
-        base_url = settings.disposition_base_url or "http://mock-xdr"
-        adapter = MockXDRDispositionAdapter(
-            base_url=base_url,
-            read_token="mock-read-token",
-            write_token="mock-write-token",
-        )
-        registry.register("mock_xdr", adapter)
-        _adapter_registry = registry
+        _adapter_registry = build_disposition_adapter_registry(get_settings())
     return _adapter_registry
 
 
@@ -561,6 +551,13 @@ async def _build_production_investigation_graph(
     stack = await _get_investigation_stack()
     wm = stack["wm"]
     event_bus = _get_event_bus()
+    from app.adapters.sangfor.capability_manifest import response_agent_overrides_for_kind
+
+    settings = get_settings()
+    live_overrides = response_agent_overrides_for_kind(
+        settings.disposition_adapter_kind,
+        settings,
+    )
     response_agent = ResponseAgent(
         llm_client=stack["llm_client"],
         working_memory=wm.for_writer("ResponseAgent"),
@@ -572,6 +569,7 @@ async def _build_production_investigation_graph(
         session_factory=stack["session_factory"],
         playbook_kb_service=stack.get("playbook_kb_service"),
         playbook_release_service=stack.get("playbook_release_service"),
+        **live_overrides,
     )
     verify_agent = VerifyAgent(
         tool_executor=stack["tool_executor"],

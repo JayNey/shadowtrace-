@@ -238,5 +238,17 @@
     "risk_score": 84,
     "resolution": "重置凭据并禁用账号，与变更窗口内 ops-change-bot 合规批量登录区分",
     "closed_at": "2024-05-02T03:20:00Z"
+  },
+  {
+    "case_id": "case-10000021",
+    "event_id": null,
+    "event_type": "other",
+    "case_label": "uncertain",
+    "summary": "通用工作站 WKS-GEN-099 上 general-user-099 触发低置信未分类告警，上下文不足以归入已知 EventType",
+    "key_entities": "account=general-user-099; host=WKS-GEN-099; signal=unclassified; confidence=low",
+    "final_verdict": "none",
+    "risk_score": 22,
+    "resolution": "保持观察并补证据，不执行主机隔离或网络封禁",
+    "closed_at": "2024-06-15T12:00:00Z"
   }
 ]

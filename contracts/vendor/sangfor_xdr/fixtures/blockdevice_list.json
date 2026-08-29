@@ -1,0 +1,17 @@
+{
+  "code": "Success",
+  "message": "OK",
+  "data": {
+    "item": [
+      {
+        "deviceId": 12346,
+        "deviceName": "AF_011",
+        "deviceStatus": "online",
+        "deviceType": "AF",
+        "deviceVersion": "8.0.15",
+        "deviceIp": "1.2.3.4",
+        "gatewayId": "33173365542"
+      }
+    ]
+  }
+}

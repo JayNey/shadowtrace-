@@ -1,0 +1,18 @@
+{
+  "code": "Success",
+  "message": "请求成功",
+  "data": {
+    "total": 1,
+    "pageSize": 100,
+    "page": 1,
+    "item": [
+      {
+        "id": "isolate-policy-wire-001",
+        "hostIp": "10.20.30.23",
+        "isolateStatus": "",
+        "deviceId": 187913,
+        "deviceName": "EDR_001"
+      }
+    ]
+  }
+}

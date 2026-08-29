@@ -32,7 +32,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from app.agents.base import AgentOutput, BaseAgent
 from app.agents.planner_agent import PlannerAgent
 from app.agents.rag_agent import RAGAgent
-from app.core.config import get_settings
+from app.core.config import TaskMode, get_settings
 from app.core.errors import (
     DependencyUnavailableError,
     InvestigationInProgressError,
@@ -1251,7 +1251,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             assigned_agent="graph_agent",
             step_goal="post_report_graph",
         )
-        await self._run_graph_step(ec, dummy_step)
+        if ec.graph_output is None:
+            await self._run_graph_step(ec, dummy_step)
         await self._run_storyline_step(ec)
         logger.info(
             "SuperAgent: finalized analysis artifacts for event=%s (graph=%s storyline=%s)",
@@ -1307,7 +1308,11 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             return  # already generated (by post-hook or prior plan step)
         event_id = _event_id_from_context(ec)
         try:
-            storyline = await self.storyline_service.generate(ec.model_dump(mode="json"))
+            defer_llm = get_settings().task_mode is TaskMode.CELERY
+            storyline = await self.storyline_service.generate(
+                ec.model_dump(mode="json"),
+                defer_llm=defer_llm,
+            )
             if storyline is not None:
                 # Persist to in-memory EventContext so downstream consumers
                 # (persist, frontend polling) see the latest storyline.

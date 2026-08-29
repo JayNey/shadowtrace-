@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -67,6 +68,7 @@ from app.models.tool_meta import (
 )
 from app.models.tool_meta import (
     CapabilityManifest,
+    ToolMeta,
 )
 from app.models.workflow import FP_HIGH_THRESHOLD
 from app.services.context_service import append_context_journal_in_session
@@ -95,6 +97,12 @@ _L1_DIRECT_COEXIST_WITH_XDR = frozenset(
 )
 _TICKET_TARGET = "ticket"
 _CHANNEL_TARGET = "security_team"
+
+
+def _tool_index_or_baseline(
+    tool_index: Mapping[str, ToolMeta] | None,
+) -> Mapping[str, ToolMeta]:
+    return tool_index if tool_index is not None else baseline_tool_index()
 
 
 def generate_response_plan_id(event_id: str, plan_revision: int) -> str:
@@ -283,13 +291,14 @@ class ResponsePolicyFilter:
         disposition_policy: DispositionPolicy,
         source_locator: SourceObjectLocator | None,
         policy_resolver: SourcePolicyResolver | None = None,
+        tool_index: Mapping[str, ToolMeta] | None = None,
     ) -> None:
         self.manifest = manifest
         self.entities = entities
         self.disposition_policy = disposition_policy
         self.source_locator = source_locator
         self.policy_resolver = policy_resolver or SourcePolicyResolver()
-        self._tool_index = baseline_tool_index()
+        self._tool_index = _tool_index_or_baseline(tool_index)
 
     def filter_candidates(self, candidates: list[ActionCandidate]) -> list[ActionCandidate]:
         accepted: list[ActionCandidate] = []
@@ -426,7 +435,7 @@ class ResponsePolicyFilter:
         self,
         *,
         tool_name: str,
-        execution_owner: ExecutionOwner,
+        execution_owner: ExecutionOwner | None,
     ) -> tuple[bool, bool, WritebackReadiness, str | None]:
         writeback_required = self.disposition_policy is DispositionPolicy.REQUIRED
         if not writeback_required:
@@ -483,9 +492,10 @@ def resolve_entity_targets(
     *,
     prefer_external_ip: bool = True,
     include_internal_ip: bool = False,
+    tool_index: Mapping[str, ToolMeta] | None = None,
 ) -> list[tuple[str, str]]:
     """Map a tool to zero or more (target_type, canonical_target) pairs."""
-    meta = baseline_tool_index().get(tool_name)
+    meta = _tool_index_or_baseline(tool_index).get(tool_name)
     if meta is None:
         return []
 
@@ -544,8 +554,12 @@ def resolve_entity_targets(
 def expand_rule_candidates(
     rule_actions: list[ResponseRuleAction],
     entities: EntitySet,
+    *,
+    tool_index: Mapping[str, ToolMeta] | None = None,
+    include_internal_ip: bool = False,
 ) -> list[ActionCandidate]:
     candidates: list[ActionCandidate] = []
+    index = _tool_index_or_baseline(tool_index)
     for rule in rule_actions:
         if rule.tool_name in _NON_TARGET_TOOLS:
             params = (
@@ -570,7 +584,12 @@ def expand_rule_candidates(
             )
             continue
 
-        pairs = resolve_entity_targets(rule.tool_name, entities)
+        pairs = resolve_entity_targets(
+            rule.tool_name,
+            entities,
+            tool_index=index,
+            include_internal_ip=include_internal_ip,
+        )
         if not pairs:
             continue
         for target_type, target in pairs:
@@ -592,13 +611,15 @@ def candidates_from_playbook(
     entities: EntitySet,
     *,
     playbook_ref: PlaybookRef | None = None,
+    tool_index: Mapping[str, ToolMeta] | None = None,
 ) -> list[ActionCandidate]:
     candidates: list[ActionCandidate] = []
+    index = _tool_index_or_baseline(tool_index)
     for step in playbook.steps:
         template_snapshot = build_action_template_snapshot(step)
         if step.tool_name.startswith(_QUERY_TOOL_PREFIX):
             continue
-        if step.tool_name not in baseline_tool_index():
+        if step.tool_name not in index:
             continue
         if step.tool_name in _NON_TARGET_TOOLS:
             params = (
@@ -622,7 +643,12 @@ def candidates_from_playbook(
                 )
             )
             continue
-        pairs = resolve_entity_targets(step.tool_name, entities)
+        pairs = resolve_entity_targets(
+            step.tool_name,
+            entities,
+            tool_index=index,
+            include_internal_ip=playbook.event_type is EventType.LATERAL_MOVEMENT,
+        )
         if not pairs:
             continue
         for target_type, target in pairs:
@@ -652,8 +678,12 @@ def approved_terminal_for_context(
     return [SourceDisposition.CONTAINED, SourceDisposition.COMPLETED]
 
 
-def sort_candidates(candidates: list[ActionCandidate]) -> list[ActionCandidate]:
-    index = baseline_tool_index()
+def sort_candidates(
+    candidates: list[ActionCandidate],
+    *,
+    tool_index: Mapping[str, ToolMeta] | None = None,
+) -> list[ActionCandidate]:
+    index = _tool_index_or_baseline(tool_index)
 
     def sort_key(item: ActionCandidate) -> tuple[int, int, str]:
         meta = index.get(item.tool_name)
@@ -725,6 +755,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
         capability_manifest: CapabilityManifest | None = None,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         scenario_id: str | None = None,
+        tool_index: Mapping[str, ToolMeta] | None = None,
     ) -> None:
         super().__init__(
             llm_client=llm_client,
@@ -742,6 +773,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
         self.capability_manifest = capability_manifest or build_mock_capability_manifest()
         self.session_factory = session_factory
         self.scenario_id = scenario_id
+        self._tool_index = _tool_index_or_baseline(tool_index)
         self.last_generated_by: ResponsePlanGeneratedBy = ResponsePlanGeneratedBy.TEMPLATE
 
     async def _run(self, input: ResponseAgentInput) -> ResponsePlan:
@@ -765,6 +797,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             entities=entities,
             disposition_policy=disposition_policy,
             source_locator=source_locator,
+            tool_index=self._tool_index,
         )
 
         candidates: list[ActionCandidate] = []
@@ -813,7 +846,12 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             # Coverage / ticket-only fallback still needs isolate_host + disable_account.
             rule_actions = get_rule_actions(event_type, Severity.HIGH)
         rule_fallback_pool = policy_filter.filter_candidates(
-            expand_rule_candidates(rule_actions, entities),
+            expand_rule_candidates(
+                rule_actions,
+                entities,
+                tool_index=policy_filter._tool_index,
+                include_internal_ip=event_type is EventType.LATERAL_MOVEMENT,
+            ),
         )
         if not evidence_high_impact_blocked:
             candidates, generated_by, strategy = apply_containment_quality_gate(
@@ -825,6 +863,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                 risk_assessment=input.risk_assessment,
                 final_verdict=ctx.get("final_verdict"),
                 entities=entities,
+                event_type=event_type,
                 disposition_only=disposition_only,
                 evidence_output=input.evidence_output,
             )
@@ -834,10 +873,8 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             strategy=strategy,
             disposition_only=disposition_only,
         )
-        tool_index = baseline_tool_index()
-
         def _resolve_tool_level(tool_name: str) -> ActionLevel:
-            meta = tool_index.get(tool_name)
+            meta = policy_filter._tool_index.get(tool_name)
             return meta.action_level if meta is not None else ActionLevel.L0
 
         candidates, generated_by, strategy = apply_evidence_sufficiency_gate(
@@ -850,7 +887,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             resolve_tool_level=_resolve_tool_level,
             fallback_safe_candidates=rule_fallback_pool,
         )
-        candidates = sort_candidates(candidates)
+        candidates = sort_candidates(candidates, tool_index=policy_filter._tool_index)
         candidates = _cap_low_severity_candidates(
             candidates,
             severity,
@@ -956,6 +993,8 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                 expand_rule_candidates(
                     get_rule_actions(event_type, severity),
                     entities,
+                    tool_index=self._tool_index,
+                    include_internal_ip=event_type is EventType.LATERAL_MOVEMENT,
                 ),
                 ResponsePlanGeneratedBy.TEMPLATE,
                 "playbook_refs_invalid; DEFAULT_RESPONSE_RULES fallback",
@@ -977,6 +1016,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                         playbook,
                         entities,
                         playbook_ref=pinned_ref,
+                        tool_index=self._tool_index,
                     ),
                     ResponsePlanGeneratedBy.TEMPLATE,
                     f"playbook {playbook.playbook_id}@{release.release_version}",
@@ -1000,7 +1040,12 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             playbook = await self._load_playbook_legacy(playbook_refs[0].playbook_id)
             if playbook is not None:
                 return (
-                    candidates_from_playbook(playbook, entities, playbook_ref=playbook_refs[0]),
+                    candidates_from_playbook(
+                        playbook,
+                        entities,
+                        playbook_ref=playbook_refs[0],
+                        tool_index=self._tool_index,
+                    ),
                     ResponsePlanGeneratedBy.TEMPLATE,
                     f"playbook {playbook.playbook_id}",
                 )
@@ -1039,7 +1084,12 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
         else:
             strategy = "DEFAULT_RESPONSE_RULES fallback"
         return (
-            expand_rule_candidates(rule_actions, entities),
+            expand_rule_candidates(
+                rule_actions,
+                entities,
+                tool_index=self._tool_index,
+                include_internal_ip=event_type is EventType.LATERAL_MOVEMENT,
+            ),
             ResponsePlanGeneratedBy.TEMPLATE,
             strategy,
         )
@@ -1086,7 +1136,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             evidence_output=input.evidence_output,
             risk_assessment=input.risk_assessment,
         ):
-            tool_index = baseline_tool_index()
+            tool_index = self._tool_index
             capped: list[str] = []
             for name in available:
                 meta = tool_index.get(name)
@@ -1172,7 +1222,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
         disposition_policy: DispositionPolicy,
         source_locator: SourceObjectLocator | None,
     ) -> list[Action]:
-        index = baseline_tool_index()
+        index = policy_filter._tool_index
         locator_hash = compute_source_locator_hash(source_locator)
         actions: list[Action] = []
         for candidate in candidates:
@@ -1180,8 +1230,6 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             if meta is None:
                 continue
             owner = policy_filter.resolve_execution_owner(candidate.tool_name)
-            if owner is None:
-                continue
 
             approved = [
                 SourceDisposition(value)

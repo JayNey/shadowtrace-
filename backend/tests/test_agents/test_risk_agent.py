@@ -22,6 +22,7 @@ from app.agents.risk_scoring_engine import (
     apply_evidence_limited_adjustments,
     apply_versioned_confidence_cap,
     extract_source_baseline,
+    factor_weights_for,
     is_evidence_limited,
     severity_from_score,
     source_scale_unnormalized,
@@ -398,6 +399,18 @@ def event_service() -> _FakeEventService:
 
 def test_factor_weights_sum_to_one() -> None:
     assert abs(sum(FACTOR_WEIGHTS.values()) - 1.0) < 1e-9
+    for event_type in EventType:
+        weights = factor_weights_for(event_type)
+        assert abs(sum(weights.values()) - 1.0) < 1e-9
+        assert set(weights) == set(FACTOR_WEIGHTS)
+    assert (
+        factor_weights_for(EventType.DATA_EXFILTRATION)["data_sensitivity"]
+        > (FACTOR_WEIGHTS["data_sensitivity"])
+    )
+    assert (
+        factor_weights_for(EventType.MALICIOUS_PROCESS)["behavior_anomaly"]
+        > (FACTOR_WEIGHTS["behavior_anomaly"])
+    )
 
 
 def test_severity_bands() -> None:

@@ -55,7 +55,9 @@ from dynamic_eval_full_loop import (  # noqa: E402
     parse_seed_stdout,
 )
 from dynamic_eval_profiles import (  # noqa: E402
+    EVENTTYPE8_SCENARIOS,
     ScenarioEvalProfile,
+    allowed_scenarios_for_suite,
     profile_for_scenario,
 )
 
@@ -349,6 +351,7 @@ def _seed_scenario(
     seed: int,
     mock_xdr_url: str,
     instance: int = 0,
+    suite: str = "demo",
 ) -> dict[str, Any]:
     cmd = _compose_cmd(
         project,
@@ -366,6 +369,8 @@ def _seed_scenario(
         str(seed),
         "--instance",
         str(instance),
+        "--suite",
+        suite,
     )
     print(f"[dynamic-eval-matrix] seed scenario={scenario} project={project}")
     proc = _run(cmd, capture=True, check=False)
@@ -397,6 +402,7 @@ def _run_full_loop_via_exec(
     max_wait_s: float,
     poll_interval_s: float,
     gate_label: str = "full_loop",
+    suite: str = "demo",
 ) -> dict[str, Any]:
     cmd = _compose_cmd(
         project,
@@ -420,6 +426,8 @@ def _run_full_loop_via_exec(
         str(max_wait_s),
         "--json",
     )
+    if suite != "demo":
+        cmd.extend(["--suite", suite])
     for event_id in event_ids:
         cmd.extend(["--event-id", event_id])
     if analysis_only:
@@ -466,6 +474,7 @@ def _run_scenario_gate(
     gate: str,
     max_wait_s: float,
     poll_interval_s: float,
+    suite: str = "demo",
 ) -> dict[str, Any]:
     if gate == "semantic":
         if profile.semantic == "full_loop_strict":
@@ -479,6 +488,7 @@ def _run_scenario_gate(
                 max_wait_s=max_wait_s,
                 poll_interval_s=poll_interval_s,
                 gate_label="semantic_full_loop_strict",
+                suite=suite,
             )
         return _run_full_loop_via_exec(
             project,
@@ -492,6 +502,7 @@ def _run_scenario_gate(
             max_wait_s=max_wait_s,
             poll_interval_s=poll_interval_s,
             gate_label=f"semantic_{profile.semantic}",
+            suite=suite,
         )
     if gate == "pressure" and profile.pressure != "none":
         return _run_full_loop_via_exec(
@@ -504,6 +515,7 @@ def _run_scenario_gate(
             max_wait_s=max_wait_s,
             poll_interval_s=poll_interval_s,
             gate_label=f"pressure_{profile.pressure}",
+            suite=suite,
         )
     raise MatrixError(f"unsupported gate={gate!r} for scenario={scenario!r}")
 
@@ -525,6 +537,7 @@ def run_scenario(
     max_events: int,
     build: bool,
     manifest_sink: dict[str, Any] | None = None,
+    suite: str = "demo",
 ) -> dict[str, Any]:
     project = _scenario_project_name(scenario, run_id)
     compose_files = [_BASE_COMPOSE, _EVAL_COMPOSE]
@@ -582,6 +595,7 @@ def run_scenario(
             seed=seed,
             mock_xdr_url=mock_xdr_url,
             instance=0,
+            suite=suite,
         )
         event_ids = event_ids_from_seed_summary(
             seed_summary,
@@ -609,6 +623,7 @@ def run_scenario(
                 gate="semantic",
                 max_wait_s=max_wait_s,
                 poll_interval_s=poll_interval_s,
+                suite=suite,
             )
             manifest["semantic_result"] = semantic_result
             pressure_result: dict[str, Any] | None = None
@@ -623,6 +638,7 @@ def run_scenario(
                         seed=seed,
                         mock_xdr_url=mock_xdr_url,
                         instance=1,
+                        suite=suite,
                     )
                     pressure_ids = event_ids_from_seed_summary(
                         pressure_seed_summary,
@@ -661,6 +677,7 @@ def run_scenario(
                         gate="pressure",
                         max_wait_s=max_wait_s,
                         poll_interval_s=poll_interval_s,
+                        suite=suite,
                     )
                 except MatrixError as exc:
                     pressure_msg = _sanitize_error_text(str(exc))
@@ -696,6 +713,7 @@ def run_scenario(
                 require_closed=require_closed,
                 max_wait_s=max_wait_s,
                 poll_interval_s=poll_interval_s,
+                suite=suite,
             )
             manifest["result"] = loop_result
             manifest["status"] = "passed"
@@ -758,9 +776,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="ISSUE-301 official dynamic-eval matrix (fresh stack per scenario)"
     )
     parser.add_argument(
+        "--suite",
+        choices=("demo", "eventtype8"),
+        default="demo",
+        help="demo: GOLD_SCENARIOS (default). eventtype8: 8 EventType full_loop_strict suite",
+    )
+    parser.add_argument(
         "--scenarios",
-        default=_DEFAULT_SCENARIOS,
-        help=f"Comma-separated scenario ids (default: {_DEFAULT_SCENARIOS})",
+        default=None,
+        help=(
+            "Comma-separated scenario ids. Default: GOLD_SCENARIOS for suite=demo, "
+            "EVENTTYPE8_SCENARIOS for suite=eventtype8"
+        ),
     )
     parser.add_argument(
         "--artifact-dir",
@@ -820,7 +847,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _parse_scenarios(raw: str) -> list[str]:
+def _parse_scenarios(raw: str, *, allowed: tuple[str, ...] | None = None) -> list[str]:
+    allowed_ids = allowed if allowed is not None else GOLD_SCENARIOS
     scenarios = [part.strip() for part in raw.split(",") if part.strip()]
     if not scenarios:
         raise MatrixError("at least one scenario is required")
@@ -829,12 +857,23 @@ def _parse_scenarios(raw: str) -> list[str]:
         if scenario in seen:
             raise MatrixError(f"duplicate scenario in --scenarios: {scenario!r}")
         seen.add(scenario)
-    unknown = [s for s in scenarios if s not in GOLD_SCENARIOS]
+    unknown = [s for s in scenarios if s not in allowed_ids]
     if unknown:
         raise MatrixError(
-            f"unknown scenario(s): {unknown}; allowed={list(GOLD_SCENARIOS)}"
+            f"unknown scenario(s): {unknown}; allowed={list(allowed_ids)}"
         )
     return scenarios
+
+
+def resolve_matrix_scenarios(*, suite: str, scenarios_raw: str | None) -> list[str]:
+    allowed = allowed_scenarios_for_suite(suite)
+    if scenarios_raw:
+        raw = scenarios_raw
+    elif suite == "eventtype8":
+        raw = ",".join(EVENTTYPE8_SCENARIOS)
+    else:
+        raw = _DEFAULT_SCENARIOS
+    return _parse_scenarios(raw, allowed=allowed)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -849,6 +888,11 @@ def main(argv: list[str] | None = None) -> int:
             "Refusing max-wait-s >= 30 minutes — use scripted approve, not timeout."
         )
 
+    suite = str(args.suite)
+    if suite == "eventtype8" and args.profile_by_scenario:
+        raise SystemExit("--suite eventtype8 cannot be combined with --profile-by-scenario")
+    if suite == "eventtype8":
+        args.require_closed = True
     if args.require_closed and args.profile_by_scenario:
         raise SystemExit("--require-closed cannot be combined with --profile-by-scenario")
 
@@ -858,7 +902,10 @@ def main(argv: list[str] | None = None) -> int:
     artifact_root = Path(
         args.artifact_dir or (_ROOT_DIR / "artifacts" / "dynamic-eval-matrix" / run_id)
     )
-    scenarios = _parse_scenarios(str(args.scenarios))
+    scenarios = resolve_matrix_scenarios(
+        suite=suite,
+        scenarios_raw=str(args.scenarios) if args.scenarios is not None else None,
+    )
 
     active_run: dict[str, Any] = {
         "artifact_root": artifact_root,
@@ -903,6 +950,7 @@ def main(argv: list[str] | None = None) -> int:
     summary: dict[str, Any] = {
         "run_id": run_id,
         "git_commit": _git_commit(),
+        "suite": suite,
         "scenarios": scenarios,
         "artifact_root": str(artifact_root),
         "fresh_volumes": bool(args.fresh_volumes),
@@ -941,6 +989,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_events=int(args.max_events),
                 build=not bool(args.no_build),
                 manifest_sink=active_run["manifest"],
+                suite=suite,
             )
             summary["results"][scenario] = {
                 "status": manifest.get("status"),

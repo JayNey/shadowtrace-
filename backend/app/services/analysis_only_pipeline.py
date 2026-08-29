@@ -398,23 +398,26 @@ class AnalysisOnlyPipeline:
             EventStatus.ANALYZING,
             reason="analysis_pipeline:evidence_analyze",
         )
-        rag_output, rag_degraded = await run_rag_stage(
+        source_snapshot = (
+            (await self._context_store.get_full_context(event_id)).source_snapshot
+            if self._context_store is not None and event is None
+            else None
+        )
+        rag_task = run_rag_stage(
             self._rag,
             event_id=event_id,
             triage_result=triage_result,
             evidence_output=evidence_output,
             tenant_id=(event.creation_source_ref.source_tenant_id if event is not None else None),
             principal="investigation:analysis_only_pipeline",
-            # When ``event`` is absent, resolve tenant from persisted source snapshot.
-            source_snapshot=(
-                (await self._context_store.get_full_context(event_id)).source_snapshot
-                if self._context_store is not None and event is None
-                else None
-            ),
+            source_snapshot=source_snapshot,
             occurred_at=getattr(event, "occurred_at", None) if event is not None else None,
         )
-
-        graph_output = await self._run_graph(event_id, evidence_output)
+        rag_result, graph_output = await asyncio.gather(
+            rag_task,
+            self._run_graph(event_id, evidence_output),
+        )
+        rag_output, rag_degraded = rag_result
 
         await self._transition(
             event_id,

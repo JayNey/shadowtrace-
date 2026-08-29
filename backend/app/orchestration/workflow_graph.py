@@ -1810,9 +1810,19 @@ def build_investigation_graph(
 
     async def approval_node(state: InvestigationState) -> InvestigationState:
         async def _enter_execution(plan_revision: int, *, reason: str) -> InvestigationState:
+            event_id = state["event_id"]
             current = EventStatus(state.get("event_status", EventStatus.WAITING_APPROVAL.value))
+            db_status = await _read_db_event_status(services, event_id)
+            # L0/L1-only plans: ApprovalEngine.plan_fully_decided may already
+            # have moved the host to EXECUTING_RESPONSE / REPORTING while
+            # graph state still holds WAITING_APPROVAL.
+            if db_status in {
+                EventStatus.EXECUTING_RESPONSE,
+                EventStatus.REPORTING,
+            }:
+                current = db_status
             await runtime.set_execution_substate(
-                state["event_id"],
+                event_id,
                 ExecutionSubstate.NONE,
                 event_status=current,
             )
@@ -1820,7 +1830,10 @@ def build_investigation_graph(
                 "execution_substate": ExecutionSubstate.NONE.value,
                 "needs_approval_wait": False,
                 "plan_revision": plan_revision,
+                "event_status": current.value,
             }
+            if current is EventStatus.REPORTING:
+                return _patch_state(_trace(NODE_APPROVAL), update)
             if current is not EventStatus.EXECUTING_RESPONSE:
                 status = await _transition_status(
                     services,
@@ -2561,14 +2574,20 @@ def build_investigation_graph(
         },
     )
     graph.add_edge(NODE_EVIDENCE, NODE_FP_ADJUDICATION)
-    graph.add_conditional_edges(
-        NODE_FP_ADJUDICATION,
-        route_after_fp_adjudication,
-        {ROUTE_CONTINUE: NODE_RAG if rag_agent is not None else NODE_GRAPH},
-    )
+    # RAG and graph only share evidence; run them in the same superstep so
+    # retrieval latency does not serialize behind path ranking (and vice versa).
     if rag_agent is not None:
-        graph.add_edge(NODE_RAG, NODE_GRAPH)
-    graph.add_edge(NODE_GRAPH, NODE_RISK)
+        graph.add_edge(NODE_FP_ADJUDICATION, NODE_RAG)
+        graph.add_edge(NODE_FP_ADJUDICATION, NODE_GRAPH)
+        graph.add_edge(NODE_RAG, NODE_RISK)
+        graph.add_edge(NODE_GRAPH, NODE_RISK)
+    else:
+        graph.add_conditional_edges(
+            NODE_FP_ADJUDICATION,
+            route_after_fp_adjudication,
+            {ROUTE_CONTINUE: NODE_GRAPH},
+        )
+        graph.add_edge(NODE_GRAPH, NODE_RISK)
     graph.add_conditional_edges(
         NODE_RISK,
         route_after_risk,

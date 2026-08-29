@@ -60,7 +60,10 @@ class MockLLMClient(BaseLLMClient):
                 if isinstance(content_value, str)
                 else json.dumps(content_value, ensure_ascii=False, sort_keys=True)
             )
-            parsed = self._parse(content, response_model) if json_mode or response_model else None
+            parsed = None
+            if json_mode or response_model is not None:
+                parsed, payload_obj = self._parse(content, response_model)
+                content = json.dumps(payload_obj, ensure_ascii=False)
             response = LLMResponse(
                 content=content,
                 parsed=parsed,

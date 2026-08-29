@@ -16,21 +16,23 @@ ShadowTrace = 独立部署的多 Agent 安全运营系统：Mock XDR 输入 → 
 
 ## 当前阶段（极重要）
 
-**团队现在没有真实 XDR / 安全 GPT 环境。** 对厂商页面、字段、接口的理解都是基于公开材料与截图的**领域猜测**，用来设计兼容的内部模型与 Mock 契约，**不是**已验证的生产 API。
+**P0 / 默认 Demo 仍是 Mock 金路径：** `SOURCE_MODE=mock_xdr` + `DISPOSITION_MODE=mock_xdr` + `DISPOSITION_ADAPTER_KIND=mock` + `TOOL_MODE=mock`。不接入生产时隔离、禁用账号、杀进程与全套 `query_*` 功能完整（Canonical Mock `/mock-xdr/v1`）。Cutover-Ready ≠ 真机验证；本仓库尚未对生产 XDR 跑通，不得声称已对接。
+
+**Adapter 合同已落地，不是「等正式 API」：** 挑战杯 OpenAPI HTML 与 `contracts/vendor/sangfor_xdr`、`backend/app/adapters/sangfor/` 是 Adapter 层权威。Agent 层仍禁止厂商 path / `dealStatus` / `uuId`。通用 `HttpDispositionAdapter` 不得填深信服 URL。DSP 规范不是生产 XDR 合同，不要当 `incidents/list`。Layer 8b Query Provider 未接线：live 调查 query 标未接线 / 另开，不得写成已完整。
 
 因此本阶段默认只做：
 
 1. **MockXDRServer + MockToolProvider + Mock Disposition API** 跑通 P0 闭环与验收。
 2. 内部领域模型、状态机、Agent、审批、outbox、报告——全部厂商无关。
-3. `SourceAdapter` / `DispositionAdapter` / `ToolProvider` / `LLMProvider` 的**接口与占位**，为以后接真环境留缝。
+3. 默认 Issue 仍 Mock。除非 Issue 或 `docs/sangfor-xdr-alignment-plan.md` 点名 sangfor：只改 Adapter / contract，不改 Agent。维护已有 Sangfor Adapter 不是「根据截图猜测 REST」，也不等于已对接生产。
 
 明确不做 / 禁止：
 
-1. 不要连接、探测、调用任何真实深信服 XDR / AICP 端点。
-2. 不要根据截图或猜测硬编码厂商私有 REST 路径、operation_code、鉴权头。
-3. 不要把「猜的厂商行为」写进 Agent 业务逻辑；猜测只允许落在 Adapter 映射层或 `docs`/配置注释，并标明 `UNVERIFIED`。
-4. Issue 若提到 live / 厂商适配：只实现契约、能力探测默认 `UNKNOWN`、失败与 `writeback_unsupported` 路径；**把真实兼容留到后续拿到正式接口文档或脱敏抓包之后的专用 Issue**。
-5. 验收以 Mock 契约为准；不得声称「已对接真实 XDR」。
+1. 不要连接、探测、调用任何真实深信服 XDR / AICP 端点，除非当前 Issue/计划明确要求（例如 L10 现场探测）；不要把 Vendor Wire Mock 绿写成生产已验证。
+2. Agent 禁止厂商字符串（path / `dealStatus` / `uuId`）。Adapter 禁止发明开放列表没有的写 path（含隔离创建 URI）。
+3. 不要把厂商字段写进 Agent 业务逻辑；Sangfor 映射只落在 `adapters/sangfor` 与 vendor contract。
+4. 默认 Issue 若未点名 sangfor：不要把 Mock 闭环改成 live XDR。点名 sangfor 时按对齐计划改 Adapter/contract，不要拒绝维护已有客户端。
+5. 验收以 Mock 契约为准；不得声称「已对接真实 / 生产 XDR」；不得声称「live 调查 query 已完整」。
 
 ## 硬约束（违反即不合格）
 
@@ -113,10 +115,11 @@ ShadowTrace = 独立部署的多 Agent 安全运营系统：Mock XDR 输入 → 
 
 ## 禁止清单
 
-- 连接或实现未验证的真实 XDR/厂商 HTTP 客户端并当作完成
-- 根据截图猜测并硬编码深信服私有 REST 路径 / operation_code / 鉴权细节
-- 扩大 Issue 范围（顺手做 ISSUE-N+1 或提前做「真机兼容」）
-- 用本地成功冒充外部（含 Mock）写回成功；或宣称已对接生产 XDR
+- 把未在开放列表中的厂商 HTTP / 发明的写 path 当成完成，或宣称已对接生产 XDR
+- 在 Agent 层硬编码深信服私有 REST 路径 / `dealStatus` / `uuId` / operation_code / 鉴权细节
+- 因「旧稿曾写根据截图猜测 REST」而拒绝按 `docs/sangfor-xdr-alignment-plan.md` 维护已有 `adapters/sangfor`
+- 扩大 Issue 范围（顺手做 ISSUE-N+1 或把 Demo 切成 live XDR）
+- 用本地成功冒充外部（含 Mock）写回成功
 - `TOOL_MODE=live` 失败时静默切 Mock 仍返回成功
 - 引入方案未允许的新状态名、新写回字段、新 Agent 主名
 - 把 Kafka/Neo4j 等做成 P0 必需

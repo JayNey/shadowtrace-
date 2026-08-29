@@ -6,8 +6,12 @@ import asyncio
 import logging
 from typing import Any
 
-from app.adapters.registry import DispositionAdapterRegistry
+from app.adapters.factory import (
+    build_disposition_adapter_registry,
+    build_sangfor_live_query_adapters,
+)
 from app.core.celery_app import celery_app
+from app.core.config import get_settings
 from app.core.guardrails import OutboundDispositionGuard
 from app.core.redis_client import RedisClient
 from app.db.session import get_session_factory
@@ -26,13 +30,26 @@ RECONCILE_STALE_EXECUTIONS_TASK = "shadowtrace.reconcile_stale_executions"
 EXECUTION_QUEUE = "investigation"
 
 
+async def _tool_registry_for_settings() -> ToolRegistry:
+    settings = get_settings()
+    registry = ToolRegistry()
+    await registry.auto_discover_for_mode(
+        tool_mode=settings.tool_mode,
+        adapters=build_sangfor_live_query_adapters(settings),
+        simulation_enabled=settings.simulation_enabled,
+        allow_live_side_effects=settings.allow_live_side_effects,
+    )
+    return registry
+
+
 async def _build_execution_service() -> ActionExecutionService:
     factory = get_session_factory()
     redis = RedisClient()
     store = EventContextStore(redis, factory)
     degraded = create_degraded_flag_service(store, factory)
     audit = EventAuditLogService(factory)
-    registry = DispositionAdapterRegistry()
+    settings = get_settings()
+    registry = build_disposition_adapter_registry(settings)
     return ActionExecutionService(
         factory,
         disposition_sync=DispositionSyncService(
@@ -41,7 +58,7 @@ async def _build_execution_service() -> ActionExecutionService:
             adapter_registry=registry,
             outbound_guard=OutboundDispositionGuard(),
         ),
-        tool_executor=ToolExecutor(registry=await _mock_registry()),
+        tool_executor=ToolExecutor(registry=await _tool_registry_for_settings()),
         state_machine=StateMachineService(
             factory,
             store,
@@ -50,12 +67,6 @@ async def _build_execution_service() -> ActionExecutionService:
         ),
         context_store=store,
     )
-
-
-async def _mock_registry() -> ToolRegistry:
-    registry = ToolRegistry()
-    await registry.auto_discover_for_mode(tool_mode="mock")
-    return registry
 
 
 async def _reconcile_once_async() -> dict[str, Any]:

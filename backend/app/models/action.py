@@ -3,8 +3,12 @@
 Key invariants enforced here (intro §4.5 / §4.6):
 - system / verification actions: execution_owner is null, writeback not required
   and not applicable.
-- response / rollback actions (external side effects / disposition): exactly one
-  execution_owner (XDR_MANAGED xor DIRECT_TOOL).
+- ordinary response / rollback actions (external side effects / disposition):
+  exactly one execution_owner (XDR_MANAGED xor DIRECT_TOOL).
+- overlay capability gap: a response/rollback entity row may persist
+  execution_owner=null only when writeback_required is True, applicable is
+  False, readiness is NOT_REQUIRED, and the tool is not the terminal
+  disposition action. That snapshot means pending-manual, not success.
 - ``update_source_event_disposition`` is the only POST_VERIFY action, with
   ``activation_condition=after_effect_resolution``; all other actions are IMMEDIATE.
 Business ``writeback_required`` is a policy snapshot and must NOT be reverse-driven
@@ -124,13 +128,21 @@ class Action(BaseModel):
                 raise ValueError(
                     f"{self.action_category.value} action cannot require/apply writeback"
                 )
-        # response / rollback produce external effects: exactly one owner.
+        # response / rollback produce external effects: exactly one owner,
+        # except the overlay capability-gap snapshot (pending-manual).
         if self.action_category in (ActionCategory.RESPONSE, ActionCategory.ROLLBACK):
             if self.execution_owner is None:
-                raise ValueError(
-                    f"{self.action_category.value} action must select exactly one "
-                    "execution_owner (XDR_MANAGED xor DIRECT_TOOL)"
+                gap = (
+                    self.writeback_required is True
+                    and self.writeback_applicable is False
+                    and self.writeback_readiness is WritebackReadiness.NOT_REQUIRED
+                    and self.tool_name != TERMINAL_DISPOSITION_TOOL
                 )
+                if not gap:
+                    raise ValueError(
+                        f"{self.action_category.value} action must select exactly one "
+                        "execution_owner (XDR_MANAGED xor DIRECT_TOOL)"
+                    )
 
         # Only the terminal disposition tool is POST_VERIFY; all others IMMEDIATE.
         if self.tool_name == TERMINAL_DISPOSITION_TOOL:

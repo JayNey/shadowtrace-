@@ -491,6 +491,13 @@ async def execute_verification_tool(
     tool_name: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
+    from app.adapters.factory import KIND_SANGFOR, disposition_kind
+    from app.core.config import get_settings
+
+    if disposition_kind(get_settings()) == KIND_SANGFOR:
+        from app.adapters.sangfor.verify_observation import observe_sangfor_verification
+
+        return await observe_sangfor_verification(tool_name, params)
     return await get_mock_verification_runtime().execute(tool_name, params)
 
 

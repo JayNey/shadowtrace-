@@ -13,7 +13,7 @@ from app.models.agent_io import (
     RiskFactor,
     TriageResult,
 )
-from app.models.enums import EvidenceSource, Severity
+from app.models.enums import EventType, EvidenceSource, Severity
 from app.models.evidence import Evidence
 
 # ISSUE-102 Phase A/B: evidence-sparse scoring guardrails (fixed, testable formulas).
@@ -29,7 +29,7 @@ SOURCE_BASELINE_FLOOR_RATIO = 0.85
 _HIGH_SOURCE_MIN_SCORE = 70
 _CRITICAL_SOURCE_MIN_SCORE = 90
 
-# Fixed weights (sum = 1.0).
+# Default mix when the event type has no dedicated curve (sum = 1.0).
 FACTOR_WEIGHTS: dict[str, float] = {
     "asset_impact": 0.25,
     "behavior_anomaly": 0.20,
@@ -38,6 +38,74 @@ FACTOR_WEIGHTS: dict[str, float] = {
     "data_sensitivity": 0.10,
     "threat_intel": 0.10,
 }
+
+# Case-type curves: same six factors, different emphasis.
+_FACTOR_WEIGHTS_BY_EVENT_TYPE: dict[EventType, dict[str, float]] = {
+    EventType.DATA_EXFILTRATION: {
+        "asset_impact": 0.15,
+        "behavior_anomaly": 0.18,
+        "evidence_confidence": 0.15,
+        "attack_stage": 0.20,
+        "data_sensitivity": 0.22,
+        "threat_intel": 0.10,
+    },
+    EventType.INSIDER_THREAT: {
+        "asset_impact": 0.15,
+        "behavior_anomaly": 0.18,
+        "evidence_confidence": 0.15,
+        "attack_stage": 0.18,
+        "data_sensitivity": 0.24,
+        "threat_intel": 0.10,
+    },
+    EventType.MALICIOUS_PROCESS: {
+        "asset_impact": 0.18,
+        "behavior_anomaly": 0.28,
+        "evidence_confidence": 0.16,
+        "attack_stage": 0.18,
+        "data_sensitivity": 0.08,
+        "threat_intel": 0.12,
+    },
+    EventType.ACCOUNT_ANOMALY: {
+        "asset_impact": 0.22,
+        "behavior_anomaly": 0.26,
+        "evidence_confidence": 0.22,
+        "attack_stage": 0.12,
+        "data_sensitivity": 0.08,
+        "threat_intel": 0.10,
+    },
+    EventType.SUSPICIOUS_DOMAIN: {
+        "asset_impact": 0.18,
+        "behavior_anomaly": 0.18,
+        "evidence_confidence": 0.16,
+        "attack_stage": 0.16,
+        "data_sensitivity": 0.08,
+        "threat_intel": 0.24,
+    },
+    EventType.LATERAL_MOVEMENT: {
+        "asset_impact": 0.22,
+        "behavior_anomaly": 0.20,
+        "evidence_confidence": 0.16,
+        "attack_stage": 0.22,
+        "data_sensitivity": 0.08,
+        "threat_intel": 0.12,
+    },
+    EventType.HOST_COMPROMISE: {
+        "asset_impact": 0.24,
+        "behavior_anomaly": 0.22,
+        "evidence_confidence": 0.16,
+        "attack_stage": 0.18,
+        "data_sensitivity": 0.08,
+        "threat_intel": 0.12,
+    },
+}
+
+
+def factor_weights_for(event_type: EventType | None) -> dict[str, float]:
+    """Return a copy of the six-factor mix for this case type."""
+    if event_type is None:
+        return dict(FACTOR_WEIGHTS)
+    return dict(_FACTOR_WEIGHTS_BY_EVENT_TYPE.get(event_type, FACTOR_WEIGHTS))
+
 
 ASSET_VALUE_SCORES: dict[str, float] = {
     "critical": 100.0,
@@ -53,17 +121,33 @@ SENSITIVITY_SCORES: dict[str, float] = {
     "public": 25.0,
 }
 
-# Rough ATT&CK stage position (0 early → 100 late).
+# Rough ATT&CK stage position (0 early → 100 late). Prefix-only; sub-techniques
+# share the parent ordinal via split(".")[0].
 _TECHNIQUE_STAGE: dict[str, float] = {
     "T1566": 20.0,  # phishing
+    "T1190": 22.0,  # exploit public-facing application
     "T1078": 25.0,  # valid accounts
+    "T1133": 28.0,  # external remote services
+    "T1053": 40.0,  # scheduled task
     "T1059": 45.0,  # command scripting
-    "T1027": 50.0,
+    "T1218": 48.0,  # signed binary proxy
+    "T1027": 50.0,  # obfuscated files
+    "T1036": 50.0,  # masquerading
+    "T1003": 55.0,  # credential dumping
+    "T1552": 55.0,  # unsecured credentials
+    "T1021": 58.0,  # remote services / lateral
+    "T1083": 58.0,  # file and directory discovery
     "T1005": 60.0,  # data from local system
+    "T1114": 62.0,  # email collection
     "T1560": 70.0,  # archive collected data
+    "T1071": 80.0,  # application layer protocol / C2
+    "T1105": 82.0,  # ingress tool transfer
+    "T1048": 88.0,  # exfil over alternative protocol
     "T1041": 90.0,  # exfiltration over C2
     "T1567": 95.0,  # exfil to web service
+    "T1530": 95.0,  # data from cloud storage
     "T1486": 100.0,  # impact / ransomware
+    "T1490": 100.0,  # inhibit system recovery
 }
 
 _ANOMALY_KEYWORDS: tuple[tuple[str, float], ...] = (
@@ -553,7 +637,11 @@ class RiskScoringEngine:
                     )
             return 30.0, "缺少 ATT&CK/阶段线索，按早期阶段基线"
         best = max(stages)
-        return best, "攻击阶段依据: " + ", ".join(dict.fromkeys(labels))[:120]
+        mean = sum(stages) / len(stages)
+        # One late-stage edge should not erase corroborating earlier stages, but
+        # kill-chain progress still dominates.
+        score = 0.65 * best + 0.35 * mean
+        return score, "攻击阶段依据: " + ", ".join(dict.fromkeys(labels))[:120]
 
     def _data_sensitivity(self, evidence: list[Evidence]) -> tuple[float, str]:
         scores: list[float] = []

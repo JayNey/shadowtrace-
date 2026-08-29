@@ -312,7 +312,7 @@
       "playbook_id": "pb-3c4d5e6f",
       "playbook_name": "Insider Threat High Containment",
       "event_type": "insider_threat",
-      "min_severity": "high",
+      "min_severity": "medium",
       "description": "Contain high-risk insider threat: disable account, terminate sessions, revoke credentials, and quarantine accessed files.",
       "steps": [
         {
@@ -618,25 +618,25 @@
       "playbook_id": "pb-2a3b4c5d",
       "playbook_name": "Lateral Movement Containment",
       "event_type": "lateral_movement",
-      "min_severity": "high",
-      "description": "Contain high-severity lateral movement: isolate hosts, block IPs, disable compromised accounts, and analyze network flows.",
+      "min_severity": "medium",
+      "description": "Contain lateral movement: block pivot IPs, isolate hosts, disable compromised accounts, and analyze network flows.",
       "steps": [
         {
           "step_order": 1,
-          "action_name": "Isolate Affected Hosts",
-          "tool_name": "isolate_host",
-          "action_level": "l3",
-          "precondition": "Lateral movement source hosts identified",
-          "expected_outcome": "Source hosts network-isolated; spread halted",
-          "required_capabilities": ["entity_response"]
-        },
-        {
-          "step_order": 2,
           "action_name": "Block Lateral Movement IPs",
           "tool_name": "block_ip",
           "action_level": "l2",
           "precondition": "Lateral movement targets identified",
           "expected_outcome": "Internal pivot points blocked",
+          "required_capabilities": ["entity_response"]
+        },
+        {
+          "step_order": 2,
+          "action_name": "Isolate Affected Hosts",
+          "tool_name": "isolate_host",
+          "action_level": "l3",
+          "precondition": "Lateral movement source hosts identified",
+          "expected_outcome": "Source hosts network-isolated; spread halted",
           "required_capabilities": ["entity_response"]
         },
         {
@@ -686,6 +686,15 @@
       "steps": [
         {
           "step_order": 1,
+          "action_name": "Block Suspicious IPs",
+          "tool_name": "block_ip",
+          "action_level": "l2",
+          "precondition": "Lateral movement indicator received",
+          "expected_outcome": "Pivot points blocked; lateral paths severed",
+          "required_capabilities": ["entity_response"]
+        },
+        {
+          "step_order": 2,
           "action_name": "Query Network Flows",
           "tool_name": "query_network_flow",
           "action_level": "l0",
@@ -694,22 +703,13 @@
           "required_capabilities": []
         },
         {
-          "step_order": 2,
+          "step_order": 3,
           "action_name": "Query Asset Information",
           "tool_name": "query_asset_info",
           "action_level": "l0",
           "precondition": "Suspicious flows identified",
           "expected_outcome": "Asset details, ownership, and criticality determined",
           "required_capabilities": []
-        },
-        {
-          "step_order": 3,
-          "action_name": "Block Suspicious IPs",
-          "tool_name": "block_ip",
-          "action_level": "l2",
-          "precondition": "Lateral movement confirmed between hosts",
-          "expected_outcome": "Pivot points blocked; lateral paths severed",
-          "required_capabilities": ["entity_response"]
         },
         {
           "step_order": 4,

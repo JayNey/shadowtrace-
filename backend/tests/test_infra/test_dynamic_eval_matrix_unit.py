@@ -156,6 +156,38 @@ def test_parse_args_defaults_compat_profile(matrix_mod) -> None:
     assert args.require_closed is False
     assert args.profile_by_scenario is False
     assert args.fresh_volumes is True
+    assert args.suite == "demo"
+
+
+def test_matrix_default_scenarios_remain_gold_three(matrix_mod) -> None:
+    args = matrix_mod.parse_args([])
+    assert args.suite == "demo"
+    assert args.scenarios is None
+    assert matrix_mod.resolve_matrix_scenarios(suite="demo", scenarios_raw=None) == list(
+        matrix_mod.GOLD_SCENARIOS
+    )
+    assert len(matrix_mod.GOLD_SCENARIOS) == 3
+
+
+def test_matrix_eventtype8_allows_eight_ids_and_rejects_profile_by_scenario(
+    matrix_mod,
+) -> None:
+    ids = matrix_mod.resolve_matrix_scenarios(suite="eventtype8", scenarios_raw=None)
+    assert ids == list(matrix_mod.EVENTTYPE8_SCENARIOS)
+    assert len(ids) == 8
+    assert matrix_mod._parse_scenarios(
+        "host_compromise,lateral_movement",
+        allowed=matrix_mod.EVENTTYPE8_SCENARIOS,
+    ) == ["host_compromise", "lateral_movement"]
+    with pytest.raises(SystemExit, match="profile-by-scenario"):
+        matrix_mod.main(
+            [
+                "--suite",
+                "eventtype8",
+                "--profile-by-scenario",
+                "--no-build",
+            ]
+        )
 
 
 def test_parse_args_profile_by_scenario(matrix_mod) -> None:
@@ -408,6 +440,31 @@ def test_run_full_loop_via_exec_passes_explicit_event_ids(matrix_mod) -> None:
     assert "evt-a" in cmd and "evt-b" in cmd
     assert "--require-closed" in cmd
     assert "--generate-report" in cmd
+    assert "--suite" not in cmd
+
+
+def test_run_full_loop_via_exec_passes_eventtype8_suite(matrix_mod) -> None:
+    captured: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **kwargs):
+        captured.append(cmd)
+        return type("Proc", (), {"returncode": 0, "stdout": "{}", "stderr": ""})()
+
+    with patch.object(matrix_mod, "_run", side_effect=_fake_run):
+        matrix_mod._run_full_loop_via_exec(
+            "proj",
+            [matrix_mod._BASE_COMPOSE, matrix_mod._EVAL_COMPOSE],
+            event_ids=["evt-a"],
+            scenario="host_compromise",
+            token="bootstrap-token",
+            require_closed=True,
+            max_wait_s=10.0,
+            poll_interval_s=1.0,
+            suite="eventtype8",
+        )
+    cmd = captured[0]
+    assert cmd[cmd.index("--suite") + 1] == "eventtype8"
+    assert "--require-closed" in cmd
 
 
 def test_signal_handler_respects_fresh_volumes_flag(matrix_mod) -> None:
@@ -607,8 +664,8 @@ def test_run_scenario_profile_by_scenario_reseeds_distinct_pressure_event(
     ):
         with pytest.raises(matrix_mod.MatrixError, match="pressure boom"):
             matrix_mod.run_scenario(
-                scenario="account_anomaly_fp",
-                run_id="run-fp",
+                scenario="suspicious_domain_access",
+                run_id="run-domain-reseed",
                 artifact_root=tmp_path,
                 token="bootstrap-token",
                 seed=42,
@@ -627,13 +684,55 @@ def test_run_scenario_profile_by_scenario_reseeds_distinct_pressure_event(
     assert gate_calls[0] == ("semantic", ["evt-semantic"])
     assert gate_calls[1] == ("pressure", ["evt-pressure"])
     manifest = json.loads(
-        (tmp_path / "account_anomaly_fp" / "manifest.json").read_text(encoding="utf-8")
+        (tmp_path / "suspicious_domain_access" / "manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["status"] == "failed"
     assert manifest["pressure_error"]["type"] == "MatrixError"
     assert "[pressure gate]" in manifest["pressure_error"]["message"]
     assert manifest["semantic_event_ids"] == ["evt-semantic"]
     assert manifest["pressure_event_ids"] == ["evt-pressure"]
+
+
+def test_fp_profile_by_scenario_skips_pressure_gate(matrix_mod, tmp_path: Path) -> None:
+    """ISSUE-313: FP semantic is analysis_only_fp with pressure=none — no reseed."""
+    seed_calls: list[int] = []
+    gate_calls: list[str] = []
+
+    def _fake_seed(*_args, instance: int = 0, **_kwargs):
+        seed_calls.append(instance)
+        return {"accepted": 1, "event_ids": ["evt-semantic"]}
+
+    def _fake_gate(*_args, gate: str, **_kwargs):
+        gate_calls.append(gate)
+        return {"final_statuses": {"evt-semantic": "closed"}}
+
+    with (
+        patch.object(matrix_mod, "_compose_down"),
+        patch.object(matrix_mod, "_wait_stack_healthy"),
+        patch.object(matrix_mod, "_seed_scenario", side_effect=_fake_seed),
+        patch.object(matrix_mod, "_run_scenario_gate", side_effect=_fake_gate),
+        patch.object(matrix_mod, "_run", return_value=_mock_subprocess_result()),
+    ):
+        manifest = matrix_mod.run_scenario(
+            scenario="account_anomaly_fp",
+            run_id="run-fp",
+            artifact_root=tmp_path,
+            token="bootstrap-token",
+            seed=42,
+            mock_xdr_url="http://mock-xdr:8100",
+            require_closed=False,
+            profile_by_scenario=True,
+            fresh_volumes=True,
+            stack_timeout_s=10.0,
+            max_wait_s=10.0,
+            poll_interval_s=1.0,
+            max_events=1,
+            build=False,
+        )
+    assert seed_calls == [0]
+    assert gate_calls == ["semantic"]
+    assert manifest["status"] == "passed"
+    assert manifest["pressure_event_ids"] == []
 
 
 def test_run_scenario_profile_by_scenario_domain_pressure_failure_blocks(

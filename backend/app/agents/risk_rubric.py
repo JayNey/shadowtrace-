@@ -22,13 +22,13 @@ FACTOR_NAMES: tuple[str, ...] = (
 Lean = Literal["low", "mid", "high"]
 LEAN_VALUES: frozenset[str] = frozenset({"low", "mid", "high"})
 
-# When the rule score already sits in the chosen band, prefer the deterministic
-# rule point and only lean toward the rubric anchor.
-IN_BAND_RULE_WEIGHT = 0.6
-IN_BAND_ANCHOR_WEIGHT = 0.4
+# When the rule score already sits in the chosen band, prefer the LLM
+# situation call and only keep the rule point as a prior.
+IN_BAND_RULE_WEIGHT = 0.35
+IN_BAND_ANCHOR_WEIGHT = 0.65
 # When the rule score misses the band, pull toward the near edge — not the center.
-OUT_BAND_RULE_WEIGHT = 0.45
-OUT_BAND_EDGE_WEIGHT = 0.55
+OUT_BAND_RULE_WEIGHT = 0.30
+OUT_BAND_EDGE_WEIGHT = 0.70
 OUT_BAND_MARGIN = 8.0
 SECONDARY_BLEND = 0.3
 

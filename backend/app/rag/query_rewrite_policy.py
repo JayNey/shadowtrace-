@@ -11,7 +11,7 @@ import re
 from app.services.org_context_matcher import OrgContextFacts
 
 _STRUCTURED_MARKERS = re.compile(
-    r"(?i)(?:event\s+type\s*:|(?:host|ip|domain|account)\s*:)",
+    r"(?i)(?:event\s+type\s*:?|(?:host|ip|domain|account)\s*:)",
 )
 
 

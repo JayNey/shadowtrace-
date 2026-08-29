@@ -39,6 +39,7 @@ def build_suspicious_domain_access(
     seed: int = 42,
     variant: ScenarioVariant | str = ScenarioVariant.NORMAL,
     instance: int = 0,
+    closed_loop: bool = False,
 ) -> MockXDRScenario:
     selected_variant = normalize_variant(variant)
     base = DEFAULT_BASE_TIME
@@ -51,9 +52,10 @@ def build_suspicious_domain_access(
     log_id = f"{LOG_ID}{id_suffix}"
     conn_log = log_only_connector(connector_id=f"conn-log-domain{connector_suffix}")
     conn_disp = disposition_connector(connector_id=f"conn-disp-domain{connector_suffix}")
-    conn_disp = conn_disp.model_copy(
-        update={"disposition_policy_default": DispositionPolicy.NOT_REQUIRED}
-    )
+    if not closed_loop:
+        conn_disp = conn_disp.model_copy(
+            update={"disposition_policy_default": DispositionPolicy.NOT_REQUIRED}
+        )
     conn_gap = capability_gap_connector(connector_id=f"conn-gap-domain{connector_suffix}")
 
     asset_ref = make_ref(
@@ -157,21 +159,55 @@ def build_suspicious_domain_access(
         },
     )
     # risk_score in 40–69 → expected_verdict must stay ``none`` (not confirmed_threat).
-    risk_score = 55
+    # EventType-8 closed_loop upgrades to threat + block_domain without changing Demo.
+    risk_score = 78 if closed_loop else 55
+    incident_title = (
+        "Office host beaconed to newly registered C2 domain"
+        if closed_loop
+        else "Office host accessed newly registered domain"
+    )
+    incident_level = "high" if closed_loop else "medium"
+    gpt_label = "confirmed_c2_domain" if closed_loop else "needs_more_evidence"
     incident = SourceIncident(
         reference=incident_ref,
-        title="Office host accessed newly registered domain",
-        level="medium",
-        gpt_verdict_label="needs_more_evidence",
+        title=incident_title,
+        level=incident_level,
+        gpt_verdict_label=gpt_label,
         related_alert_refs=[alert_ref],
         impacted_asset_refs=[asset_ref],
-        normalized={"risk_score": risk_score, "exfil_observed": False},
+        normalized={
+            "event_type": "suspicious_domain",
+            "risk_score": risk_score,
+            "exfil_observed": False,
+        },
     )
 
     timeline = telemetry_for_variant(
-        _build_timeline(base=base, seed=seed, risk_score=risk_score),
+        _build_timeline(base=base, seed=seed, risk_score=risk_score, closed_loop=closed_loop),
         variant=selected_variant,
     )
+
+    expected_outcome: dict[str, Any] = {
+        "expected_verdict": "confirmed_threat" if closed_loop else "none",
+        "expected_severity": "high" if closed_loop else "medium",
+        "risk_score": risk_score,
+        "disposition_policy": "required" if closed_loop else "not_required",
+        "exfil_observed": False,
+        "active_variant": selected_variant.value,
+        "variants": list(SCENARIO_VARIANTS),
+        "closed_loop": closed_loop,
+        "provider_error_codes": (
+            ["capacity_limit_exceeded"]
+            if selected_variant is ScenarioVariant.CAPACITY_LIMIT_EXCEEDED
+            else []
+        ),
+    }
+    if closed_loop:
+        expected_outcome["allowed_actions"] = [
+            "block_domain",
+            "create_ticket",
+            "notify_security_team",
+        ]
 
     return MockXDRScenario(
         scenario_id=SCENARIO_ID,
@@ -193,24 +229,13 @@ def build_suspicious_domain_access(
             seed=seed,
             variant=selected_variant,
         ),
-        expected_outcome={
-            "expected_verdict": "none",
-            "expected_severity": "medium",
-            "risk_score": risk_score,
-            "disposition_policy": "not_required",
-            "exfil_observed": False,
-            "active_variant": selected_variant.value,
-            "variants": list(SCENARIO_VARIANTS),
-            "provider_error_codes": (
-                ["capacity_limit_exceeded"]
-                if selected_variant is ScenarioVariant.CAPACITY_LIMIT_EXCEEDED
-                else []
-            ),
-        },
+        expected_outcome=expected_outcome,
     )
 
 
-def _build_timeline(*, base: datetime, seed: int, risk_score: int) -> list[dict[str, Any]]:
+def _build_timeline(
+    *, base: datetime, seed: int, risk_score: int, closed_loop: bool = False
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     rows.append(
         event(
@@ -326,8 +351,8 @@ def _build_timeline(*, base: datetime, seed: int, risk_score: int) -> list[dict[
             base_time=base,
             indicator=NEW_DOMAIN,
             indicator_type="domain",
-            confidence=0.45,
-            tags=["newly_registered"],
+            confidence=0.86 if closed_loop else 0.45,
+            tags=["c2", "newly_registered"] if closed_loop else ["newly_registered"],
             risk_score=risk_score,
             is_key_event=True,
         )

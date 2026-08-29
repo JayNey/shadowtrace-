@@ -252,6 +252,7 @@ class PlaybookReleaseService:
                 for active in active_rows:
                     active.lifecycle_state = KnowledgeReleaseLifecycleState.RETIRED.value
                     active.retired_at = now
+                await session.flush()
 
                 row.lifecycle_state = KnowledgeReleaseLifecycleState.ACTIVE.value
                 row.vector_ready = True

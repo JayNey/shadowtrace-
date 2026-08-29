@@ -14,11 +14,11 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.adapters.mock_xdr import MockXDRSourceAdapter
+from app.adapters.factory import build_source_adapter, source_mode_is_supported
+from app.adapters.source.base import BaseSourceAdapter
 from app.core.config import Settings, get_settings
 from app.core.redis_client import RedisClient
 from app.ingestion.source_ingester import IngestionSummary, SourceIngester
-from app.mock_xdr.state import MOCK_XDR_DEFAULT_READ_TOKEN, MOCK_XDR_DEFAULT_WRITE_TOKEN
 from app.models.enums import SourceObjectKind
 from app.services.event_service import EventService
 
@@ -75,9 +75,9 @@ class IngestionScheduler:
             return IngestionRunResult(status="skipped", reason="scheduler_disabled")
 
         source_mode = (settings.source_mode or "").strip().lower()
-        if source_mode != "mock_xdr":
+        if not source_mode_is_supported(settings):
             logger.info(
-                "ingestion scheduler skip: unsupported source_mode=%s (mock_xdr only)",
+                "ingestion scheduler skip: unsupported source_mode=%s",
                 settings.source_mode,
             )
             return IngestionRunResult(status="skipped", reason=f"source_mode_{source_mode}")
@@ -91,9 +91,9 @@ class IngestionScheduler:
                 logger.info("ingestion scheduler skip: advisory lock not acquired")
                 return IngestionRunResult(status="skipped", reason="lock_not_acquired")
 
-            adapter: MockXDRSourceAdapter | None = None
+            adapter: BaseSourceAdapter | None = None
             try:
-                adapter = self._build_mock_adapter(settings)
+                adapter = self._build_source_adapter(settings)
                 ingester = SourceIngester(
                     self._event_service,
                     self._session_factory,
@@ -137,14 +137,12 @@ class IngestionScheduler:
                     text("SELECT pg_advisory_unlock(:key)").bindparams(key=lock_key)
                 )
 
-    def _build_mock_adapter(self, settings: Settings) -> MockXDRSourceAdapter:
-        base_url = (settings.disposition_base_url or "http://mock-xdr:8100").strip()
-        return MockXDRSourceAdapter(
-            base_url=base_url,
-            read_token=MOCK_XDR_DEFAULT_READ_TOKEN,
-            write_token=MOCK_XDR_DEFAULT_WRITE_TOKEN,
-            max_retries=0,
-        )
+    def _build_source_adapter(self, settings: Settings) -> BaseSourceAdapter:
+        return build_source_adapter(settings)
+
+    def _build_mock_adapter(self, settings: Settings) -> BaseSourceAdapter:
+        """Backward-compatible alias; production path is ``_build_source_adapter``."""
+        return self._build_source_adapter(settings)
 
     async def _record_stats(self, summary: IngestionSummary) -> None:
         """Best-effort counters in Redis (no TTL; operational metrics only)."""

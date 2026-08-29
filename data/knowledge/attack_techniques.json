@@ -274,7 +274,9 @@
       "technique_id": "T1021",
       "technique_name": "Remote Services",
       "tactics": ["Lateral Movement"],
-      "description": "Adversaries may use valid accounts to log into remote services for lateral movement. This includes Remote Desktop Protocol (RDP), SSH, SMB/Windows admin shares, WinRM, VNC, and PsExec. Remote services may allow direct command execution or interactive desktop access on target systems.",
+      "keywords": ["lateral", "RDP", "JUMP-HOST-001", "mstsc.exe", "lateral movement"],
+      "aliases": ["横向移动", "远程桌面", "RDP 跳转"],
+      "description": "Adversaries may use valid accounts to log into remote services for lateral movement. This includes Remote Desktop Protocol (RDP), SSH, SMB/Windows admin shares, WinRM, VNC, and PsExec. Remote services may allow direct command execution or interactive desktop access on target systems. Demo packs show mstsc.exe from JUMP-HOST-001 pivoting over RDP.",
       "detection": "Monitor remote connection logs: RDP (Event ID 4624 LogonType 10), SSH (auth.log), SMB share access (Event ID 5140), WinRM (Event ID 91). Track lateral movement patterns: one source connecting to many targets. Alert on service account usage for interactive remote sessions."
     },
     {

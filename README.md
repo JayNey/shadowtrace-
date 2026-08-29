@@ -60,7 +60,7 @@ cd backend && uv sync --frozen --extra dev
 cd frontend && pnpm install && pnpm dev
 ```
 
-默认配置见 `.env.example`（`SOURCE_MODE=mock_xdr`、`DISPOSITION_MODE=mock_xdr`、`SIMULATION_ENABLED=true`；`ALLOW_LIVE_SIDE_EFFECTS` / `BLOCK_LIVE_ACTION_EXECUTION` / `ALLOW_XDR_WRITEBACK` 默认 false）。本阶段无真实 XDR，走 Mock 契约。
+默认配置见 `.env.example`（`SOURCE_MODE=mock_xdr`、`DISPOSITION_MODE=mock_xdr`、`DISPOSITION_ADAPTER_KIND=mock`、`TOOL_MODE=mock`、`SIMULATION_ENABLED=true`；`ALLOW_LIVE_SIDE_EFFECTS` / `BLOCK_LIVE_ACTION_EXECUTION` / `ALLOW_XDR_WRITEBACK` 默认 false）。P0 / Demo 仍是 Mock 金路径，不接入生产时隔离、禁用账号、杀进程与全套 `query_*` 功能完整。Sangfor Adapter 合同已在 `contracts/vendor/sangfor_xdr` 与 `backend/app/adapters/sangfor/`；Cutover-Ready ≠ 真机验证，本仓库尚未对生产 XDR 跑通，不得声称已对接。
 
 ## 一、项目定位
 
@@ -68,12 +68,12 @@ ShadowTrace 是一个独立部署的通用多 Agent 安全运营智能体系统�
 
 ShadowTrace 与深信服 XDR、安全 GPT 均保持解耦：
 
-1. XDR 是可替换的数据源，也是生产环境事件处置的写回目标。ShadowTrace 的研判正文、报告、Prompt、decision_trace 与模型内部过程永不写回 XDR；经策略校验和审批通过的处置动作、目标、执行状态及最小结果摘要必须写回 Adapter 选定的单一可写来源对象。对 `disposition_policy=required` 的事件，当前闭环周期还必须有且仅有一条终态 `EVENT_STATUS_UPDATE` 获得 CONFIRMED，才可视为事件处置已回写并进入 CLOSED。P0 由 Mock 契约保证这一闭环；生产适配只有在正式接口确认可写对象、鉴权和操作映射并通过契约测试后才算完成。若目标版本确实不提供所需写能力，系统必须标记 `writeback_unsupported`、停止自动处置并阻塞生产闭环验收，不能用本地成功冒充已回写。
+1. XDR 是可替换的数据源，也是生产环境事件处置的写回目标。ShadowTrace 的研判正文、报告、Prompt、decision_trace 与模型内部过程永不写回 XDR；经策略校验和审批通过的处置动作、目标、执行状态及最小结果摘要必须写回 Adapter 选定的单一可写来源对象。对 `disposition_policy=required` 的事件，当前闭环周期还必须有且仅有一条终态 `EVENT_STATUS_UPDATE` 获得 CONFIRMED，才可视为事件处置已回写并进入 CLOSED。P0 由 Mock 契约保证这一闭环。Sangfor 开放列表已是 Adapter 层合同；生产联调与真机验证仍未完成，不得用本地 Mock 成功或 Vendor Wire Mock 绿冒充已对接生产。若目标版本确实不提供所需写能力，系统必须标记 `writeback_unsupported`、停止自动处置并阻塞生产闭环验收，不能用本地成功冒充已回写。
 2. 大模型只通过统一 `LLMProvider` 调用。开发期可使用 MockLLM 或任意 OpenAI-compatible API，后续可新增深信服安全 GPT/AICP Provider，但 Agent 业务代码不得绑定某一模型厂商。
 3. 开发与演示默认走 `MockXDRServer + MockToolProvider`。Mock 必须模拟外部 ID、分页游标、异步任务、设备能力、延迟、部分成功与失败回执，不能用“写入状态后立即读回成功”的自证方式伪造闭环。
-4. 真实环境按三个可替换边界设计：`SourceAdapter` 只读接收 XDR 数据；`ToolProvider` 执行防火墙、EDR 等动作；`DispositionAdapter` 负责把获批的事件处置及最小执行结果同步到来源 XDR。其中只有只读接入是既定边界；live `DispositionAdapter` 及 `XDR_MANAGED` 是否可用，必须由正式资料或脱敏请求证据确认。每个 Action 只能选择一个 ShadowTrace 内部执行策略：能力已确认时可用 `XDR_MANAGED` 由 DispositionAdapter 提交实体动作，或用 `DIRECT_TOOL` 由 ToolProvider 执行后仅同步执行结果/事件状态；后一路径严禁再次映射成实体动作。二者禁止双下发，执行回执与外部同步回执分别建模。
-5. 截图中观察到的页面字段只用于建立兼容的领域模型，不据此猜测或硬编码深信服私有 REST 路径。真实端点、鉴权与返回结构必须等获得正式接口文档或脱敏网络请求后再落入具体 Adapter。
-6. 当前截图未展示“处置事件”下拉项，因此方案不预设厂商 operation_code。Mock 使用自有测试动作；真实 DispositionAdapter 必须从正式文档/配置映射 allowed_operations，未知操作默认不可用。
+4. 真实环境按三个可替换边界设计：`SourceAdapter` 只读接收 XDR 数据；`ToolProvider` 执行防火墙、EDR 等动作；`DispositionAdapter` 负责把获批的事件处置及最小执行结果同步到来源 XDR。Sangfor REST 合同已落入 `adapters/sangfor`；Cutover-Ready ≠ 真机验证，生产写回是否可用仍须现场联调，不得声称已对接。每个 Action 只能选择一个 ShadowTrace 内部执行策略：能力已确认时可用 `XDR_MANAGED` 由 DispositionAdapter 提交实体动作，或用 `DIRECT_TOOL` 由 ToolProvider 执行后仅同步执行结果/事件状态；后一路径严禁再次映射成实体动作。二者禁止双下发，执行回执与外部同步回执分别建模。
+5. 截图不进 Agent：页面字段只用于建立兼容的领域模型。Sangfor REST 路径、鉴权与返回结构只进 `backend/app/adapters/sangfor/` 与 `contracts/vendor/sangfor_xdr`（权威为挑战杯 OpenAPI HTML）。Agent 层禁止厂商 path / `dealStatus` / `uuId`。通用 `HttpDispositionAdapter` 仍不得填深信服 URL。
+6. Agent 不预设厂商 `operation_code`。Mock 使用自有测试动作，隔离 / 禁用账号 / 杀进程 / 全套 `query_*` 仍走 Canonical Mock。Sangfor 写映射只在 Adapter（开放列表）；开放列表没有的写 path（含隔离创建）禁止发明。live 无隔离创建 URI 时保留 isolate Action 并允许 `execution_owner=None`（待人工），不是产品不再隔离。
 
 系统按事件类型抽象设计，至少支持以下安全事件类型，并允许通过新增场景包、适配器和处置模板扩展更多类型：
 
@@ -205,7 +205,7 @@ ShadowTrace 与深信服 XDR、安全 GPT 均保持解耦：
 16. `WritebackReadiness`：NOT_REQUIRED、READY、SOURCE_UNRESOLVED、NOT_CONFIGURED、CAPABILITY_UNKNOWN、CAPABILITY_UNSUPPORTED、PERMISSION_DENIED、CONNECTOR_UNAVAILABLE；它描述提交前条件，不是外部回执。`OutboxDeliveryStatus`：READY、LEASED、WAITING_RETRY、DELIVERED、PAUSED、DEAD_LETTER，描述本地投递队列，不冒充外部事实。`WritebackStatus` 只有 PENDING、SENDING、ACCEPTED、CONFIRMED、PARTIAL、FAILED、CONFLICT、UNKNOWN，仅在已创建写回命令时取值，未要求或尚被 readiness 阻塞时为 null。`ConfirmationEvidence`：adapter_acknowledged、status_queried、readback_verified、manual_confirmed。CONFIRMED 只表示 Adapter 按已验证契约判为终态成功，并须展示证据等级；Mock P0 要求 readback_verified，live 无法回读时须明示较弱证据。**CLOSED 关闭门强证据**（ISSUE-362，`CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE`）为 `{readback_verified, manual_confirmed}`，与 API `evidence_tier=strong` 对齐；**不等于 UI 颜色分档**。UI/统计须以 `simulated` 与 `confirmation_evidence`/`evidence_tier` 两维展示：不得把 Mock `readback_verified`（`simulated=true`）与 live 已验证画成同级绿；`adapter_acknowledged`/`status_queried` 为较弱 UI 档（由 `confirmation_evidence` 推导；API `evidence_tier` 仅投影 strong 或 null）。`GET /writebacks/{id}` 投影 `simulated`（无收据时为 false）。业务义务、提交准备度、本地投递、动作成功与外部写回事实相互正交。
 17. `ConnectorStatus`：ONLINE、DEGRADED、OFFLINE、UNKNOWN；`CapabilityState`：UNKNOWN、SUPPORTED、UNSUPPORTED；`ConnectorCapability` 至少包含 LOG_INGESTION、QUERY、EVENT_DISPOSITION、ENTITY_RESPONSE，并为每项记录 CapabilityState。连接在线不等于具备写回权限。
 18. `DispositionIntentKind` 是 ShadowTrace 内部信封分类，不是深信服公开枚举：ENTITY_ACTION_SUBMIT、EXECUTION_RESULT_RECORD、COMPENSATION_RECORD、EVENT_STATUS_UPDATE。`TargetExecutionStatus`：SUCCESS、FAILED、UNKNOWN、SKIPPED；`TargetWritebackStatus`：PENDING、ACCEPTED、CONFIRMED、FAILED、CONFLICT、UNKNOWN。`TERMINAL_SOURCE_DISPOSITIONS={contained, completed, suspended, ignored}`；pending、processing、unknown 绝不能满足终态事件处置门禁。整体 PARTIAL 由逐目标状态聚合，不作为单目标值。真实 Adapter 仅可映射正式接口已确认支持的 intent/operation；所有 live capability 默认 UNKNOWN。`DIRECT_TOOL` 只能使用 EXECUTION_RESULT_RECORD，严禁使用 ENTITY_ACTION_SUBMIT；EVENT_STATUS_UPDATE 由 deferred XDR_MANAGED Action 统一提交。对 required 事件，ENTITY_ACTION_SUBMIT/EXECUTION_RESULT_RECORD 是逐 Action 同步，不能替代唯一终态 EVENT_STATUS_UPDATE。
-19. `ExecutionOwner`：XDR_MANAGED、DIRECT_TOOL。XDR_MANAGED 表示外部提交由 DispositionAdapter 负责：普通实体动作映射 ENTITY_ACTION_SUBMIT，唯一 deferred update_source_event_disposition 映射 EVENT_STATUS_UPDATE；DIRECT_TOOL 表示 ToolProvider 执行实体动作、DispositionAdapter 仅同步 EXECUTION_RESULT_RECORD。只有会产生外部副作用/处置的 response、rollback Action 必须且只能选择一个，system、verification Action 的 execution_owner 必须为 null。`ExecutionSubstate`：NONE、WAITING_APPROVAL、WAITING_EXECUTION、WAITING_WRITEBACK、MANUAL_RESOLUTION，只用于可恢复检查点，不替代 EventStatus。
+19. `ExecutionOwner`：XDR_MANAGED、DIRECT_TOOL。XDR_MANAGED 表示外部提交由 DispositionAdapter 负责：普通实体动作映射 ENTITY_ACTION_SUBMIT，唯一 deferred update_source_event_disposition 映射 EVENT_STATUS_UPDATE；DIRECT_TOOL 表示 ToolProvider 执行实体动作、DispositionAdapter 仅同步 EXECUTION_RESULT_RECORD。普通 response、rollback Action 必须且只能选择一个 owner。RESPONSE 在厂商写能力缺口、overlay 清空双 owner 时允许 persist `execution_owner=None` / `null`（§1.7：待人工，不是执行成功）；禁止第三枚举 `manual`。live 无隔离创建 URI 时仍保留 isolate Action，走该窄例外，不是产品不再隔离。system、verification Action 的 execution_owner 必须为 null。`ExecutionSubstate`：NONE、WAITING_APPROVAL、WAITING_EXECUTION、WAITING_WRITEBACK、MANUAL_RESOLUTION，只用于可恢复检查点，不替代 EventStatus。
 
 ### 4.7 ID 与键格式
 
@@ -213,7 +213,7 @@ ShadowTrace 与深信服 XDR、安全 GPT 均保持解耦：
 2. `evidence_id=evd-{8hex}`、`action_id=act-{8hex}`、`job_id=job-{8hex}`、`disposition_id=disp-{8hex}`、`writeback_id=wbk-{8hex}`、`trace_id=trc-{8hex}`、`report_id=rpt-{8hex}`（**同一 event_id 的报告 ID 稳定派生**：`rpt-` + SHA256(event_id)[:8]，保证幂等 upsert；禁止每次调用随机 new_report_id）、`call_id=call-{8hex}`、`case_id=case-{8hex}`；外部处置 job/record ID 原样存入回执。
 3. Redis 键在既有键上增加 `shadowtrace:writeback:{writeback_id}`；PostgreSQL outbox 才是写回事实来源，Redis 仅缓存。
 4. Pub/Sub 频道 shadowtrace:events:{event_id} 承载全部 16 种消息；Socket 网关按 event_id 路由并脱敏。
-5. 核心环境变量在既有项上增加：`DISPOSITION_MODE`（mock_xdr、live、disabled）、`DISPOSITION_ADAPTER_KIND`、`DISPOSITION_BASE_URL`、`DISPOSITION_CREDENTIAL_REF`、`ALLOW_XDR_WRITEBACK`、`WRITEBACK_FIELD_ALLOWLIST`、`WRITEBACK_MAX_RETRIES`、`SIMULATION_ENABLED`。`SOURCE_READ_ONLY` 固定 true 只约束 SourceAdapter，不约束独立 DispositionAdapter；生产配置若启用 simulation 或 mock provider 必须启动失败。
+5. 核心环境变量在既有项上增加：`DISPOSITION_MODE`（`mock_xdr`、`live_xdr`、`disabled`；无后缀 `live` 不是合法取值）、`DISPOSITION_ADAPTER_KIND`（Demo 默认 `mock`；Sangfor cutover 为 `sangfor_xdr`）、`DISPOSITION_BASE_URL`、`DISPOSITION_CREDENTIAL_REF`、`ALLOW_XDR_WRITEBACK`、`WRITEBACK_FIELD_ALLOWLIST`、`WRITEBACK_MAX_RETRIES`、`SIMULATION_ENABLED`。Sangfor live 写回是 `DISPOSITION_MODE=live_xdr` + `DISPOSITION_ADAPTER_KIND=sangfor_xdr`。`SOURCE_READ_ONLY` 固定 true 只约束 SourceAdapter，不约束独立 DispositionAdapter；生产配置若启用 simulation 或 mock provider 必须启动失败。生产 `SOURCE_MODE` 是 mock 黑名单，不是 sangfor 正选 allowlist。
 
 ### 4.8 工作流常量（全局唯一定义，位于 backend/app/models/workflow.py）
 

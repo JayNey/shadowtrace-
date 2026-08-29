@@ -923,6 +923,7 @@ class EventService:
         return EvidenceQueryScope(
             source_tenant_id=tenant_id,
             connector_ids=connector_ids,
+            source_object_id=(event.creation_source_ref.source_object_id or "").strip() or None,
         )
 
     # Whitelist of columns allowed for sort_by in list_events.

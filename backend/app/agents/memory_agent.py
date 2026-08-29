@@ -40,7 +40,7 @@ _ENQUEUE_RETRY_DELAYS = (0.05, 0.1)
 
 
 class _FpRuleDraft(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     rule_summary: str
     alert_signature: str

@@ -79,6 +79,54 @@ async def _clean(session_factory: async_sessionmaker[AsyncSession]) -> None:
         await session.commit()
 
 
+def test_playbook_chunk_metadata_stamps_embedding_release_id() -> None:
+    from app.models.enums import ActionLevel, EventType, Severity
+    from app.models.knowledge_release import (
+        KnowledgeImportStatus,
+        KnowledgeRelease,
+        KnowledgeReleaseLifecycleState,
+        KnowledgeReleaseProvenance,
+    )
+    from app.models.playbook import Playbook, PlaybookStep
+    from app.services.playbook_kb_service import _chunk_metadata
+
+    pb = Playbook(
+        playbook_id="pb-abcdef01",
+        playbook_name="Malicious Process Medium Response",
+        event_type=EventType.MALICIOUS_PROCESS,
+        min_severity=Severity.MEDIUM,
+        description="block then query",
+        steps=[
+            PlaybookStep(
+                step_order=1,
+                action_name="Query EDR",
+                tool_name="query_edr_process",
+                action_level=ActionLevel.L0,
+            )
+        ],
+    )
+    release = KnowledgeRelease(
+        release_id="krel-test",
+        corpus_id="playbook_soar",
+        source_id="playbook_json",
+        release_version="v1",
+        content_hash="a" * 64,
+        provenance=KnowledgeReleaseProvenance(source_path="playbooks.json"),
+        import_status=KnowledgeImportStatus.VALIDATED,
+        lifecycle_state=KnowledgeReleaseLifecycleState.ACTIVE,
+        idempotency_key="test-playbook-meta",
+        embedding_release_id="mock-v1",
+    )
+    meta = _chunk_metadata(pb, release=release)
+    assert meta["embedding_release_id"] == "mock-v1"
+    assert meta["event_type"] == "malicious_process"
+
+
+# ---------------------------------------------------------------------------
+# Load tests
+# ---------------------------------------------------------------------------
+
+
 # ---------------------------------------------------------------------------
 # Load tests
 # ---------------------------------------------------------------------------

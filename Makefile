@@ -66,7 +66,7 @@ CELERY_SIGKILL_ARTIFACT_DIR ?= $(CURDIR)/artifacts/issue-283
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo bootstrap-demo-analysis bootstrap-demo-full-loop smoke-demo demo-full-loop demo-guard-test up-observability down-observability llm-smoke test test-ci-lite lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest autonomous-mock-e2e-worker-sigkill eval-full-loop eval-full-loop-matrix adversarial-closure-gates test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift check-migration-revisions evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
+.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo bootstrap-demo-analysis bootstrap-demo-full-loop smoke-demo demo-full-loop demo-guard-test up-observability down-observability llm-smoke test test-ci-lite lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest autonomous-mock-e2e-worker-sigkill eval-full-loop eval-full-loop-matrix eval-eventtype-8 adversarial-closure-gates test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift check-migration-revisions evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
@@ -167,6 +167,30 @@ eval-full-loop-matrix:
 		$(if $(EVAL_MATRIX_REQUIRE_CLOSED),,$(if $(filter 0,$(EVAL_MATRIX_PROFILE_BY_SCENARIO)),,--profile-by-scenario))
 
 # ---------------------------------------------------------------------------
+# EventType-8 gold suite (docs/eval-8-eventtype-gold-paths-plan.md §6)
+# Default acceptance is Canonical Mock XDR + real LLM. Does not change
+# eval-full-loop / demo-full-loop. Phase 1 does not alter packs/KB.
+# Prerequisites: stack with worker + ``make load-kb``.
+# CJK workspace paths: COMPOSE_BAKE=0 DOCKER_BUILDKIT=0
+# ---------------------------------------------------------------------------
+eval-eventtype-8:
+	@echo "[eval-eventtype-8] suite=eventtype8 scenario=$(EVAL_SCENARIO) (unset EVAL_SCENARIO to keep script default insider)"
+	@echo "[eval-eventtype-8] requires make load-kb already loaded into the stack (1期 does not change seeds)"
+	@echo "[eval-eventtype-8] CJK compose path: COMPOSE_BAKE=0 DOCKER_BUILDKIT=0"
+	@echo "[eval-eventtype-8] scripted $(EVAL_DECISION) — never finish via APPROVAL_TIMEOUT"
+	COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
+	BACKEND_PORT="$(BACKEND_PORT)" \
+	python3 "$(CURDIR)/scripts/dynamic_eval_full_loop.py" \
+		--suite eventtype8 \
+		--seed-via-compose \
+		--require-closed \
+		--scenario "$(EVAL_SCENARIO)" \
+		--base-url "http://127.0.0.1:$(BACKEND_PORT)" \
+		--token "$(BOOTSTRAP_AUTH_TOKEN)" \
+		--max-events "$(EVAL_MAX_EVENTS)" \
+		--decision "$(EVAL_DECISION)"
+
+# ---------------------------------------------------------------------------
 # Mock demo full stack (ISSUE-141 / #647): core + worker + scheduler + OTEL
 # Default ``make up`` / ``make bootstrap`` unchanged.
 # ---------------------------------------------------------------------------
@@ -247,6 +271,7 @@ migrate-down:
 # --- ISSUE-042 / ISSUE-043 / ISSUE-044 / ISSUE-245 knowledge base loaders --- #
 load-kb:
 	cd backend && $(PYTHON) -m scripts.load_attack_kb
+	cd backend && $(PYTHON) -m scripts.load_attack_stix_release
 	cd backend && $(PYTHON) -m scripts.load_case_kb
 	cd backend && $(PYTHON) -m scripts.load_org_context_kb
 	cd backend && $(PYTHON) -m scripts.load_playbook_release

@@ -187,6 +187,49 @@ async def test_builder_main_scenario_node_and_edge_counts() -> None:
         )
 
 
+async def test_lateral_pack_two_hosts_produce_graph_edges() -> None:
+    from app.data_generators.scenarios import build_scenario
+    from app.data_generators.scenarios._system_scenario_pack import LATERAL_PIVOT_HOST
+
+    scenario = build_scenario("lateral_movement", seed=42)
+    hostnames = {asset.hostname for asset in scenario.assets if asset.hostname}
+    assert "JUMP-HOST-001" in hostnames
+    assert LATERAL_PIVOT_HOST in hostnames
+
+    channel_source = {
+        "endpoint": EvidenceSource.ENDPOINT,
+        "identity": EvidenceSource.IDENTITY,
+        "network": EvidenceSource.NETWORK_FLOW,
+    }
+    event_id = "evt-lateral-graph"
+    evidence_list: list[Evidence] = []
+    for row in scenario.telemetry_timeline:
+        source = channel_source.get(str(row.get("channel") or ""))
+        if source is None:
+            continue
+        entities = [
+            str(row[key])
+            for key in ("hostname", "dst_hostname", "src_ip", "dst_ip", "process", "account")
+            if row.get(key)
+        ]
+        if len(entities) < 2:
+            continue
+        evidence_list.append(
+            _make_evidence(
+                source=source,
+                evidence_type=str(row.get("action") or row.get("event_type") or row.get("channel")),
+                event_id=event_id,
+                related_entities=entities,
+            )
+        )
+    assert evidence_list
+    nodes, edges = GraphBuilder.build(evidence_list)
+    assert edges
+    host_values = {n.entity_value for n in nodes if n.entity_type == "host"}
+    assert "JUMP-HOST-001" in host_values
+    assert LATERAL_PIVOT_HOST in host_values
+
+
 async def test_builder_edge_relation_types() -> None:
     """Edges cover all eight GraphRelationType values across the scenario."""
     evidence_list = _main_scenario_evidence()

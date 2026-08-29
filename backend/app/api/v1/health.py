@@ -150,33 +150,29 @@ async def health(
     playbook_resources = await _check_playbook_resources(settings)
     change_window_baseline = await _check_change_window_baseline(settings)
 
-    # NOTE: capability values below are UNVERIFIED placeholders for the Mock
-    # phase. Once real adapters land they must be replaced with actual
-    # capability probing (live capabilities default to UNKNOWN).
-    source_adapter = _component_summary(
-        status="ok" if settings.source_mode == "mock_xdr" else "degraded",
-        mode=settings.source_mode,
-        capability={
-            "LOG_INGESTION": "SUPPORTED" if settings.source_mode == "mock_xdr" else "UNKNOWN",
-            "QUERY": "SUPPORTED" if settings.source_mode == "mock_xdr" else "UNKNOWN",
-            "EVENT_DISPOSITION": "UNSUPPORTED",
-            "ENTITY_RESPONSE": "UNSUPPORTED",
-        },
+    # Adapter summaries: Mock stays ok; live reports actual mode and must not
+    # claim overall=ok after a 401 / missing Sangfor credential.
+    from app.adapters.factory import (
+        disposition_adapter_component,
+        live_auth_failed,
+        source_adapter_component,
     )
-    disposition_adapter = _component_summary(
-        status="ok" if settings.disposition_mode == "mock_xdr" else "degraded",
-        mode=settings.disposition_mode,
-        capability={
-            "LOG_INGESTION": "UNSUPPORTED",
-            "QUERY": "UNKNOWN",
-            "EVENT_DISPOSITION": (
-                "SUPPORTED" if settings.disposition_mode == "mock_xdr" else "UNKNOWN"
-            ),
-            "ENTITY_RESPONSE": (
-                "SUPPORTED" if settings.disposition_mode == "mock_xdr" else "UNKNOWN"
-            ),
-        },
-    )
+
+    source_adapter = source_adapter_component(settings)
+    disposition_adapter = disposition_adapter_component(settings)
+    adapter_auth_failed = False
+    try:
+        adapter_auth_failed = await live_auth_failed(settings)
+    except Exception:  # noqa: BLE001 — health must never raise
+        logger.debug("adapter auth probe failed", exc_info=True)
+        live_source = (settings.source_mode or "").strip().lower() == "sangfor_xdr"
+        live_kind = (settings.disposition_adapter_kind or "").strip().lower() == "sangfor_xdr"
+        adapter_auth_failed = live_source or live_kind
+    if adapter_auth_failed:
+        if (settings.source_mode or "").strip().lower() == "sangfor_xdr":
+            source_adapter = {**source_adapter, "status": "error"}
+        if (settings.disposition_adapter_kind or "").strip().lower() == "sangfor_xdr":
+            disposition_adapter = {**disposition_adapter, "status": "error"}
     tool_provider = _component_summary(
         status="ok" if settings.tool_mode == "mock" else "degraded",
         mode=settings.tool_mode,
@@ -243,6 +239,8 @@ async def health(
 
     overall = "ok"
     if not hard_deps_ok or not embedding_ok:
+        overall = "degraded"
+    elif adapter_auth_failed:
         overall = "degraded"
     elif not loaded_ok:
         overall = "degraded"

@@ -596,9 +596,25 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 need_manual = True
                 continue
 
-            # WAITING_APPROVAL / APPROVED — the action has been approved
-            # but not yet executed.  Distinguish from PENDING (not yet
-            # submitted) with a more precise detail message.
+            # WAITING_APPROVAL — approved or waiting, not yet executed.
+            # Overlay gap (execution_owner is None) stays APPROVED because AES
+            # will not claim it: do not SKIP as action_not_executed.
+            if action.execution_owner is None and action.status is ActionStatus.APPROVED:
+                results.append(
+                    VerificationActionResult(
+                        action_id=action.action_id,
+                        effect_status=EffectStatus.UNVERIFIABLE,
+                        writeback_required=action.writeback_required,
+                        writeback_readiness=action.writeback_readiness,
+                        writeback_status=action.writeback_status,
+                        writeback_ids=[],
+                        detail="execution_owner_unset_need_manual",
+                        verification_phase=VerificationPhase.EFFECT,
+                    )
+                )
+                need_manual = True
+                continue
+
             if action.status in (ActionStatus.WAITING_APPROVAL, ActionStatus.APPROVED):
                 detail = (
                     "approved_pending_execution"

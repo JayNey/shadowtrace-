@@ -115,6 +115,13 @@ def test_insider_key_events_and_entities() -> None:
     outcome = scenario.expected_outcome
     assert outcome["expected_verdict"] == FinalVerdict.CONFIRMED_THREAT.value
     assert outcome["expected_severity"] == Severity.CRITICAL.value
+    incident = scenario.incidents[0]
+    assert incident.normalized.get("event_type") == "data_exfiltration"
+    assert "insider_threat" not in str(incident.gpt_verdict_label or "")
+    from app.ingestion.source_ingester import _event_type
+
+    assert _event_type(incident.normalized, incident).value == "data_exfiltration"
+    assert "isolate_host" in outcome["allowed_actions"]
 
 
 def test_account_anomaly_fp_outcome() -> None:
@@ -135,6 +142,57 @@ def test_suspicious_domain_access_outcome_and_risk_band() -> None:
     assert 40 <= risk <= 69
     assert outcome["expected_verdict"] != FinalVerdict.CONFIRMED_THREAT.value
     assert outcome.get("exfil_observed") is False
+    assert outcome.get("disposition_policy") == "not_required"
+    assert "block_domain" not in (outcome.get("allowed_actions") or [])
+
+
+def test_suspicious_domain_closed_loop_upgrades_block_domain() -> None:
+    demo = build_scenario("suspicious_domain_access", seed=42)
+    suite = build_scenario("suspicious_domain_access", seed=42, closed_loop=True)
+    assert demo.expected_outcome["expected_verdict"] == FinalVerdict.NONE.value
+    assert demo.expected_outcome["disposition_policy"] == "not_required"
+    assert suite.expected_outcome["expected_verdict"] == FinalVerdict.CONFIRMED_THREAT.value
+    assert suite.expected_outcome["disposition_policy"] == "required"
+    assert "block_domain" in suite.expected_outcome["allowed_actions"]
+    disp = next(c for c in suite.connectors if c.connector_id.startswith("conn-disp-domain"))
+    assert disp.disposition_policy_default.value == "required"
+
+
+def test_eventtype8_system_packs_force_primary_actions_and_hosts() -> None:
+    host = build_scenario("host_compromise", seed=42)
+    assert "scan_host_for_virus" in host.expected_outcome["allowed_actions"]
+
+    proc = build_scenario("malicious_process", seed=42)
+    actions = proc.expected_outcome["allowed_actions"]
+    assert "block_process" in actions
+    assert "query_edr_process" in actions
+
+    other = build_scenario("other_unclassified", seed=42)
+    assert other.expected_outcome["disposition_policy"] == "not_required"
+    assert "isolate_host" not in other.expected_outcome["allowed_actions"]
+    assert "block_ip" not in other.expected_outcome["allowed_actions"]
+
+    privilege = build_scenario("insider_privilege_abuse", seed=42)
+    assert "disable_account" in privilege.expected_outcome["allowed_actions"]
+    privilege_blob = json.dumps(privilege.model_dump(mode="json"))
+    assert "svc-admin-abuse" in privilege_blob
+    assert "SRV-ADMIN-003" in privilege_blob
+    assert "net.exe" in privilege_blob
+    assert "privilege_escalation" in privilege_blob
+
+    lateral = build_scenario("lateral_movement", seed=42)
+    hostnames = {asset.hostname for asset in lateral.assets if asset.hostname}
+    assert "JUMP-HOST-001" in hostnames
+    assert "SRV-CORE-002" in hostnames
+    blob = json.dumps(lateral.model_dump(mode="json"))
+    assert "mstsc.exe" in blob
+    assert "SRV-CORE-002" in blob
+    assert "10.60.1.20" in blob
+    assert any(row.get("dst_ip") == "10.60.1.20" for row in lateral.telemetry_timeline)
+    assert any(
+        log.dst_ip == "10.60.1.20" or (log.normalized or {}).get("dst_ip") == "10.60.1.20"
+        for log in lateral.logs
+    )
 
 
 @pytest.mark.parametrize("scenario_id", SCENARIO_IDS)

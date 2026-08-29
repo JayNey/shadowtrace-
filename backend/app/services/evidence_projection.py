@@ -90,6 +90,7 @@ class EvidenceQueryScope(BaseModel):
 
     source_tenant_id: str = Field(min_length=1)
     connector_ids: frozenset[str] = Field(min_length=1)
+    source_object_id: str | None = None
 
 
 @dataclass(slots=True)

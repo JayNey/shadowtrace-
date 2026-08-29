@@ -42,6 +42,29 @@ from app.services.storyline_claim_refs import (
 logger = logging.getLogger(__name__)
 
 _TS_MIN = datetime.min.replace(tzinfo=UTC)
+STORYLINE_REFINE_TASK = "shadowtrace.refine_storyline"
+
+
+def _enqueue_storyline_refine(event_id: str) -> None:
+    """Best-effort LLM polish after the rule storyline is already persisted."""
+    try:
+        from app.core.config import TaskMode, get_settings
+
+        if get_settings().task_mode is not TaskMode.CELERY:
+            return
+        from app.core.celery_app import celery_app
+
+        celery_app.send_task(
+            STORYLINE_REFINE_TASK,
+            args=[event_id],
+            queue="investigation",
+        )
+    except Exception:
+        logger.warning(
+            "failed to enqueue storyline LLM refine event=%s",
+            event_id,
+            exc_info=True,
+        )
 
 _PHASE_ORDER: dict[StorylinePhaseName, int] = {
     StorylinePhaseName.INITIAL_ACCESS: 1,
@@ -133,17 +156,34 @@ class StorylineService:
     # Public API
     # ------------------------------------------------------------------ #
 
-    async def generate(self, event_context: dict[str, Any]) -> AttackStoryline:
+    async def generate(
+        self, event_context: dict[str, Any], *, defer_llm: bool = False
+    ) -> AttackStoryline:
         """Generate an attack storyline from full EventContext.
 
         Returns an ``AttackStoryline`` whose ``evidence_id`` values all
         reference real evidence records in the input.
+
+        ``defer_llm=True`` persists the rule storyline immediately and enqueues
+        an LLM refine off the investigation critical path.
         """
         event_id = _resolve_event_id(event_context)
         evidence_list = _extract_evidence(event_context)
         technique_matches = _extract_techniques(event_context)
         graph_paths = _extract_graph_paths(event_context)
         entity_names = _extract_entity_names(event_context)
+
+        if defer_llm:
+            storyline = self._generate_rule(
+                event_id=event_id,
+                evidence_list=evidence_list,
+                technique_matches=technique_matches,
+            )
+            finalized = self._finalize_storyline(storyline)
+            await self._write(event_id, finalized)
+            if self._llm_client is not None and evidence_list:
+                _enqueue_storyline_refine(event_id)
+            return finalized
 
         # --- LLM path ---
         if self._llm_client is not None and evidence_list:

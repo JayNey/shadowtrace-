@@ -45,6 +45,7 @@ from app.models.enums import (
     FinalVerdict,
     Severity,
     SourceObjectKind,
+    WritebackReadiness,
 )
 from app.models.source import SourceReference
 from app.services.approval_engine import (
@@ -417,6 +418,26 @@ def test_evaluate_hard_gates_rejects_unsupported_playbook_capability() -> None:
     assert gate is not None
     assert gate.decision is ApprovalDecisionKind.AUTO_REJECT
     assert gate.rule_applied == "playbook_capability_unsupported"
+
+
+def test_evaluate_hard_gates_ownerless_gap_isolate_not_auto_reject() -> None:
+    from app.adapters.sangfor.capability_manifest import build_sangfor_capability_manifest
+
+    manifest = build_sangfor_capability_manifest()
+    action = _action_model(
+        tool_name="isolate_host",
+        action_name="isolate host",
+        action_level=ActionLevel.L3,
+        target_type="host",
+        target="PC-FIN-023",
+        execution_owner=None,
+        writeback_required=True,
+        writeback_applicable=False,
+        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+    )
+    assert evaluate_hard_gates(action, manifest=manifest) is None
+    decision = evaluate_level_rules(action, confidence=0.9, severity=Severity.HIGH)
+    assert decision.decision is ApprovalDecisionKind.REQUIRE_APPROVAL
 
 
 def test_manifest_supports_template_capabilities_accepts_mock_manifest() -> None:

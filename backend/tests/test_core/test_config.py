@@ -47,6 +47,83 @@ def test_development_allows_mock_and_simulation() -> None:
         SIMULATION_ENABLED=True,
     )
     assert settings.production_fail_closed_violations() == []
+    assert settings.runtime_adapter_fail_closed_violations() == []
+
+
+def test_development_rejects_disposition_mode_live_without_xdr_suffix() -> None:
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings(APP_ENV="development", DISPOSITION_MODE="live")
+    assert "disposition_mode=live" in str(exc_info.value)
+
+
+def test_sangfor_source_rejects_simulation_in_every_env() -> None:
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings(
+            APP_ENV="development",
+            SOURCE_MODE="sangfor_xdr",
+            SIMULATION_ENABLED=True,
+        )
+    assert "sangfor_xdr" in str(exc_info.value)
+    assert "simulation" in str(exc_info.value).lower()
+
+
+def test_sangfor_source_rejects_tool_mode_mock_in_every_env() -> None:
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings(
+            APP_ENV="staging",
+            SOURCE_MODE="sangfor_xdr",
+            DISPOSITION_MODE="live_xdr",
+            DISPOSITION_ADAPTER_KIND="sangfor_xdr",
+            TOOL_MODE="mock",
+            SIMULATION_ENABLED=False,
+        )
+    assert "tool_mode=mock" in str(exc_info.value)
+    probe = object.__new__(Settings)
+    object.__setattr__(probe, "source_mode", "sangfor_xdr")
+    object.__setattr__(probe, "tool_mode", "mock")
+    object.__setattr__(probe, "disposition_mode", "live_xdr")
+    object.__setattr__(probe, "simulation_enabled", False)
+    violations = Settings.runtime_adapter_fail_closed_violations(probe)
+    assert violations
+    assert any("tool_mode=mock" in item for item in violations)
+
+
+def test_staging_sangfor_live_xdr_without_simulation_is_accepted() -> None:
+    settings = Settings(
+        APP_ENV="staging",
+        SOURCE_MODE="sangfor_xdr",
+        DISPOSITION_MODE="live_xdr",
+        DISPOSITION_ADAPTER_KIND="sangfor_xdr",
+        TOOL_MODE="live",
+        SIMULATION_ENABLED=False,
+        ALLOW_LIVE_SIDE_EFFECTS=True,
+        SANGFOR_XDR_BASE_URL="https://xdr.example.invalid",
+        SANGFOR_ACCESS_KEY="test-ak-01xxxxxx",
+        SANGFOR_SECRET_KEY="test-sk-01-not-prod",
+        SHARED_CREDENTIAL_SCOPE_VERIFIED=True,
+    )
+    assert is_mock_source_mode(settings.source_mode) is False
+    assert is_mock_disposition_mode(settings.disposition_mode) is False
+    assert settings.runtime_adapter_fail_closed_violations() == []
+    assert settings.production_fail_closed_violations() == []
+
+
+def test_production_accepts_sangfor_without_adding_source_allowlist() -> None:
+    settings = Settings(
+        **_base_kwargs(
+            SOURCE_MODE="sangfor_xdr",
+            DISPOSITION_MODE="live_xdr",
+            DISPOSITION_ADAPTER_KIND="sangfor_xdr",
+            SANGFOR_XDR_BASE_URL="https://xdr.example.invalid",
+            SANGFOR_ACCESS_KEY="test-ak-01xxxxxx",
+            SANGFOR_SECRET_KEY="test-sk-01-not-prod",
+            SHARED_CREDENTIAL_SCOPE_VERIFIED=True,
+        )
+    )
+    assert settings.production_fail_closed_violations() == []
+    from app.core.config import _MOCK_MODE_VALUES
+
+    assert "sangfor_xdr" not in _MOCK_MODE_VALUES["source_mode"]
 
 
 def test_unknown_task_mode_fails_settings_construction() -> None:

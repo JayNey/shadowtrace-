@@ -69,7 +69,7 @@ def _chunk_metadata(
     release: KnowledgeRelease,
 ) -> dict[str, Any]:
     object_hash = compute_playbook_object_hash(pb)
-    return {
+    meta: dict[str, Any] = {
         "tenant_id": GLOBAL_KB_TENANT_ID,
         "playbook_id": pb.playbook_id,
         "playbook_name": pb.playbook_name,
@@ -86,6 +86,9 @@ def _chunk_metadata(
         "release_lifecycle_state": release.lifecycle_state.value,
         "schema_version": release.schema_version,
     }
+    if release.embedding_release_id:
+        meta["embedding_release_id"] = release.embedding_release_id
+    return meta
 
 
 def _playbook_chunk(

@@ -40,7 +40,7 @@ from app.models.agent_io import (
     RiskAssessment,
 )
 from app.models.entities import EntitySet, IPEntity
-from app.models.enums import ActionLevel, FinalVerdict, Severity
+from app.models.enums import ActionLevel, EventType, FinalVerdict, Severity
 
 # Align with response_agent._filter_block_ip_entities (ISSUE-339). Duplicated
 # here to avoid a circular import; coverage must not require blocking VPN src.
@@ -119,11 +119,16 @@ def _alias_set(*values: str | None) -> frozenset[str]:
     return frozenset(token for token in (_normalized_token(item) for item in values) if token)
 
 
-def _block_ip_coverage_entities(entities: EntitySet) -> list[IPEntity]:
-    """External exfil/C2 destinations only — same contract as ISSUE-339 rule expansion."""
+def _block_ip_coverage_entities(
+    entities: EntitySet,
+    *,
+    event_type: EventType | None = None,
+) -> list[IPEntity]:
+    """External exfil/C2 destinations, plus internal dst_ip for lateral_movement."""
     covered: list[IPEntity] = []
+    allow_internal = event_type is EventType.LATERAL_MOVEMENT
     for ip in entities.ips:
-        if ip.scope != "external":
+        if ip.scope != "external" and not allow_internal:
             continue
         field = _normalized_token(str((ip.attributes or {}).get("normalized_field") or ""))
         if field in _BLOCK_IP_SOURCE_FIELDS:
@@ -134,7 +139,11 @@ def _block_ip_coverage_entities(entities: EntitySet) -> list[IPEntity]:
     return covered
 
 
-def entity_containment_coverage_needs(entities: EntitySet) -> tuple[EntityCoverageNeed, ...]:
+def entity_containment_coverage_needs(
+    entities: EntitySet,
+    *,
+    event_type: EventType | None = None,
+) -> tuple[EntityCoverageNeed, ...]:
     """ISSUE-328 coverage contract: EntitySet hosts/accounts/external dest IPs only.
 
     Does **not** scan the asset inventory. A host that is not already in
@@ -182,7 +191,7 @@ def entity_containment_coverage_needs(entities: EntitySet) -> tuple[EntityCovera
                     aliases=aliases,
                 )
             )
-    for ip in _block_ip_coverage_entities(entities):
+    for ip in _block_ip_coverage_entities(entities, event_type=event_type):
         canonical = (ip.address or ip.entity_id or "").strip()
         aliases = _alias_set(ip.address, ip.entity_id)
         if canonical and aliases:
@@ -382,6 +391,7 @@ def _merge_entity_coverage(
     *,
     rule_fallback_candidates: list[_CandidateT],
     entities: EntitySet,
+    event_type: EventType | None = None,
 ) -> tuple[list[_CandidateT], bool, bool]:
     """Append missing EntitySet coverage; never copy fallback targets outside EntitySet.
 
@@ -398,7 +408,7 @@ def _merge_entity_coverage(
     incomplete = False
     admitted_tools = {item.tool_name for item in (*candidates, *rule_fallback_candidates)}
     prototype = next(iter(merged or rule_fallback_candidates), None)
-    for need in entity_containment_coverage_needs(entities):
+    for need in entity_containment_coverage_needs(entities, event_type=event_type):
         if any(_item_covers_need(item, need) for item in merged):
             continue
         match = next(
@@ -691,6 +701,7 @@ def apply_containment_quality_gate(
     entities: EntitySet,
     disposition_only: bool,
     evidence_output: EvidenceOutput | None = None,
+    event_type: EventType | None = None,
 ) -> tuple[list[_CandidateT], ResponsePlanGeneratedBy, str]:
     """Ensure high-confidence plans include grounded containment *and* EntitySet coverage.
 
@@ -734,6 +745,7 @@ def apply_containment_quality_gate(
         candidates,
         rule_fallback_candidates=rule_fallback_candidates,
         entities=entities,
+        event_type=event_type,
     )
     if coverage_added:
         note = "containment_quality_gate: entity_coverage_merge"

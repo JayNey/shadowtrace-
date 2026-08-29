@@ -1674,21 +1674,19 @@ class DispositionSyncService:
         return mapped
 
     @staticmethod
-    def _mock_entity_effect_readback_enabled(
+    def _entity_effect_readback_enabled(
         adapter: BaseDispositionAdapter,
         receipt: DispositionReceipt,
     ) -> bool:
-        settings = get_settings()
-        if settings.disposition_mode.strip().lower() != "mock_xdr":
-            return False
-        if not settings.simulation_enabled:
-            return False
-        if adapter.name != "mock_xdr":
-            return False
-        if not receipt.simulated:
-            return False
-        caps = adapter.capabilities()
-        return caps.supports_entity_effect_readback
+        """Call ``read_entity_effect_completion`` when the adapter declares it.
+
+        Layer 6a: live_xdr / SIMULATION_ENABLED=false must still invoke Sangfor
+        (and any other adapter that sets the flag). Mock-only job finishing stays
+        inside MockXDRDispositionAdapter.read_entity_effect_completion.
+        ``receipt`` is unused; kept so call sites stay stable.
+        """
+        _ = receipt
+        return adapter.capabilities().supports_entity_effect_readback is True
 
     async def reconcile_pending_entity_effects(self, *, limit: int = 10) -> int:
         """Poll independently-applied provider effects for delivered entity commands."""
@@ -1941,7 +1939,7 @@ class DispositionSyncService:
             return None
         if receipt.status is not WritebackStatus.ACCEPTED:
             return None
-        if not self._mock_entity_effect_readback_enabled(adapter, receipt):
+        if not self._entity_effect_readback_enabled(adapter, receipt):
             return None
         completion = await adapter.read_entity_effect_completion(command, receipt)
         return completion

@@ -111,6 +111,44 @@ class Settings(BaseSettings):
     disposition_base_url: str = Field(default="", alias="DISPOSITION_BASE_URL")
     disposition_credential_ref: str = Field(default="", alias="DISPOSITION_CREDENTIAL_REF")
 
+    sangfor_xdr_base_url: str = Field(default="", alias="SANGFOR_XDR_BASE_URL")
+    sangfor_auth_code: str = Field(default="", alias="SANGFOR_AUTH_CODE")
+    sangfor_access_key: str = Field(default="", alias="SANGFOR_ACCESS_KEY")
+    sangfor_secret_key: str = Field(default="", alias="SANGFOR_SECRET_KEY")
+    sangfor_tls_verify: bool = Field(default=True, alias="SANGFOR_TLS_VERIFY")
+    shared_credential_scope_verified: bool = Field(
+        default=False,
+        alias="SHARED_CREDENTIAL_SCOPE_VERIFIED",
+        description=(
+            "When true, Sangfor may use one linkage code for read and write. "
+            "Mock XDR still requires separated credentials."
+        ),
+    )
+    sangfor_block_channel: str = Field(
+        default="network",
+        alias="SANGFOR_BLOCK_CHANNEL",
+        description=(
+            "Sangfor block_ip channel: network (AF) or endpoint (EDR). "
+            "Ignored by block_domain."
+        ),
+    )
+    sangfor_devices: str = Field(
+        default="",
+        alias="SANGFOR_DEVICES",
+        description='JSON array of block devices, e.g. [{"deviceId":"1","deviceType":"AF"}].',
+    )
+    sangfor_ticket_template_id: str = Field(default="", alias="SANGFOR_TICKET_TEMPLATE_ID")
+    sangfor_ticket_assignee_ids: str = Field(
+        default="",
+        alias="SANGFOR_TICKET_ASSIGNEE_IDS",
+        description="JSON array or comma-separated ticket assignee ids.",
+    )
+    sangfor_host_identifiers: str = Field(
+        default="",
+        alias="SANGFOR_HOST_IDENTIFIERS",
+        description="JSON array or comma-separated host identifiers for virus scan.",
+    )
+
     allow_xdr_writeback: bool = Field(default=False, alias="ALLOW_XDR_WRITEBACK")
     allow_live_side_effects: bool = Field(
         default=False,
@@ -197,6 +235,16 @@ class Settings(BaseSettings):
             "short_text."
         ),
     )
+
+    @field_validator("sangfor_block_channel", mode="before")
+    @classmethod
+    def validate_sangfor_block_channel(cls, value: object) -> str:
+        normalized = str(value or "network").strip().lower()
+        if not normalized:
+            return "network"
+        if normalized not in {"network", "endpoint"}:
+            raise ValueError("SANGFOR_BLOCK_CHANNEL must be 'network' or 'endpoint'")
+        return normalized
 
     @field_validator("llm_probe_method", mode="before")
     @classmethod
@@ -593,6 +641,13 @@ class Settings(BaseSettings):
                 error_code="configuration_error",
                 details={"violations": auto_response_violations},
             )
+        runtime_violations = self.runtime_adapter_fail_closed_violations()
+        if runtime_violations:
+            raise ConfigurationError(
+                "unregistered or unsafe adapter combination: " + ", ".join(runtime_violations),
+                error_code="configuration_error",
+                details={"violations": runtime_violations},
+            )
         violations = self.production_fail_closed_violations()
         if violations:
             raise ConfigurationError(
@@ -648,6 +703,26 @@ class Settings(BaseSettings):
         """
         return self.app_env.strip().lower() == "production"
 
+    def runtime_adapter_fail_closed_violations(self) -> list[str]:
+        """Reject unregistered adapter combinations in every APP_ENV.
+
+        ``DISPOSITION_MODE=live`` (no ``_xdr``) has no factory adapter.
+        ``SOURCE_MODE=sangfor_xdr`` plus simulation would stamp real events
+        with Mock tools. ``SOURCE_MODE=sangfor_xdr`` plus ``TOOL_MODE=mock``
+        would Mock-stamp live evidence. Development Demo (``mock_xdr`` +
+        simulation) is allowed.
+        """
+        violations: list[str] = []
+        if _normalize_mode_value(self.disposition_mode) == "live":
+            violations.append("disposition_mode=live: unregistered adapter; use live_xdr")
+        if _normalize_mode_value(self.source_mode) == "sangfor_xdr" and self.simulation_enabled:
+            violations.append("source_mode=sangfor_xdr forbids simulation_enabled=true")
+        if _normalize_mode_value(self.source_mode) == "sangfor_xdr" and _looks_mock(
+            self.tool_mode, "tool_mode"
+        ):
+            violations.append("source_mode=sangfor_xdr forbids tool_mode=mock")
+        return violations
+
     def production_fail_closed_violations(self) -> list[str]:
         """Runtime modes that must never be active when ``app_env=production``.
 
@@ -671,6 +746,8 @@ class Settings(BaseSettings):
             violations.append(f"tool_mode={self.tool_mode}")
         if _looks_mock(self.disposition_mode, "disposition_mode"):
             violations.append(f"disposition_mode={self.disposition_mode}")
+        if _normalize_mode_value(self.disposition_mode) == "live":
+            violations.append("disposition_mode=live")
         if _looks_mock(self.disposition_adapter_kind, "disposition_adapter_kind"):
             violations.append(f"disposition_adapter_kind={self.disposition_adapter_kind}")
         if _looks_mock(self.llm_mode, "llm_mode"):

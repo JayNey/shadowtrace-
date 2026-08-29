@@ -151,6 +151,188 @@ async def test_mock_mode_never_constructs_or_calls_http(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_json_mode_parses_markdown_fence_without_repair() -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(payload)
+        fenced = '```json\n{"event_type":"host_compromise","confidence":0.87}\n```'
+        return httpx.Response(200, json=_response(fenced, model=payload["model"]))
+
+    audit = InMemoryLLMCallAuditRecorder()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        response = await _client(http_client, audit=audit).chat(
+            MESSAGES,
+            event_id="evt-2026-fence",
+            agent_name="TriageAgent",
+            prompt_key="triage_extract",
+            json_mode=True,
+            response_model=TriagePayload,
+        )
+
+    assert response.parsed == TriagePayload(event_type="host_compromise", confidence=0.87)
+    assert json.loads(response.content) == {
+        "event_type": "host_compromise",
+        "confidence": 0.87,
+    }
+    assert len(calls) == 1
+    assert [entry.status for entry in audit.entries] == ["success"]
+
+
+@pytest.mark.asyncio
+async def test_json_mode_parses_think_tags_and_extra_data() -> None:
+    raw = '<think>step</think>{"event_type":"account_anomaly","confidence":0.9} trailing'
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_response(raw, model="primary-model"))
+
+    audit = InMemoryLLMCallAuditRecorder()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        response = await _client(http_client, audit=audit).chat(
+            MESSAGES,
+            event_id="evt-2026-think",
+            agent_name="TriageAgent",
+            prompt_key="triage_extract",
+            json_mode=True,
+            response_model=TriagePayload,
+        )
+
+    assert response.parsed == TriagePayload(event_type="account_anomaly", confidence=0.9)
+    assert [entry.status for entry in audit.entries] == ["success"]
+
+
+@pytest.mark.asyncio
+async def test_empty_content_falls_back_to_reasoning_content() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "glm-5.2",
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "reasoning_content": (
+                                '{"event_type":"host_compromise","confidence":0.81}'
+                            ),
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 8, "total_tokens": 12},
+            },
+        )
+
+    audit = InMemoryLLMCallAuditRecorder()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        response = await OpenAICompatibleLLMClient(
+            base_url="https://ark.cn-beijing.volces.com/api/coding/v3",
+            api_key="test-key",
+            client=http_client,
+            primary_model="glm-5.2",
+            audit_recorder=audit,
+        ).chat(
+            MESSAGES,
+            event_id="evt-2026-reason",
+            agent_name="TriageAgent",
+            prompt_key="triage_extract",
+            json_mode=True,
+            response_model=TriagePayload,
+        )
+
+    assert response.parsed == TriagePayload(event_type="host_compromise", confidence=0.81)
+    assert [entry.status for entry in audit.entries] == ["success"]
+
+
+@pytest.mark.asyncio
+async def test_json_mode_disables_glm_thinking() -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(payload)
+        body = '{"event_type":"other","confidence":0.4}'
+        return httpx.Response(200, json=_response(body, model=payload["model"]))
+
+    audit = InMemoryLLMCallAuditRecorder()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        await OpenAICompatibleLLMClient(
+            base_url="https://ark.cn-beijing.volces.com/api/coding/v3",
+            api_key="test-key",
+            client=http_client,
+            primary_model="glm-5.2",
+            audit_recorder=audit,
+        ).chat(
+            MESSAGES,
+            event_id="evt-2026-thinking-off",
+            agent_name="TriageAgent",
+            prompt_key="triage_extract",
+            json_mode=True,
+            response_model=TriagePayload,
+        )
+
+    assert calls[0]["thinking"] == {"type": "disabled"}
+    assert calls[0]["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_json_mode_drops_thinking_after_provider_rejects_it() -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(payload)
+        if "thinking" in payload:
+            return httpx.Response(400, json={"error": {"message": "unknown field thinking"}})
+        body = '{"event_type":"other","confidence":0.4}'
+        return httpx.Response(200, json=_response(body, model=payload["model"]))
+
+    audit = InMemoryLLMCallAuditRecorder()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        response = await OpenAICompatibleLLMClient(
+            base_url="https://ark.cn-beijing.volces.com/api/coding/v3",
+            api_key="test-key",
+            client=http_client,
+            primary_model="glm-5.2",
+            audit_recorder=audit,
+        ).chat(
+            MESSAGES,
+            event_id="evt-2026-thinking-retry",
+            agent_name="TriageAgent",
+            prompt_key="triage_extract",
+            json_mode=True,
+            response_model=TriagePayload,
+        )
+
+    assert len(calls) == 2
+    assert "thinking" in calls[0]
+    assert "thinking" not in calls[1]
+    assert response.parsed == TriagePayload(event_type="other", confidence=0.4)
+
+
+@pytest.mark.asyncio
+async def test_json_mode_unwraps_data_envelope() -> None:
+    raw = '{"data":{"event_type":"host_compromise","confidence":0.7}}'
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_response(raw, model="primary-model"))
+
+    audit = InMemoryLLMCallAuditRecorder()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        response = await _client(http_client, audit=audit).chat(
+            MESSAGES,
+            event_id="evt-2026-wrap",
+            agent_name="TriageAgent",
+            prompt_key="triage_extract",
+            json_mode=True,
+            response_model=TriagePayload,
+        )
+
+    assert response.parsed == TriagePayload(event_type="host_compromise", confidence=0.7)
+
+
+@pytest.mark.asyncio
 async def test_json_mode_repairs_invalid_output_once_and_parses_model() -> None:
     calls: list[dict[str, Any]] = []
 

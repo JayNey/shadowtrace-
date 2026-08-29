@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -161,8 +162,11 @@ def path_progress(
     path: Sequence[str],
     edges: Sequence[Any],
     signals: PathRankSignals | None = None,
+    *,
+    edge_index: Mapping[tuple[Any, Any], Sequence[Any]] | None = None,
 ) -> float:
-    tactics = [edge_tactic(edge, signals) for edge in _path_edges(path, edges, signals)]
+    chosen = _path_edges(path, edges, signals, edge_index=edge_index)
+    tactics = [edge_tactic(edge, signals) for edge in chosen]
     if len(tactics) < 2:
         return 0.0
     return sum(
@@ -174,14 +178,25 @@ def kapr_score(
     path: Sequence[str],
     edges: Sequence[Any],
     signals: PathRankSignals | None = None,
+    *,
+    edge_index: Mapping[tuple[Any, Any], Sequence[Any]] | None = None,
 ) -> float:
     """Raw KAPR score (may exceed 100). Empty / single-node paths score 0."""
-    stages = _path_edge_stages(path, edges, signals)
-    if not stages:
+    index = edge_index if edge_index is not None else _build_edge_index(edges)
+    chosen = _path_edges(path, edges, signals, edge_index=index)
+    if not chosen:
         return 0.0
+    stages = [edge_stage(edge, signals) for edge in chosen]
     mean_s = sum(stages) / len(stages)
-    mean_c = _mean_confidence(path, edges, signals)
-    return mean_s * progress_gain(path_progress(path, edges, signals)) * mean_c
+    mean_c = _mean_confidence_from_edges(chosen, signals)
+    tactics = [edge_tactic(edge, signals) for edge in chosen]
+    progress = 0.0
+    if len(tactics) >= 2:
+        progress = sum(
+            transition_weight(tactics[index - 1], tactics[index])
+            for index in range(1, len(tactics))
+        )
+    return mean_s * progress_gain(progress) * mean_c
 
 
 def kapr_score_hint(
@@ -203,7 +218,8 @@ def rank_attack_paths(
     materialized = [list(path) for path in paths]
     if not materialized:
         return []
-    scores = [kapr_score(path, edges, signals) for path in materialized]
+    index = _build_edge_index(edges)
+    scores = [kapr_score(path, edges, signals, edge_index=index) for path in materialized]
     if _all_close(scores):
         return sorted(materialized, key=lambda item: (-len(item), str(item)))
     ranked = sorted(
@@ -213,42 +229,40 @@ def rank_attack_paths(
     return [path for _, path in ranked]
 
 
+def _build_edge_index(edges: Sequence[Any]) -> dict[tuple[Any, Any], list[Any]]:
+    index: dict[tuple[Any, Any], list[Any]] = defaultdict(list)
+    for edge in edges:
+        source = getattr(edge, "source_node_id", None)
+        target = getattr(edge, "target_node_id", None)
+        index[(source, target)].append(edge)
+    return index
+
+
 def _path_edges(
     path: Sequence[str],
     edges: Sequence[Any],
     signals: PathRankSignals | None = None,
+    *,
+    edge_index: Mapping[tuple[Any, Any], Sequence[Any]] | None = None,
 ) -> list[Any]:
+    index = edge_index if edge_index is not None else _build_edge_index(edges)
     chosen: list[Any] = []
     for source, target in zip(path, path[1:], strict=False):
-        matching = [
-            edge
-            for edge in edges
-            if getattr(edge, "source_node_id", None) == source
-            and getattr(edge, "target_node_id", None) == target
-        ]
+        matching = index.get((source, target)) or ()
         if not matching:
             continue
         chosen.append(max(matching, key=lambda edge: edge_stage(edge, signals)))
     return chosen
 
 
-def _path_edge_stages(
-    path: Sequence[str],
-    edges: Sequence[Any],
-    signals: PathRankSignals | None,
-) -> list[float]:
-    return [edge_stage(edge, signals) for edge in _path_edges(path, edges, signals)]
-
-
-def _mean_confidence(
-    path: Sequence[str],
-    edges: Sequence[Any],
+def _mean_confidence_from_edges(
+    chosen: Sequence[Any],
     signals: PathRankSignals | None,
 ) -> float:
     if signals is None or not signals.confidence_by_evidence_id:
         return 1.0
     values: list[float] = []
-    for edge in _path_edges(path, edges, signals):
+    for edge in chosen:
         evidence_id = str(getattr(edge, "evidence_id", "") or "")
         if evidence_id in signals.confidence_by_evidence_id:
             values.append(float(signals.confidence_by_evidence_id[evidence_id]))

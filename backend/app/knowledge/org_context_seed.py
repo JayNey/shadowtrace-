@@ -250,6 +250,25 @@ def mock_org_context_records() -> list[OrgContextRecord]:
             domains=("brand-new-cdn-example.net",),
             allowed_channels=("cdn.corp.internal",),
         ),
+        OrgContextRecord(
+            record_id="org-acct-svc-admin-abuse",
+            kind="account_role",
+            content=(
+                "svc-admin-abuse 是管理跳板 SRV-ADMIN-003 上的特权服务账号，"
+                "其越权提升与敏感访问不属于该角色的批准行为。"
+            ),
+            accounts=("svc-admin-abuse",),
+            role="service",
+        ),
+        OrgContextRecord(
+            record_id="org-src-srv-admin-003",
+            kind="allowed_source",
+            content=(
+                "SRV-ADMIN-003 是管理区主机；"
+                "svc-admin-abuse 在该主机上的操作需要与组织特权基线核对。"
+            ),
+            hosts=("SRV-ADMIN-003",),
+        ),
     ]
 
 

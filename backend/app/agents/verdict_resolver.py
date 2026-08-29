@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.models.agent_io import RAGOutput, RiskAssessment
+from app.models.agent_io import RAGOutput, RiskAssessment, ScoringMode
 from app.models.enums import FinalVerdict
 from app.models.workflow import FP_HIGH_THRESHOLD, FP_LOW_THRESHOLD
 
@@ -14,6 +14,10 @@ FP_MEDIUM_SCORE = FP_LOW_THRESHOLD
 
 # Shared with ISSUE-200 triage/risk consistency checks and risk scoring paths.
 CONFIRMED_THREAT_RISK_THRESHOLD = 70
+# Near-threshold band: LLM+rule assessments with high confidence may confirm
+# without sitting exactly on the integer cliff.
+CONFIRMED_THREAT_HYSTERESIS = 8
+CONFIRMED_THREAT_HYSTERESIS_CONFIDENCE = 0.75
 
 
 class VerdictResolver:
@@ -28,7 +32,8 @@ class VerdictResolver:
        ``verdict_reason_codes`` so callers do not treat risk≥70 as confirmed_threat.
     2. Pre-evidence vector / RAG FP signal → possible_false_positive (advisory only)
     3. risk_score >= 70 → confirmed_threat (**before** evidence_limited demotion)
-    4. else → none
+    4. risk_score in [62, 70) with LLM+rule and confidence >= 0.75 → confirmed_threat
+    5. else → none
 
     Do **not** equate ``risk_score >= 70`` with a durable ``confirmed_threat``
     label: the evidence_limited fail-soft path may demote it to ``none``.
@@ -58,6 +63,8 @@ class VerdictResolver:
             return FinalVerdict.POSSIBLE_FALSE_POSITIVE
         if risk_score >= CONFIRMED_THREAT_RISK_THRESHOLD:
             return FinalVerdict.CONFIRMED_THREAT
+        if _near_threshold_confirmed(risk_assessment, risk_score):
+            return FinalVerdict.CONFIRMED_THREAT
         return FinalVerdict.NONE
 
     @staticmethod
@@ -81,12 +88,30 @@ class VerdictResolver:
         return max(candidates) if candidates else 0.0
 
 
+def _near_threshold_confirmed(risk_assessment: RiskAssessment, risk_score: int) -> bool:
+    """Confirm threats that land just below 70 when the LLM path is confident.
+
+    Does not auto-close ``none``: callers still require a terminal analyst
+    verdict for disposition-required events.
+    """
+    floor = CONFIRMED_THREAT_RISK_THRESHOLD - CONFIRMED_THREAT_HYSTERESIS
+    if risk_score < floor:
+        return False
+    if risk_assessment.possible_false_positive or risk_assessment.evidence_limited:
+        return False
+    if risk_assessment.scoring_mode is not ScoringMode.LLM_AND_RULE:
+        return False
+    return float(risk_assessment.confidence) >= CONFIRMED_THREAT_HYSTERESIS_CONFIDENCE
+
+
 def _blocks_auto_fp_close(risk_assessment: RiskAssessment) -> bool:
     """High-source + evidence-limited events must not auto close-as-FP (#675)."""
     return bool(risk_assessment.evidence_limited and risk_assessment.high_source_evidence_limited)
 
 
 __all__ = [
+    "CONFIRMED_THREAT_HYSTERESIS",
+    "CONFIRMED_THREAT_HYSTERESIS_CONFIDENCE",
     "CONFIRMED_THREAT_RISK_THRESHOLD",
     "FP_HIGH_SCORE",
     "FP_MEDIUM_SCORE",

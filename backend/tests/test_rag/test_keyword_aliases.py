@@ -33,6 +33,9 @@ def test_demo_iocs_are_not_hardcoded_aliases() -> None:
     assert "brand-new-cdn-example.net" not in blob
     assert "finance_report" not in blob
     assert "ops-change-bot" not in blob
+    assert "JUMP-HOST-001" not in blob
+    assert "svc-admin-abuse" not in blob
+    assert "WKS-GEN-099" not in blob
 
 
 def test_host_compromise_maps_to_credential_dumping_not_valid_accounts() -> None:
@@ -70,6 +73,27 @@ def test_playbook_query_uses_event_type_slug() -> None:
     assert keyword_query_for_kb("playbook_kb", query) == "data_exfiltration"
 
 
+def test_playbook_query_hits_malicious_process_slug() -> None:
+    query = "SOAR playbook for event type malicious_process, severity high."
+    assert keyword_query_for_kb("playbook_kb", query) == "malicious_process"
+
+
+def test_history_query_hits_unclassified_host() -> None:
+    query = (
+        "Historical case with event type other. "
+        "Entities: Host:WKS-GEN-099, Account:general-user-099"
+    )
+    reduced = keyword_query_for_kb("history_case_kb", query)
+    assert "WKS-GEN-099" in reduced
+
+
+def test_attack_lateral_query_keeps_rdp_fixture_tokens() -> None:
+    query = "Event type: lateral_movement. RDP pivot mstsc.exe from JUMP-HOST-001."
+    queries = keyword_queries_for_kb("attack_kb", query)
+    blob = " ".join(queries).lower()
+    assert "lateral movement" in blob
+
+
 def test_playbook_without_event_type_skips_keyword() -> None:
     assert keyword_queries_for_kb("playbook_kb", "generic SOAR response notes") == []
 
@@ -78,6 +102,7 @@ def test_structured_query_skips_rewrite() -> None:
     from app.rag.query_rewrite_policy import should_skip_query_rewrite
 
     assert should_skip_query_rewrite("Event type: data_exfiltration. Host:pc-1") is True
+    assert should_skip_query_rewrite("Historical case with event type insider_threat.") is True
     assert should_skip_query_rewrite("login") is False
 
 

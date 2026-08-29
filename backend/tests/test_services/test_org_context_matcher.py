@@ -77,6 +77,8 @@ class TestOrgContextSeed:
         assert "allowed_source" in kinds
         assert any("files.corp.internal" in r.domains for r in records)
         assert any("ops-change-bot" in r.accounts for r in records)
+        assert any("svc-admin-abuse" in r.accounts for r in records)
+        assert any("SRV-ADMIN-003" in r.hosts for r in records)
         assert any("unknown-upload-example.com" in r.domains for r in records)
         assert any("brand-new-cdn-example.net" in r.domains for r in records)
 
@@ -137,10 +139,23 @@ class TestOrgContextMatcher:
         hits = OrgContextMatcher.match(facts, _listed_from_seed(), now=_OUTSIDE_WINDOW)
         assert any(h.kind == "allowed_source" and h.match_type == "cidr" for h in hits)
 
+    def test_privilege_abuse_account_and_host_are_exact_matches(self) -> None:
+        from app.services.org_context_matcher import is_exact_org_context_match
+
+        facts = OrgContextFacts(accounts=("svc-admin-abuse",), hosts=("SRV-ADMIN-003",))
+        hits = OrgContextMatcher.match(facts, _listed_from_seed(), now=_OUTSIDE_WINDOW)
+        assert any(
+            h.match_type == "account_exact" and h.matched_value == "svc-admin-abuse" for h in hits
+        )
+        assert any(
+            h.match_type == "host_exact" and h.matched_value == "SRV-ADMIN-003" for h in hits
+        )
+        assert any(is_exact_org_context_match(h.match_type, retrieval_method="exact") for h in hits)
+
     def test_account_exact_hit_is_case_insensitive(self) -> None:
         facts = OrgContextFacts(accounts=("SVC-BACKUP",))
         hits = OrgContextMatcher.match(facts, _listed_from_seed(), now=_OUTSIDE_WINDOW)
-        assert any(h.kind == "account_role" for h in hits)
+        assert any(h.kind == "account_role" and h.match_type == "account_exact" for h in hits)
 
     def test_window_inside_hits(self) -> None:
         facts = OrgContextFacts(domains=("files.corp.internal",))

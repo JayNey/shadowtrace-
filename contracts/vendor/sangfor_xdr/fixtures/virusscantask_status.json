@@ -1,0 +1,11 @@
+{
+  "code": "",
+  "message": "返回消息",
+  "data": {
+    "taskId": "626664a025d603db019fd84c",
+    "status": "sending",
+    "scanType": "overall",
+    "scanMode": "lowPower",
+    "item": []
+  }
+}

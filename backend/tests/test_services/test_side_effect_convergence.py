@@ -294,6 +294,24 @@ def test_non_specs_xdr_without_entity_outbox_uses_execution_job_only() -> None:
     assert policy is SideEffectConvergencePolicy.EXECUTION_JOB_ONLY
 
 
+def test_ownerless_action_does_not_block_as_in_flight_job() -> None:
+    action = orm.Action(
+        action_id="act-ownerless-isolate",
+        status=ActionStatus.APPROVED.value,
+        writeback_applicable=False,
+        writeback_required=True,
+        execution_owner=None,
+        tool_name="isolate_host",
+    )
+    reason, _policy = _action_side_effect_blocks_convergence(
+        action,
+        jobs_by_action={},
+        active_outboxes=[],
+        verification=None,
+    )
+    assert reason is None
+
+
 def test_entity_unknown_delivery_status_blocks_gate() -> None:
     """Corrupt/unknown outbox delivery_status must fail closed."""
     action_id = "act-entity-bad-delivery"

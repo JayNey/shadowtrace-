@@ -1,9 +1,12 @@
 # ToolAdapter 与 DispositionAdapter 候选接入指南
 
-本文描述 ShadowTrace 内部的厂商无关候选契约。当前没有真实 XDR 或安全设备的正式接口文档与脱敏网络证据，因此：
+本文描述 ShadowTrace 内部的厂商无关契约，以及 Sangfor 专用 Adapter 的边界。
 
-- 不包含、也不推断任何厂商 URL、鉴权头、operation code 或错误码。
-- `HttpDispositionAdapter` 的能力默认全部为 `UNKNOWN`，默认禁止副作用。
+P0 / 默认 Demo 仍是 Mock 金路径：隔离、禁用账号、杀进程与全套 `query_*` 走 Canonical Mock（`/mock-xdr/v1`），不接入生产时功能完整。Cutover-Ready ≠ 真机验证；本仓库尚未对生产 XDR 跑通，不得声称已对接。
+
+- **Sangfor XDR** 走 `backend/app/adapters/sangfor/`，合同为挑战杯 OpenAPI HTML 与 `contracts/vendor/sangfor_xdr`。Agent 层禁止厂商 path / `dealStatus` / `uuId`。**禁止**把深信服 URL 填进通用 `HttpDispositionAdapter`。
+- live 无隔离创建 URI 时保留 isolate Action，`execution_owner=None` 待人工，不是产品不再隔离。live 调查 query（Layer 8b）未接线 / 另开。
+- 通用 `HttpDispositionAdapter` 的能力默认全部为 `UNKNOWN`，默认禁止副作用；不拼接厂商路径。
 - `FileStateFirewallAdapter` 只写本地 JSON，用于证明替换机制；它始终标记 `simulated=true`，不是生产防火墙。
 
 ## 边界与执行 owner

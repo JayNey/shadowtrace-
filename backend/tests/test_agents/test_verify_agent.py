@@ -461,6 +461,38 @@ class TestHappyPath:
         assert r.detail == "deferred_pending_activation"
         assert action.action_id not in result.failed_actions
 
+    async def test_ownerless_approved_isolate_is_unverifiable_need_manual(self):
+        action = _action(
+            tool_name="isolate_host",
+            action_name="isolate host",
+            target_type="host",
+            target="PC-FIN-023",
+            status=ActionStatus.APPROVED,
+            execution_owner=None,
+            writeback_required=True,
+            writeback_applicable=False,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            action_level=ActionLevel.L3,
+        )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.UNVERIFIABLE
+        assert r.detail == "execution_owner_unset_need_manual"
+        assert result.need_manual_resolution is True
+        assert action.action_id not in result.failed_actions
+
     async def test_phase2_success(self):
         """Full two-phase: effects ok → activate → writeback CONFIRMED."""
         from contextlib import asynccontextmanager
