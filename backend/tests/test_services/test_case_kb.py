@@ -404,9 +404,11 @@ class TestSeedLoading:
         hosts_by_id = {case.case_id: case.key_entities for case in cases}
         assert "PC-FIN-023" not in hosts_by_id["case-10000003"]
         assert "zhangsan" not in hosts_by_id["case-10000003"]
-        assert "PC-FIN-023" in hosts_by_id["case-10000017"]
+        assert "PC-FIN-023" not in hosts_by_id["case-10000017"]
+        assert "zhangsan" not in hosts_by_id["case-10000017"]
+        assert "unknown-upload-example.com" not in hosts_by_id["case-10000017"]
         assert "7z.exe" in hosts_by_id["case-10000017"]
-        assert "unknown-upload-example.com" in hosts_by_id["case-10000017"]
+        assert "PC-FIN-041" in hosts_by_id["case-10000017"]
 
         chunks = [_make_history_chunk(case) for case in cases]
         await knowledge_store.upsert_chunks(HISTORY_KB_NAME, chunks)

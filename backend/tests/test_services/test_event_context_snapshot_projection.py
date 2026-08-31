@@ -246,6 +246,7 @@ def test_project_closed_freeze_extracts_bounded_summary_without_dump() -> None:
     assert "evidence_output" not in projected
     assert "report" not in projected
     assert "rag_output" not in projected
+    assert projected["rag_citations"] == {"retrieved": True, "degraded": False}
     assert projected["org_context_matches"] == [
         {"kind": "allowed_destination", "matched_value": "files.corp.internal"}
     ]
@@ -320,3 +321,108 @@ def test_project_snapshot_exposes_fp_qualification_and_arbitration() -> None:
     }
     blob = orjson.dumps(projected).decode()
     assert "hidden-fp-cot" not in blob
+
+
+def test_project_snapshot_omits_rag_citations_when_rag_output_missing() -> None:
+    projected = project_snapshot_for_api(
+        {
+            "analysis_only_complete": False,
+            "fp_adjudication": {"recommendation": "investigate"},
+        }
+    )
+    assert projected is not None
+    assert "rag_citations" not in projected
+    assert "rag_output" not in projected
+
+
+def test_project_snapshot_exposes_bounded_rag_citations_without_payload() -> None:
+    projected = project_snapshot_for_api(
+        {
+            "rag_output": {
+                "degraded": True,
+                "degraded_steps": ["attack_kb"],
+                "fp_similarity": {
+                    "max_score": 0.91,
+                    "matched_case_id": "case-00000001",
+                    "matched_pattern": "change-window-password-reset",
+                },
+                "playbook_refs": [
+                    {
+                        "playbook_id": "pb-c8d9e0f1",
+                        "release_id": "rel-1",
+                        "release_version": "1.0",
+                        "content_hash": "a" * 64,
+                    },
+                    {"playbook_id": "pb-aabbccdd"},
+                    {"playbook_id": "pb-11223344"},
+                ],
+                "attack_techniques": [
+                    {
+                        "technique_id": "T1021",
+                        "technique_name": "Remote Services",
+                        "tactics": ["lateral-movement"],
+                        "match_confidence": 0.8,
+                        "citation_id": "cit-attack-secret",
+                    },
+                    {
+                        "technique_id": "T1078",
+                        "technique_name": "Valid Accounts",
+                        "citation_id": "cit-t1078",
+                    },
+                    {"technique_id": "T1110", "technique_name": "Brute Force"},
+                    {"technique_id": "T1059", "technique_name": "Command and Scripting Interpreter"},
+                ],
+                "citations": [
+                    {
+                        "citation_id": "cit-quoted",
+                        "quoted_text": "JUMP-HOST-001 must not leak",
+                        "kb_name": "attack_kb",
+                    }
+                ],
+                "similar_cases": [{"case_id": "case-secret", "summary": "hidden-case-summary"}],
+                "knowledge_query_plan": {"attack_kb": {"query": "SECRET-PLAN"}},
+                "org_context_matches": [
+                    {
+                        "kind": "time_window",
+                        "matched_value": "08:00-12:00",
+                        "explanation": "should-not-appear",
+                        "citation_id": "cit-org",
+                        "chunk_id": "chk-org",
+                    }
+                ],
+            }
+        }
+    )
+    assert projected is not None
+    assert "rag_output" not in projected
+    assert projected["rag_citations"] == {
+        "retrieved": True,
+        "degraded": True,
+        "fp_case_id": "case-00000001",
+        "playbook_ids": ["pb-c8d9e0f1", "pb-aabbccdd"],
+        "attack_techniques": [
+            {"technique_id": "T1021", "technique_name": "Remote Services"},
+            {"technique_id": "T1078", "technique_name": "Valid Accounts"},
+            {"technique_id": "T1110", "technique_name": "Brute Force"},
+        ],
+    }
+    assert projected["org_context_matches"] == [
+        {"kind": "time_window", "matched_value": "08:00-12:00"}
+    ]
+    blob = orjson.dumps(projected).decode()
+    assert "cit-attack-secret" not in blob
+    assert "cit-quoted" not in blob
+    assert "JUMP-HOST-001" not in blob
+    assert "hidden-case-summary" not in blob
+    assert "SECRET-PLAN" not in blob
+    assert "should-not-appear" not in blob
+    assert "change-window-password-reset" not in blob
+
+
+def test_project_snapshot_empty_rag_output_marks_retrieved() -> None:
+    projected = project_snapshot_for_api({"rag_output": {}})
+    assert projected is not None
+    assert projected["rag_citations"] == {"retrieved": True, "degraded": False}
+    assert "fp_case_id" not in projected["rag_citations"]
+    assert "playbook_ids" not in projected["rag_citations"]
+    assert "attack_techniques" not in projected["rag_citations"]

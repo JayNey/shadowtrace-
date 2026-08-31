@@ -248,7 +248,7 @@ export function buildEventTodos(input: BuildEventTodosInput): EventTodoItem[] {
     id: "decision-basis",
     kind: "decision_basis",
     label: "查看决策依据",
-    description: "跳转到审计 Tab 查看 DecisionTraceTimeline（结构化结论，非思维链）。",
+    description: "跳转到审计 Tab 查看决策链（默认仅 Agent 执行：结论、证据引用、置信度）。",
     tabKey: "audit",
     priority: 80,
   });

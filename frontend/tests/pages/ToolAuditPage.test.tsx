@@ -260,7 +260,7 @@ describe("DecisionTraceTimeline", () => {
     expect(summary).toHaveTextContent("32 min");
   });
 
-  it("renders all eight ordered trace types and safe agent/writeback evidence", () => {
+  it("defaults to agent executions and hides CoT retention chrome", () => {
     renderWithProviders(<DecisionTraceTimeline entries={makeTraceEntries()} />);
 
     for (const label of [
@@ -275,28 +275,41 @@ describe("DecisionTraceTimeline", () => {
     ]) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     }
+    expect(screen.getByTestId("trace-entry-agent_execution")).toBeInTheDocument();
+    expect(screen.queryByTestId("trace-entry-tool_call")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("trace-entry-writeback")).not.toBeInTheDocument();
     expect(screen.getByText("存在横向移动风险")).toBeInTheDocument();
     expect(screen.getByText("ev-1")).toBeInTheDocument();
     expect(screen.getByText("risk-model / v2")).toBeInTheDocument();
     expect(screen.getByText("91%")).toBeInTheDocument();
     expect(screen.getByText("需要人工复核")).toBeInTheDocument();
+    expect(screen.getByText("风险评估")).toBeInTheDocument();
+    expect(
+      screen.queryByText("must-not-render-hidden-reasoning"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("原始思维链未保留（ISSUE-131）")).not.toBeInTheDocument();
+    expect(screen.queryByText("[NOT_RETAINED]")).not.toBeInTheDocument();
+    expect(screen.queryByText("暂无数据")).not.toBeInTheDocument();
+  });
+
+  it("shows the full ordered timeline after expanding all types", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<DecisionTraceTimeline entries={makeTraceEntries()} />);
+
+    await user.click(screen.getByRole("button", { name: "展示全部轨迹类型" }));
+
     expect(screen.getByText("XDR receipt #17")).toBeInTheDocument();
     expect(screen.getByText("query_process")).toBeInTheDocument();
     expect(screen.getByText("found suspicious process")).toBeInTheDocument();
     expect(screen.getByText("analysis complete")).toBeInTheDocument();
     expect(screen.getAllByText("success").length).toBeGreaterThan(0);
-    expect(
-      screen.queryByText("must-not-render-hidden-reasoning"),
-    ).not.toBeInTheDocument();
-    expect(screen.getByText("原始思维链未保留（ISSUE-131）")).toBeInTheDocument();
-    expect(screen.queryByText("[NOT_RETAINED]")).not.toBeInTheDocument();
 
     const first = screen.getByTestId("trace-entry-writeback");
     const last = screen.getByTestId("trace-entry-agent_execution");
     expect(first.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("renders summary_unavailable when structured brief is missing", () => {
+  it("hides empty decision-basis rows and engineer CoT sentinels", () => {
     renderWithProviders(
       <DecisionTraceTimeline
         entries={[
@@ -309,14 +322,22 @@ describe("DecisionTraceTimeline", () => {
             detail: {
               summary_unavailable: "empty_output",
               thought: "[NOT_RETAINED]",
+              evidence_refs: [],
+              rules_applied: [],
+              warnings: [],
             },
             ref_id: "trc-1",
           },
         ]}
       />,
     );
-    expect(screen.getByText("summary_unavailable=empty_output")).toBeInTheDocument();
-    expect(screen.getByText("原始思维链未保留（ISSUE-131）")).toBeInTheDocument();
+    expect(screen.getByText("完成执行")).toBeInTheDocument();
+    expect(screen.getByText("记忆沉淀")).toBeInTheDocument();
+    expect(screen.queryByText("summary_unavailable=empty_output")).not.toBeInTheDocument();
+    expect(screen.queryByText("原始思维链未保留（ISSUE-131）")).not.toBeInTheDocument();
+    expect(screen.queryByText("[NOT_RETAINED]")).not.toBeInTheDocument();
+    expect(screen.queryByText("暂无数据")).not.toBeInTheDocument();
+    expect(screen.queryByText("决策依据")).not.toBeInTheDocument();
   });
 
   it("filters entry types and opens linked tool detail", async () => {
@@ -329,6 +350,7 @@ describe("DecisionTraceTimeline", () => {
       />,
     );
 
+    await user.click(screen.getByRole("checkbox", { name: "工具调用" }));
     await user.click(screen.getByRole("button", { name: /tool_call title/ }));
     expect(onToolCallSelect).toHaveBeenCalledWith("call-1");
 
@@ -396,6 +418,7 @@ describe("EventAuditPanel degradation and realtime", () => {
     });
     renderWithProviders(<EventAuditPanel eventId="evt-73" />);
     await screen.findByText("暂无符合条件的决策轨迹");
+    await userEvent.setup().click(screen.getByRole("checkbox", { name: "工具调用" }));
 
     await act(async () => {
       socketHandler?.({
@@ -480,6 +503,8 @@ describe("EventAuditPanel degradation and realtime", () => {
     });
 
     renderWithProviders(<EventAuditPanel eventId="evt-73" />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "展示全部轨迹类型" }));
 
     expect(await screen.findByText("block_ip 工具调用：status=success")).toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "工具" })).not.toBeInTheDocument();

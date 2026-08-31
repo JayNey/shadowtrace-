@@ -819,21 +819,22 @@ class EventService:
                 snapshot["triage_severity"] = extracted
 
         try:
-            if not isinstance(snapshot.get("org_context_matches"), list):
-                rag_src = snapshot.get("rag_output")
-                if not isinstance(rag_src, dict):
-                    rag_ctx = await self._store.get(event_id, "rag_output")
-                    if hasattr(rag_ctx, "model_dump"):
-                        rag_src = rag_ctx.model_dump(mode="json")
-                    elif isinstance(rag_ctx, dict):
-                        rag_src = rag_ctx
-                if isinstance(rag_src, dict) and isinstance(
+            rag_src = snapshot.get("rag_output")
+            if not isinstance(rag_src, dict):
+                rag_ctx = await self._store.get(event_id, "rag_output")
+                if hasattr(rag_ctx, "model_dump"):
+                    rag_src = rag_ctx.model_dump(mode="json")
+                elif isinstance(rag_ctx, dict):
+                    rag_src = rag_ctx
+            if isinstance(rag_src, dict):
+                snapshot["rag_output"] = rag_src
+                if not isinstance(snapshot.get("org_context_matches"), list) and isinstance(
                     rag_src.get("org_context_matches"), list
                 ):
                     snapshot["org_context_matches"] = rag_src["org_context_matches"]
         except Exception:
             logger.debug(
-                "overlay org_context_matches failed event_id=%s",
+                "overlay rag_output citations failed event_id=%s",
                 event_id,
                 exc_info=True,
             )

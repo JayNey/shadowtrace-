@@ -40,6 +40,14 @@ interface Props {
   onRefresh: () => Promise<void>;
 }
 
+const TAB_LINK_LABEL: Record<string, string> = {
+  actions: "打开动作 Tab",
+  report: "打开报告 Tab",
+  writeback: "打开写回 Tab",
+  evidence: "打开证据 Tab",
+  audit: "打开审计 Tab",
+};
+
 function todoColor(kind: EventTodoItem["kind"]): "success" | "warning" | "info" {
   switch (kind) {
     case "approval_pending":
@@ -231,7 +239,7 @@ export default function EventTodoBar({
                         data-testid={`todo-nav-${item.id}`}
                         onClick={() => onNavigateTab(item.tabKey!)}
                       >
-                        打开 Tab
+                        {TAB_LINK_LABEL[item.tabKey!] ?? "打开 Tab"}
                       </Button>
                     ) : null}
                     {item.externalHref ? (

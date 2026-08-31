@@ -196,12 +196,12 @@
     "event_id": null,
     "event_type": "data_exfiltration",
     "case_label": "true_positive",
-    "summary": "财务终端 zhangsan 在 PC-FIN-023 用 7z.exe 打包 finance_report.zip 后外发至未批准域名 unknown-upload-example.com",
-    "key_entities": "account=zhangsan; host=PC-FIN-023; process=7z.exe; file=finance_report.zip; domain=unknown-upload-example.com; dst_ip=203.0.113.88",
+    "summary": "财务终端 wangwu 在 PC-FIN-041 用 7z.exe 打包 q3_ledger_archive.zip 后外发至未批准域名 fileshare-drop-example.net，未走 files.corp.internal",
+    "key_entities": "account=wangwu; host=PC-FIN-041; process=7z.exe; file=q3_ledger_archive.zip; domain=fileshare-drop-example.net; dst_ip=198.51.100.77",
     "final_verdict": "confirmed_threat",
     "risk_score": 90,
     "resolution": "隔离主机并阻断外发域名，冻结账号，确认压缩包未进入批准的 files.corp.internal 通道",
-    "closed_at": "2024-06-15T18:00:00Z"
+    "closed_at": "2024-03-12T18:00:00Z"
   },
   {
     "case_id": "case-10000018",

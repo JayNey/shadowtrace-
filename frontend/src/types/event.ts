@@ -557,6 +557,20 @@ export interface SourceSyncState {
   [key: string]: unknown;
 }
 
+export interface RagCitationTechnique {
+  technique_id: string;
+  technique_name?: string;
+}
+
+/** API-facing RAG citation strip (bounded; never full rag_output). */
+export interface RagCitations {
+  retrieved: boolean;
+  degraded?: boolean;
+  fp_case_id?: string | null;
+  playbook_ids?: string[] | null;
+  attack_techniques?: RagCitationTechnique[] | null;
+}
+
 export interface EventContextSnapshot {
   source_snapshot?: Record<string, unknown> | null;
   source_sync_state?: SourceSyncState | null;
@@ -567,6 +581,8 @@ export interface EventContextSnapshot {
   triage_severity?: Severity | null;
   org_context_matches?: Array<{ kind?: string; matched_value?: string }> | null;
   fp_adjudication?: { recommendation?: string; matched_window_id?: string } | null;
+  /** ISSUE-254 bounded RAG hits. Missing key = retrieval not finished. */
+  rag_citations?: RagCitations | null;
   execution_jobs?: ExecutionJobResponse[];
   execution_summary?: {
     jobs?: ExecutionJobResponse[];

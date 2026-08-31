@@ -40,7 +40,7 @@ import EventAuditPanel from "../components/audit/EventAuditPanel";
 import EventChatPanel from "../components/chat/EventChatPanel";
 import { isEventChatEnabled } from "../config/features";
 import { listMemoryReviews } from "../services/knowledgeApi";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEventDetail, type EventWriteback } from "../hooks/useEventDetail";
 import type { Action } from "../types/action";
 import type {
@@ -80,6 +80,14 @@ function eventDetailTabKeys(): TabKey[] {
   if (isEventChatEnabled()) keys.push("chat");
   keys.push("report");
   return keys;
+}
+
+function primaryActionToolName(actions: Action[] | undefined): string | undefined {
+  const eligible = (actions ?? []).filter(
+    (action) => action.tool_name && action.status !== "superseded",
+  );
+  const response = eligible.find((action) => action.action_category !== "system");
+  return (response ?? eligible[0])?.tool_name;
 }
 
 function activeTab(hash: string): TabKey {
@@ -583,6 +591,8 @@ export default function EventDetailPage() {
     refresh,
   } = useEventDetail(eventId);
   const selectedTab = activeTab(location.hash);
+  const tabsAnchorRef = useRef<HTMLDivElement>(null);
+  const pendingTabScrollRef = useRef(false);
   const [pendingMemoryReviewCount, setPendingMemoryReviewCount] = useState(0);
   const { approve, reject } = useApprovalStore();
   const [approvalModal, setApprovalModal] = useState<{
@@ -718,15 +728,32 @@ export default function EventDetailPage() {
     }
   };
 
+  const scrollTabsIntoView = useCallback(() => {
+    tabsAnchorRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, []);
+
   const navigateTab = useCallback(
     (tabKey: string) => {
+      const nextKey = tabKey.replace(/^#/, "");
+      pendingTabScrollRef.current = true;
+      if (activeTab(location.hash) === nextKey) {
+        scrollTabsIntoView();
+        pendingTabScrollRef.current = false;
+        return;
+      }
       navigate(
-        { pathname: location.pathname, search: location.search, hash: tabKey },
+        { pathname: location.pathname, search: location.search, hash: nextKey },
         { replace: true },
       );
     },
-    [location.pathname, location.search, navigate],
+    [location.hash, location.pathname, location.search, navigate, scrollTabsIntoView],
   );
+
+  useEffect(() => {
+    if (!pendingTabScrollRef.current) return;
+    scrollTabsIntoView();
+    pendingTabScrollRef.current = false;
+  }, [location.hash, selectedTab, scrollTabsIntoView]);
 
   // Pending memory reviews: API has no event_id filter yet; client-side match only.
   // CLOSED consolidation is fire-and-forget, so poll briefly until candidates appear.
@@ -1032,6 +1059,8 @@ export default function EventDetailPage() {
         onRefresh={async () => {
           await refresh("all");
         }}
+        onNavigateTab={navigateTab}
+        primaryActionTool={primaryActionToolName(actions)}
       />
       <InvestigationPhaseBanner detail={event} />
       <Row gutter={[16, 16]}>
@@ -1073,19 +1102,26 @@ export default function EventDetailPage() {
           />
         </Col>
       </Row>
-      <Card className="shadowtrace-event-tabs">
-        <Tabs
-          activeKey={selectedTab}
-          destroyOnHidden
-          items={items}
-          onChange={(key) =>
-            navigate(
-              { pathname: location.pathname, search: location.search, hash: key },
-              { replace: true },
-            )
-          }
-        />
-      </Card>
+      <div
+        id="event-detail-tabs"
+        ref={tabsAnchorRef}
+        className="shadowtrace-event-tabs"
+        data-testid="event-detail-tabs"
+      >
+        <Card>
+          <Tabs
+            activeKey={selectedTab}
+            destroyOnHidden
+            items={items}
+            onChange={(key) =>
+              navigate(
+                { pathname: location.pathname, search: location.search, hash: key },
+                { replace: true },
+              )
+            }
+          />
+        </Card>
+      </div>
       <ApprovalActionModal
         open={approvalModal.open}
         actionId={approvalModal.actionId}

@@ -17,7 +17,9 @@ import type {
   DecisionTraceSummary,
 } from "../../types/trace";
 import {
+  AGENT_NAME_LABELS,
   ALL_TRACE_TYPES,
+  DEFAULT_TRACE_TYPES,
   TRACE_TYPE_COLORS,
   TRACE_TYPE_LABELS,
 } from "./constants";
@@ -36,69 +38,83 @@ function formatDurationMs(value: number): string {
   return rem > 0 ? `${minutes} min ${rem} s` : `${minutes} min`;
 }
 
-const COT_COMPAT_KEYS = [
-  "thought",
-  "reflection",
-  "rationale",
-  "reasoning",
-  "chain_of_thought",
-  "chain-of-thought",
-] as const;
-
-const NOT_RETAINED = "[NOT_RETAINED]";
+function isPresent(value: unknown): boolean {
+  if (value === undefined || value === null || value === "") return false;
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
+}
 
 function textList(value: unknown): string {
   if (Array.isArray(value)) return value.map(String).join("、");
-  return value === undefined || value === null || value === "" ? "暂无数据" : String(value);
+  return String(value);
 }
 
-function primaryBrief(detail: Record<string, unknown>): string {
+function primaryBrief(detail: Record<string, unknown>): string | null {
   const brief = detail.brief ?? detail.structured_conclusion;
   if (typeof brief === "string" && brief.trim()) {
-    return brief;
+    return brief.trim();
   }
-  const unavailable = detail.summary_unavailable;
-  if (typeof unavailable === "string" && unavailable.trim()) {
-    return `summary_unavailable=${unavailable}`;
+  return null;
+}
+
+function displayActor(actor: string): string {
+  return AGENT_NAME_LABELS[actor] ?? actor;
+}
+
+function displayTitle(title: string, actor: string): string {
+  const label = AGENT_NAME_LABELS[actor];
+  let text = title;
+  if (!label) {
+    return text;
   }
-  return "暂无数据";
+  if (text === actor || text.startsWith(`${actor} `) || text.startsWith(`${actor}：`)) {
+    text = text.slice(actor.length).replace(/^[\s：]+/u, "");
+  }
+  return text.replace(/：summary_unavailable=\S+$/u, "").replace(/：status=\S+$/u, "");
 }
 
 function AgentDecisionBasis({ entry }: { entry: DecisionTraceEntry }) {
   const detail = entry.detail;
-  const confidence =
-    typeof detail.confidence === "number"
-      ? `${Math.round(detail.confidence * 100)}%`
-      : textList(detail.confidence);
+  const rows: Array<{ label: string; value: string }> = [];
+  const brief = primaryBrief(detail);
+  if (brief) {
+    rows.push({ label: "决策依据", value: brief });
+  }
+  if (isPresent(detail.evidence_refs)) {
+    rows.push({ label: "证据引用", value: textList(detail.evidence_refs) });
+  }
+  const rules = [detail.rules_applied, detail.rule_version]
+    .filter((value) => isPresent(value))
+    .map((value) => textList(value));
+  if (rules.length > 0) {
+    rows.push({ label: "规则 / 版本", value: rules.join(" / ") });
+  }
   const model = [detail.model_name ?? detail.model, detail.model_version]
-    .filter(Boolean)
-    .join(" / ");
-  const rules = [textList(detail.rules_applied), detail.rule_version]
-    .filter((value) => value && value !== "暂无数据")
-    .join(" / ");
-  const cotNotRetained = COT_COMPAT_KEYS.some(
-    (key) => detail[key] === NOT_RETAINED,
-  );
+    .filter((value) => isPresent(value))
+    .map(String);
+  if (model.length > 0) {
+    rows.push({ label: "模型 / 版本", value: model.join(" / ") });
+  }
+  if (typeof detail.confidence === "number") {
+    rows.push({ label: "置信度", value: `${Math.round(detail.confidence * 100)}%` });
+  }
+  if (isPresent(detail.warnings)) {
+    rows.push({ label: "警告", value: textList(detail.warnings) });
+  }
+
+  if (rows.length === 0) {
+    return null;
+  }
 
   return (
     <div style={{ marginTop: 8 }}>
       <Descriptions size="small" column={1}>
-        <Descriptions.Item label="决策依据">
-          {primaryBrief(detail)}
-        </Descriptions.Item>
-        <Descriptions.Item label="证据引用">
-          {textList(detail.evidence_refs)}
-        </Descriptions.Item>
-        <Descriptions.Item label="规则 / 版本">{rules || "暂无数据"}</Descriptions.Item>
-        <Descriptions.Item label="模型 / 版本">{model || "暂无数据"}</Descriptions.Item>
-        <Descriptions.Item label="置信度">{confidence}</Descriptions.Item>
-        <Descriptions.Item label="警告">{textList(detail.warnings)}</Descriptions.Item>
+        {rows.map((row) => (
+          <Descriptions.Item key={row.label} label={row.label}>
+            {row.value}
+          </Descriptions.Item>
+        ))}
       </Descriptions>
-      {cotNotRetained ? (
-        <Typography.Text type="secondary" style={{ display: "block", marginTop: 4 }}>
-          原始思维链未保留（ISSUE-131）
-        </Typography.Text>
-      ) : null}
     </div>
   );
 }
@@ -109,7 +125,7 @@ function NonAgentTraceDetail({ entry }: { entry: DecisionTraceEntry }) {
 
   const push = (label: string, ...keys: string[]) => {
     for (const key of keys) {
-      if (detail[key] !== undefined && detail[key] !== null && detail[key] !== "") {
+      if (isPresent(detail[key])) {
         rows.push({ label, value: detail[key] });
         return;
       }
@@ -166,11 +182,7 @@ function NonAgentTraceDetail({ entry }: { entry: DecisionTraceEntry }) {
   if (rows.length === 0) {
     const hasDetail = Object.keys(detail).length > 0;
     if (!hasDetail) {
-      return (
-        <Typography.Text type="secondary" style={{ marginTop: 8, display: "block" }}>
-          无结构化详情
-        </Typography.Text>
-      );
+      return null;
     }
     return (
       <div style={{ marginTop: 8 }}>
@@ -209,7 +221,7 @@ export default function DecisionTraceTimeline({
   onToolCallSelect?: (callId: string) => void;
 }) {
   const [selectedTypes, setSelectedTypes] =
-    useState<DecisionTraceEntryType[]>(ALL_TRACE_TYPES);
+    useState<DecisionTraceEntryType[]>(DEFAULT_TRACE_TYPES);
   const orderedEntries = useMemo(
     () =>
       [...entries]
@@ -254,17 +266,38 @@ export default function DecisionTraceTimeline({
           ) : null}
         </Typography.Paragraph>
       )}
-      <Checkbox.Group
-        aria-label="轨迹类型筛选"
-        value={selectedTypes}
-        options={ALL_TRACE_TYPES.map((value) => ({
-          value,
-          label: TRACE_TYPE_LABELS[value],
-        }))}
-        onChange={(values) =>
-          setSelectedTypes(values as DecisionTraceEntryType[])
-        }
-      />
+      <Space wrap align="center">
+        <Checkbox.Group
+          aria-label="轨迹类型筛选"
+          value={selectedTypes}
+          options={ALL_TRACE_TYPES.map((value) => ({
+            value,
+            label: TRACE_TYPE_LABELS[value],
+          }))}
+          onChange={(values) =>
+            setSelectedTypes(values as DecisionTraceEntryType[])
+          }
+        />
+        <Button
+          type="link"
+          size="small"
+          aria-label="仅展示 Agent 执行"
+          onClick={() => setSelectedTypes([...DEFAULT_TRACE_TYPES])}
+        >
+          仅 Agent
+        </Button>
+        <Button
+          type="link"
+          size="small"
+          aria-label="展示全部轨迹类型"
+          onClick={() => setSelectedTypes([...ALL_TRACE_TYPES])}
+        >
+          全部类型
+        </Button>
+      </Space>
+      <Typography.Text type="secondary">
+        每一步展示结论、证据引用和置信度。模型独白不落库。需要排障时再勾选工具、模型或写回。
+      </Typography.Text>
       {orderedEntries.length === 0 ? (
         <Empty description="暂无符合条件的决策轨迹" />
       ) : (
@@ -284,12 +317,16 @@ export default function DecisionTraceTimeline({
                       icon={<LinkOutlined />}
                       onClick={() => onToolCallSelect?.(entry.ref_id!)}
                     >
-                      {entry.title}
+                      {displayTitle(entry.title, entry.actor)}
                     </Button>
                   ) : (
-                    <Typography.Text strong>{entry.title}</Typography.Text>
+                    <Typography.Text strong>
+                      {displayTitle(entry.title, entry.actor)}
+                    </Typography.Text>
                   )}
-                  <Typography.Text type="secondary">{entry.actor}</Typography.Text>
+                  <Typography.Text type="secondary">
+                    {displayActor(entry.actor)}
+                  </Typography.Text>
                 </Space>
                 <div>
                   <Typography.Text type="secondary">

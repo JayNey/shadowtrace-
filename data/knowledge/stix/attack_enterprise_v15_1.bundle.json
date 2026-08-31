@@ -9,8 +9,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--1b4e1b61-8013-5013-b1bd-4b32fc9d78e5",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Valid Accounts",
       "description": "Adversaries may obtain and abuse credentials of existing accounts as a means of gaining Initial Access, Persistence, Privilege Escalation, or Defense Evasion. Compromised credentials may be used to bypass access controls placed on various resources on systems within the network and may even be used for persistent access to remote systems and externally available services.",
       "external_references": [
@@ -57,8 +57,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--894c5ded-2018-5e37-8099-1085d66fc17f",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Data from Local System",
       "description": "Adversaries may search local system sources, such as file systems and configuration files or local databases, to find files of interest and sensitive data prior to Exfiltration. This may include browsing the file system, searching specific directories, or using command-line utilities to enumerate files.",
       "external_references": [
@@ -82,8 +82,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--01ee6dcd-9901-563f-87ee-bb297975b7d6",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Archive Collected Data",
       "description": "Adversaries may compress and/or encrypt data collected prior to exfiltration. Common archiving utilities include zip, rar, 7z, tar, and gzip. Encryption may use standard algorithms (AES, RC4) or custom schemes. Archives may also be split into chunks or password-protected to evade detection.",
       "external_references": [
@@ -117,8 +117,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--379ff88b-648e-5ef3-bb7d-791a4f7833db",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Archive via Utility",
       "description": "Adversaries may use utilities such as 7-Zip, WinRAR, or tar to compress collected files before exfiltration. On finance endpoints this often appears as 7z.exe creating a zip of report files.",
       "external_references": [
@@ -141,7 +141,8 @@
         "archive",
         "7z",
         "7z.exe",
-        "finance_report.zip"
+        "finance_report.zip",
+        "exfiltration"
       ],
       "x_shadowtrace_aliases": [
         "打包压缩",
@@ -152,8 +153,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--83af393d-a4ff-5cde-a3a1-e04bd601b19d",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Exfiltration Over Web Service",
       "description": "Adversaries may exfiltrate data to a cloud storage service, web service, or file sharing platform rather than over their primary C2 channel. Popular targets include Dropbox, Google Drive, Mega, Pastebin, Discord, and Telegram. This blends in with legitimate web traffic and can bypass egress filtering.",
       "external_references": [
@@ -188,10 +189,10 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--6597e770-6a6f-5834-92bf-4d93205eec0d",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Application Layer Protocol",
-      "description": "Adversaries may communicate using application layer protocols to blend in with existing traffic. Commands to the compromised system and exfiltrated data may be embedded within the protocol. Common protocols abused include HTTP/HTTPS, DNS, SMTP, and WebSocket.",
+      "description": "Adversaries may communicate using application layer protocols to blend in with existing traffic. Commands to the compromised system and exfiltrated data may be embedded within the protocol. Common protocols abused include HTTP/HTTPS, DNS, SMTP, and WebSocket. Demo host compromise uses beacon.exe reaching beacon-example.test.",
       "external_references": [
         {
           "source_name": "mitre-attack",
@@ -207,14 +208,25 @@
       ],
       "x_mitre_is_subtechnique": false,
       "x_shadowtrace_attack_version": "v15.1",
-      "x_mitre_detection": "Analyze network traffic for anomalies in common protocols: unusual User-Agent strings, beaconing intervals in HTTP requests, DNS queries with high entropy subdomains or unusual query types. Inspect protocol fields that deviate from RFC specifications or organizational baselines."
+      "x_mitre_detection": "Analyze network traffic for anomalies in common protocols: unusual User-Agent strings, beaconing intervals in HTTP requests, DNS queries with high entropy subdomains or unusual query types. Alert on beacon.exe or similar beacons contacting unregistered C2 such as beacon-example.test. Inspect protocol fields that deviate from RFC specifications or organizational baselines.",
+      "x_shadowtrace_keywords": [
+        "beacon.exe",
+        "beacon-example.test",
+        "C2",
+        "application layer protocol"
+      ],
+      "x_shadowtrace_aliases": [
+        "C2",
+        "失陷回连",
+        "应用层协议"
+      ]
     },
     {
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--1289bc31-3a16-56cb-8a5d-5f04277cb151",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Exfiltration Over Alternative Protocol",
       "description": "Adversaries may exfiltrate data using a protocol different from the primary C2 channel. This could include FTP, SMTP, DNS tunneling, or ICMP tunneling. Using a separate channel can reduce the correlation between C2 traffic and data theft.",
       "external_references": [
@@ -246,8 +258,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--ec1dcbb9-1468-507e-82c7-c2fe5a2077f7",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Exfiltration Over C2 Channel",
       "description": "Adversaries may exfiltrate data over the same command and control channel used for communications. This avoids the need to open additional connections that might be detected. Data may be embedded within C2 protocol fields such as HTTP POST bodies or DNS response data.",
       "external_references": [
@@ -279,8 +291,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--13927770-9b6e-5eef-99c7-14705cf302fc",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Brute Force",
       "description": "Adversaries may use brute force techniques to gain access to accounts when passwords are unknown or when password hashes are obtained. This includes password spraying (few passwords against many accounts), credential stuffing, and dictionary attacks. Commonly targeted services include SSH, RDP, SMB, and web applications.",
       "external_references": [
@@ -313,8 +325,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--621deae3-a823-5fe6-8faf-1e541d1a15e2",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Phishing",
       "description": "Adversaries may send phishing messages to gain access to victim systems. This includes spearphishing attachments (malicious files), spearphishing links (malicious URLs), and spearphishing via third-party services. Phishing is frequently used as the initial infection vector in targeted intrusions.",
       "external_references": [
@@ -347,10 +359,10 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--8c8e86ca-bffa-5858-9b68-c8ab4a68d712",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Command and Scripting Interpreter",
-      "description": "Adversaries may abuse command and script interpreters to execute commands, scripts, or binaries. These include PowerShell on Windows, bash/sh on Linux/macOS, Python, JavaScript, VBScript, and Unix shells. These interfaces can be used to interact with systems and may provide capabilities not available through other means.",
+      "description": "Adversaries may abuse command and script interpreters to execute commands, scripts, or binaries. These include PowerShell on Windows, bash/sh on Linux/macOS, Python, JavaScript, VBScript, and Unix shells. Demo malicious_process staging uses ransomware_stage.exe rather than a compiler toolchain.",
       "external_references": [
         {
           "source_name": "mitre-attack",
@@ -366,14 +378,24 @@
       ],
       "x_mitre_is_subtechnique": false,
       "x_shadowtrace_attack_version": "v15.1",
-      "x_mitre_detection": "Monitor command-line parameters for suspicious patterns: encoded commands (-EncodedCommand, -e), hidden/NonInteractive windows, IEX/Invoke-Expression usage, download cradle patterns. Track PowerShell script block logging (Event ID 4104). Monitor bash history and shell audit logs for unusual commands."
+      "x_mitre_detection": "Monitor command-line parameters for suspicious patterns: encoded commands (-EncodedCommand, -e), hidden/NonInteractive windows, IEX/Invoke-Expression usage, download cradle patterns. Track PowerShell script block logging (Event ID 4104). Alert on ransomware_stage.exe as a non-approved process on developer workstations. Monitor bash history and shell audit logs for unusual commands.",
+      "x_shadowtrace_keywords": [
+        "scripting",
+        "command interpreter",
+        "ransomware_stage.exe"
+      ],
+      "x_shadowtrace_aliases": [
+        "命令解释器",
+        "脚本执行",
+        "恶意进程"
+      ]
     },
     {
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--ab90e116-a1f5-5489-9f05-57062d798397",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Exploit Public-Facing Application",
       "description": "Adversaries may attempt to exploit a vulnerability in an Internet-facing host or system to gain initial access. This includes vulnerabilities in web applications, web servers, email servers, VPN appliances, and other network-exposed software. Exploitation may result in code execution, file disclosure, or credential theft.",
       "external_references": [
@@ -397,8 +419,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--59b77fde-8c57-5042-b94c-345e620cfe8c",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Drive-by Compromise",
       "description": "Adversaries may gain access to systems by compromising a website that a user visits. This often exploits browser or plugin vulnerabilities, or leverages social engineering to trick the user into downloading and executing malicious content. Watering hole attacks target sites frequently visited by the victim organization.",
       "external_references": [
@@ -416,14 +438,23 @@
       ],
       "x_mitre_is_subtechnique": false,
       "x_shadowtrace_attack_version": "v15.1",
-      "x_mitre_detection": "Monitor web proxy logs for connections to newly-registered or low-reputation domains. Inspect web traffic for drive-by exploit kit patterns (multiple redirects, obfuscated JavaScript, heap spray indicators). Track browser crash reports and plugin exploitation alerts from endpoint protection."
+      "x_mitre_detection": "Monitor web proxy logs for connections to newly-registered or low-reputation domains. Inspect web traffic for drive-by exploit kit patterns (multiple redirects, obfuscated JavaScript, heap spray indicators). Track browser crash reports and plugin exploitation alerts from endpoint protection.",
+      "x_shadowtrace_keywords": [
+        "drive-by",
+        "newly registered",
+        "suspicious domain"
+      ],
+      "x_shadowtrace_aliases": [
+        "挂马",
+        "路过式攻击"
+      ]
     },
     {
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--1f5cc255-4efa-5d60-ab7c-7c0a35119cbf",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "External Remote Services",
       "description": "Adversaries may leverage external-facing remote services (VPNs, Citrix, RDP gateways, SSH portals) to gain initial access or maintain persistence. Valid accounts obtained through credential theft, brute force, or purchase can be used to authenticate to these services.",
       "external_references": [
@@ -451,8 +482,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--a1a5fad9-c100-52f8-8409-fea55b8dde5d",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Exploitation for Client Execution",
       "description": "Adversaries may exploit software vulnerabilities in client applications (office suites, browsers, PDF readers, media players) to execute code. This typically requires user interaction such as opening a malicious document or visiting a compromised website. Common targets include CVE exploits in Microsoft Office and Adobe Acrobat.",
       "external_references": [
@@ -476,8 +507,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--17b78a02-de80-5d15-ba7c-cda511265fd2",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "User Execution",
       "description": "Adversaries may rely on user actions to execute malicious code. This includes opening a malicious document, clicking a link, executing a downloaded file, or mounting a malicious ISO/DMG image. Social engineering is commonly used to convince the user to take the desired action.",
       "external_references": [
@@ -501,8 +532,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--1fe2609e-f181-5357-88a6-7e483b021689",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Process Injection",
       "description": "Adversaries may inject code into running processes to evade process-based defenses and elevate privileges. Techniques include DLL injection, process hollowing, thread execution hijacking, PE injection, and APC injection. Injected code may be masked as legitimate process activity.",
       "external_references": [
@@ -524,14 +555,23 @@
       ],
       "x_mitre_is_subtechnique": false,
       "x_shadowtrace_attack_version": "v15.1",
-      "x_mitre_detection": "Monitor for process injection API calls (VirtualAllocEx, WriteProcessMemory, CreateRemoteThread). Enable Windows Event ID 8 (CreateRemoteThread) tracking. Watch for processes with mismatched image paths and parent-child relationships. Analyze memory forensics for anomalous DLL loads."
+      "x_mitre_detection": "Monitor for process injection API calls (VirtualAllocEx, WriteProcessMemory, CreateRemoteThread). Enable Windows Event ID 8 (CreateRemoteThread) tracking. Watch for processes with mismatched image paths and parent-child relationships. Analyze memory forensics for anomalous DLL loads.",
+      "x_shadowtrace_keywords": [
+        "process injection",
+        "dll injection",
+        "malicious process"
+      ],
+      "x_shadowtrace_aliases": [
+        "进程注入",
+        "恶意进程"
+      ]
     },
     {
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--63dbeb9b-029d-503c-ad86-0c28ac4fcd2b",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Boot or Logon Autostart Execution",
       "description": "Adversaries may configure system settings to automatically execute programs during boot or user logon. This includes Registry Run keys, Startup folder entries, scheduled tasks, launch daemons (macOS), and systemd services (Linux). This ensures malware persistence across system restarts.",
       "external_references": [
@@ -559,8 +599,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--47e8bf4a-1ac7-5ced-aa28-dc3fde860227",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Server Software Component",
       "description": "Adversaries may abuse legitimate extensibility features of server software to maintain persistence. This includes web shells on web servers, SQL Server stored procedures, JSP/FTP/Exchange server backdoors, and application plugins. These components blend in with normal server operations.",
       "external_references": [
@@ -584,8 +624,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--13de2346-cb1f-515a-ad09-91283cff5bfc",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Exploitation for Privilege Escalation",
       "description": "Adversaries may exploit software vulnerabilities to elevate privileges from user to administrator or SYSTEM level. This includes kernel exploits, local service vulnerabilities, and misconfigured SUID/GUID binaries on Linux. Successful exploitation may bypass UAC and other privilege boundaries.",
       "external_references": [
@@ -609,8 +649,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--00606532-e63e-56ea-aa6d-1af828594c9d",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Abuse Elevation Control Mechanism",
       "description": "Adversaries may bypass or manipulate mechanisms designed to control privilege elevation. On Windows this includes UAC bypass techniques (eventvwr, fodhelper, computerdefaults), sudo caching abuse on Linux, and setuid/setgid program exploitation. These techniques allow elevation without triggering security prompts.",
       "external_references": [
@@ -632,14 +672,23 @@
       ],
       "x_mitre_is_subtechnique": false,
       "x_shadowtrace_attack_version": "v15.1",
-      "x_mitre_detection": "Monitor for UAC bypass patterns: processes auto-elevating without user consent prompts (Event ID 4688 with specific integrity levels). Track sudo usage patterns and cache modifications. Alert on registry modifications to UAC-related keys (HKCU\\Software\\Classes)."
+      "x_mitre_detection": "Monitor for UAC bypass patterns: processes auto-elevating without user consent prompts (Event ID 4688 with specific integrity levels). Track sudo usage patterns and cache modifications. Alert on registry modifications to UAC-related keys (HKCU\\Software\\Classes).",
+      "x_shadowtrace_keywords": [
+        "privilege escalation",
+        "UAC bypass",
+        "elevation"
+      ],
+      "x_shadowtrace_aliases": [
+        "提权",
+        "UAC 绕过"
+      ]
     },
     {
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--168b2704-7ef0-5d4a-9d24-9d34f8a3229d",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Masquerading",
       "description": "Adversaries may manipulate features of their artifacts to make them appear legitimate or benign. This includes renaming files to match system binary names (svchost.exe misspelled as scvhost.exe), using right-to-left override characters to disguise file extensions, and mimicking legitimate digital signatures.",
       "external_references": [
@@ -663,8 +712,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--df8be476-37f9-59c4-b07c-1d9cee48f188",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Obfuscated Files or Information",
       "description": "Adversaries may attempt to make an executable or script's contents difficult to discover or analyze by encoding, encrypting, or compressing the payload. This includes base64-encoded scripts, XOR-encrypted shellcode, and packers/cryptors applied to malware binaries. Obfuscation may also apply to data within C2 protocols.",
       "external_references": [
@@ -688,8 +737,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--983b39cd-8c01-5987-b3a6-7c73e1518876",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Process Injection: DLL Injection",
       "description": "Adversaries may inject Dynamic Link Libraries (DLLs) into running processes to execute malicious code. DLL injection is commonly performed by calling LoadLibrary or via reflective DLL loading that avoids the Windows loader. Injected DLLs run within the target process's memory space and inherit its permissions.",
       "external_references": [
@@ -717,8 +766,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--6172f39d-83e2-5c49-8dd9-49d4aebb2ec7",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "OS Credential Dumping",
       "description": "Adversaries may attempt to dump credentials from the operating system to obtain account login and authentication material. On Windows this targets LSASS memory, SAM database, and cached domain credentials (via tools like Mimikatz or direct API calls). On Linux this targets /etc/shadow, memory, and keyrings.",
       "external_references": [
@@ -736,14 +785,23 @@
       ],
       "x_mitre_is_subtechnique": false,
       "x_shadowtrace_attack_version": "v15.1",
-      "x_mitre_detection": "Monitor for access to LSASS process memory (OpenProcess with PROCESS_VM_READ on lsass.exe). Track use of known credential dumping tools (Mimikatz, ProcDump, fgdump). Alert on SAM registry hive access. Monitor Linux systems for access to /etc/shadow by non-system processes."
+      "x_mitre_detection": "Monitor for access to LSASS process memory (OpenProcess with PROCESS_VM_READ on lsass.exe). Track use of known credential dumping tools (Mimikatz, ProcDump, fgdump). Alert on SAM registry hive access. Monitor Linux systems for access to /etc/shadow by non-system processes.",
+      "x_shadowtrace_keywords": [
+        "credential dumping",
+        "lsass",
+        "mimikatz"
+      ],
+      "x_shadowtrace_aliases": [
+        "凭据转储",
+        "LSASS"
+      ]
     },
     {
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--74a78b11-48ff-531d-8028-d9aa515c6a3d",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Credentials from Password Stores",
       "description": "Adversaries may search for and extract credentials from common password storage locations. This includes browser password databases (Chrome, Firefox, Edge), system keychains (macOS Keychain, GNOME Keyring), password managers (KeePass, LastPass local vaults), and cloud CLI credential files (~/.aws/credentials).",
       "external_references": [
@@ -767,8 +825,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--e8214310-11b1-55fb-9879-acbc7dcf70c3",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Unsecured Credentials",
       "description": "Adversaries may search compromised systems for unsecured credentials stored in files, scripts, configuration files, bash history, environment variables, or source code repositories. These include hardcoded passwords, API keys, SSH private keys, and cloud service credentials left in accessible locations.",
       "external_references": [
@@ -792,8 +850,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--ce3210c2-8973-5fd1-9e0e-3589c6c3eacd",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Network Sniffing",
       "description": "Adversaries may listen in on network traffic to capture credentials, tokens, and other sensitive information transmitted over the network. This can be done by placing a network interface in promiscuous mode or using ARP spoofing/poisoning to redirect traffic through the attacker's machine.",
       "external_references": [
@@ -821,8 +879,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--4e547e4d-2679-5bcf-a8a9-1ab4a1878134",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Account Discovery",
       "description": "Adversaries may attempt to enumerate local system accounts, domain accounts, or cloud accounts. On Windows this includes 'net user', 'net group', and LDAP queries. On Linux/macOS this includes reading /etc/passwd and using 'id' or 'whoami'. Cloud account enumeration may use cloud CLI tools or APIs.",
       "external_references": [
@@ -846,8 +904,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--3465c3a4-5bb3-5aa0-baef-4848468e34d4",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Network Service Discovery",
       "description": "Adversaries may attempt to discover running services on remote hosts and local network infrastructure through port scanning, vulnerability scanning, and service banner grabbing. Common tools include Nmap, Masscan, Zgrab2, and scripts using /dev/tcp on Linux. This helps identify potential targets for lateral movement.",
       "external_references": [
@@ -871,8 +929,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--a4742f41-8214-52eb-bc20-1bcadb9d5b96",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "System Information Discovery",
       "description": "Adversaries may attempt to gather detailed information about a compromised system's configuration, installed software, patches, and hardware. Commands include 'systeminfo', 'hostname', 'uname -a', 'sw_vers', 'lscpu', and Windows registry queries. This information helps tailor subsequent actions.",
       "external_references": [
@@ -896,8 +954,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--c908c07b-078f-579c-b28a-788535dcdef5",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "System Network Configuration Discovery",
       "description": "Adversaries may gather information about network configuration and connectivity. Commands include 'ipconfig /all', 'netstat -ano', 'route print', 'arp -a', 'ifconfig', 'ip route', 'ss -tlnp'. This reveals internal network topology, connected hosts, listening services, and domain controllers.",
       "external_references": [
@@ -921,8 +979,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--51d560ba-2f53-5377-abca-d19fa8a30984",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Permission Groups Discovery",
       "description": "Adversaries may attempt to discover group and permission settings. On Windows this includes 'net localgroup', 'net group /domain', and 'Get-ADGroupMember'. On Linux/macOS this includes 'groups', 'id', and reading /etc/group. Cloud equivalents include listing IAM groups, Azure AD groups, and Okta group memberships.",
       "external_references": [
@@ -946,8 +1004,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--c344fd3d-87aa-5944-8c2c-71a215b12519",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Process Discovery",
       "description": "Adversaries may enumerate running processes to gather information about security software, system applications, and potential target processes for injection. Common commands include 'ps', 'tasklist', 'Get-Process', and 'top'. Process lists help identify EDR/AV products and valuable targets.",
       "external_references": [
@@ -971,8 +1029,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--1863c05f-5178-5616-9a5f-0c5632b1caff",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "File and Directory Discovery",
       "description": "Adversaries may enumerate files and directories to discover sensitive data, configuration files, or opportunities to expand access. Common commands include 'dir /s', 'tree', 'find', 'ls -laR', and 'locate'. Particular attention is paid to user document folders, shared drives, and source code repositories.",
       "external_references": [
@@ -996,8 +1054,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--f17730f2-5517-54d5-adaa-96b693342e3b",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Virtualization/Sandbox Evasion",
       "description": "Adversaries may check for the presence of virtual machine or sandbox environments to avoid analysis. Checks include detecting VM-specific hardware (VMware VGA, VirtualBox ACPI), registry keys, running services, and MAC address prefixes. Malware may delay execution or alter behavior when a sandbox is detected.",
       "external_references": [
@@ -1025,8 +1083,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--8a32d9a2-ea82-5bf4-8686-5da7a2b19801",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Remote Services",
       "description": "Adversaries may use valid accounts to log into remote services for lateral movement. This includes Remote Desktop Protocol (RDP), SSH, SMB/Windows admin shares, WinRM, VNC, and PsExec. Remote services may allow direct command execution or interactive desktop access on target systems. Demo packs show mstsc.exe from JUMP-HOST-001 pivoting over RDP.",
       "external_references": [
@@ -1062,8 +1120,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--1f1e80e5-03cb-5267-935e-c644f1da585d",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Exploitation of Remote Services",
       "description": "Adversaries may exploit vulnerable network services to move laterally between systems. Classic examples include EternalBlue (MS17-010 SMB), BlueKeep (CVE-2019-0708 RDP), and vulnerabilities in web applications hosted on internal servers. Exploitation may provide SYSTEM-level code execution.",
       "external_references": [
@@ -1087,8 +1145,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--e35cde74-37e7-566e-878d-431a59e38364",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Replication Through Removable Media",
       "description": "Adversaries may move onto systems through removable media (USB drives, external HDDs, SD cards) by copying malware and configuring autorun/autoplay features or by modifying the media's firmware. This can cross air-gapped network boundaries.",
       "external_references": [
@@ -1116,8 +1174,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--6cb61a48-fe81-593b-a33b-b5e2839c9e2c",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Internal Spearphishing",
       "description": "Adversaries may use internal spearphishing to move laterally after compromising email accounts within the organization. Using a compromised corporate email account, the adversary sends targeted phishing messages to other internal users, which appear more trustworthy than external phishing.",
       "external_references": [
@@ -1141,8 +1199,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--d6203402-740b-5d2f-bdd9-907b61704aff",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Automated Collection",
       "description": "Adversaries may use automated techniques to collect internal data once established within a network. This includes scripts that recursively search through file shares and databases, automated screen capture schedules, and regular keylogging output. Automation enables collection at scale.",
       "external_references": [
@@ -1166,8 +1224,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--214e57ff-7547-5c23-a71e-689f03562f3b",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Data Staged",
       "description": "Adversaries may stage collected data in a central location or directory prior to exfiltration. Data may be staged in separate archive files or combined into one file. Common staging locations include temporary directories, recycle bins, hidden directories, or cloud-synced folders.",
       "external_references": [
@@ -1191,8 +1249,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--5927dd15-0f39-5cd4-a0d2-b15072581670",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Proxy",
       "description": "Adversaries may use connection proxying to route network traffic through intermediate systems, obscuring the true destination of C2 communications. This includes internal proxy pivoting, external VPN/proxy services, TOR, and domain fronting. Proxies make traffic attribution and filtering more difficult.",
       "external_references": [
@@ -1216,8 +1274,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--9d699668-c2b8-5fcf-8e40-d44548209d34",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Ingress Tool Transfer",
       "description": "Adversaries may transfer tools or files from an external system into a compromised environment. Tools may be transferred through the C2 channel, via alternative protocols, or using legitimate web services (GitHub, Pastebin, cloud storage). This enables adversaries to bring in additional capabilities post-compromise.",
       "external_references": [
@@ -1241,8 +1299,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--1c73c05d-0eb5-506d-8141-cee5f0b46877",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Encrypted Channel",
       "description": "Adversaries may encrypt C2 communications using standard protocols (TLS, SSH) or custom cryptographic schemes. Encryption hides the content of C2 commands and exfiltrated data from network inspection. Self-signed or Let's Encrypt certificates are commonly used to establish encrypted sessions.",
       "external_references": [
@@ -1266,8 +1324,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--e534b3ec-880f-507f-88a5-1605c2333029",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Protocol Tunneling",
       "description": "Adversaries may tunnel one protocol within another to obfuscate C2 communications. Common tunnels include DNS tunneling (iodine, dnscat2), HTTP/HTTPS tunneling (reGeorg, tunna), SSH tunneling, and ICMP tunneling. Tunneling can circumvent network segmentation and egress filtering.",
       "external_references": [
@@ -1291,8 +1349,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--fed2b5d0-df0f-5c2e-b548-193b6f9869d7",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Transfer Data to Cloud Account",
       "description": "Adversaries may exfiltrate data to a cloud storage service under their control. This includes syncing staging directories to cloud-synced folders, uploading to cloud storage via API or CLI tools, or emailing data to webmail services. Legitimate cloud service traffic blends in with normal corporate cloud usage.",
       "external_references": [
@@ -1324,8 +1382,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--ecaab15b-dea5-5b75-a8e2-6e2da6a4f15d",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Data Destruction",
       "description": "Adversaries may destroy data and files on specific systems or across the network to disrupt operations and hinder recovery. This includes file deletion (sdelete, rm -rf), disk wiping (raw write operations, diskpart clean), and master boot record (MBR) corruption. Data destruction may be targeted or widespread.",
       "external_references": [
@@ -1349,8 +1407,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--87446022-8a60-5fab-8b30-78aa5b873787",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Data Encrypted for Impact",
       "description": "Adversaries may encrypt data on target systems to disrupt availability. This is the defining characteristic of ransomware. Modern ransomware variants combine strong encryption (AES, RSA), delete shadow copies/backups (vssadmin), and demand cryptocurrency payment for decryption keys.",
       "external_references": [
@@ -1374,8 +1432,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--518b750e-8412-578f-a558-3852a46c6a17",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Inhibit System Recovery",
       "description": "Adversaries may disable or delete system recovery features to prevent restoration. This includes deleting volume shadow copies, disabling Windows Recovery Environment (WinRE), deleting backup catalogs, and disabling automatic repair. This is often a precursor to destructive actions like ransomware encryption.",
       "external_references": [
@@ -1399,8 +1457,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--256e1319-b001-51f7-8a06-b7420343bf53",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Network Denial of Service",
       "description": "Adversaries may perform Network Denial of Service (DoS) attacks to degrade or block the availability of targeted resources. This includes direct network floods (SYN, UDP, HTTP GET/POST floods), amplification attacks (DNS, NTP, memcached), and application-layer DoS targeting specific service endpoints.",
       "external_references": [
@@ -1424,8 +1482,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--2227f74f-b0bd-5c37-9508-eaaea54df59a",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "System Shutdown/Reboot",
       "description": "Adversaries may shutdown or reboot systems to disrupt access or interrupt running processes. Commands include 'shutdown /s /t 0', 'shutdown /r /t 0', 'reboot', 'halt'. This may be used to force the boot process into a compromised state or to remove forensic artifacts from memory.",
       "external_references": [
@@ -1449,8 +1507,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--ce6688c0-10c1-567e-88f5-3a12ff92651f",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Supply Chain Compromise",
       "description": "Adversaries may manipulate products or product delivery mechanisms before receipt by the end consumer. This includes compromising software dependencies (npm, PyPI packages), build pipeline injection, firmware tampering, and hardware interdiction. Supply chain attacks can affect many downstream victims simultaneously.",
       "external_references": [
@@ -1474,8 +1532,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--7189e606-fd90-5a96-9796-9c3b54f55278",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Adversary-in-the-Middle",
       "description": "Adversaries may position themselves between two communicating parties to intercept, modify, or relay communications. Techniques include ARP spoofing, DNS poisoning, LLMNR/NBNS spoofing, rogue DHCP servers, and TLS interception. This allows credential harvesting and traffic manipulation.",
       "external_references": [
@@ -1503,8 +1561,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--5a5161af-03a5-598c-a0f3-c3868cc5ab73",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Impair Defenses",
       "description": "Adversaries may disable, modify, or bypass security tools to evade detection. This includes stopping AV/EDR services, disabling Windows Defender, unloading kernel drivers, modifying firewall rules, tampering with logging, and disabling alerting. Without defenses, adversaries can operate undetected.",
       "external_references": [
@@ -1528,8 +1586,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--f10a4203-9ddb-5626-9faf-df2e06b1853d",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Indicator Removal",
       "description": "Adversaries may remove or modify artifacts generated during their intrusion to avoid detection. This includes clearing Windows Event Logs, removing bash/shell history, deleting files, clearing command history, and manipulating file timestamps (timestomp). A clean trail complicates forensic investigation.",
       "external_references": [
@@ -1553,8 +1611,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--cb643b68-529f-5f5c-aecf-b13cd1da2906",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Hide Artifacts",
       "description": "Adversaries may attempt to hide artifacts associated with their behaviors to evade detection. This includes hidden files and directories (dot-prefixed on Linux, hidden attribute on Windows), hidden users, hidden windows, and use of NTFS Alternate Data Streams (ADS) to conceal payloads.",
       "external_references": [
@@ -1578,8 +1636,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--da80e849-e823-56c0-83bb-e63b1f6e92f6",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Hijack Execution Flow",
       "description": "Adversaries may hijack the way operating systems run programs by modifying search order, DLL load order, COM object registration, or service paths. Common techniques include DLL search order hijacking, PATH interception, and service binary replacement. The malicious code is loaded in place of legitimate software.",
       "external_references": [
@@ -1611,8 +1669,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--22136c77-fd75-507b-a3d3-b261c46bb4b0",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Create Account",
       "description": "Adversaries may create new accounts on compromised systems to maintain persistence. This includes local accounts (net user /add), domain accounts, and cloud accounts. Accounts may be named to blend in with existing naming conventions or added to privileged groups for sustained elevated access.",
       "external_references": [
@@ -1636,8 +1694,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--63363b96-adb7-5030-8fec-f8c73307c378",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Create or Modify System Process",
       "description": "Adversaries may create or modify system-level processes to repeatedly execute malicious payloads. On Windows this includes Windows Service creation (sc create), on Linux/macOS this includes systemd service units, init scripts, and Launch Daemons. System processes run with elevated privileges and start at boot.",
       "external_references": [
@@ -1665,10 +1723,10 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--eb7fe977-4c87-51eb-b825-ae06cb42254d",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "System Binary Proxy Execution",
-      "description": "Adversaries may use trusted system binaries (LOLBins) to proxy execution of malicious code. Examples include rundll32.exe, regsvr32.exe, mshta.exe, certutil.exe, and msiexec.exe on Windows. These signed Microsoft binaries bypass application control and are often allowlisted by security software.",
+      "description": "Adversaries may use trusted system binaries (LOLBins) to proxy execution of malicious code. Examples include rundll32.exe, regsvr32.exe, mshta.exe, certutil.exe, and msiexec.exe on Windows. Demo malicious_process also flags ransomware_stage.exe as a non-approved staged binary rather than a signed LOLBin.",
       "external_references": [
         {
           "source_name": "mitre-attack",
@@ -1684,14 +1742,23 @@
       ],
       "x_mitre_is_subtechnique": false,
       "x_shadowtrace_attack_version": "v15.1",
-      "x_mitre_detection": "Monitor for LOLBin executions with suspicious parameters: rundll32 calling URLs or JavaScript, regsvr32 with /i:http://, mshta with remote scripts, certutil with -urlcache. Track parent-child process relationships that deviate from normal patterns. Correlate LOLBin activity with network connections."
+      "x_mitre_detection": "Monitor for LOLBin executions with suspicious parameters: rundll32 calling URLs or JavaScript, regsvr32 with /i:http://, mshta with remote scripts, certutil with -urlcache. Alert on ransomware_stage.exe execution. Track parent-child process relationships that deviate from normal patterns. Correlate LOLBin activity with network connections.",
+      "x_shadowtrace_keywords": [
+        "lolbin",
+        "proxy execution",
+        "ransomware_stage.exe"
+      ],
+      "x_shadowtrace_aliases": [
+        "系统二进制代理",
+        "LOLBin"
+      ]
     },
     {
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--d0796281-011c-5fbc-85be-d4078172914f",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Native API",
       "description": "Adversaries may use native OS APIs to execute behaviors rather than command-line utilities. On Windows, Native API calls (Nt/Zw functions via syscall) bypass user-mode security hooks and can evade EDR. Common examples include direct syscall invocation of NtCreateProcess/NtOpenProcess for process injection.",
       "external_references": [
@@ -1715,8 +1782,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--9f8a88aa-60de-59c7-b30c-6906ec041703",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Data Obfuscation",
       "description": "Adversaries may obfuscate command and control traffic to make it more difficult to detect. This includes using steganography to hide data in images or other media files, adding junk data to pad protocol fields, and employing custom encoding schemes that deviate from standard protocol implementations.",
       "external_references": [
@@ -1740,8 +1807,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--b6871f4f-5b24-5bda-a081-fffbb9b0c6ab",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Boot or Logon Initialization Scripts",
       "description": "Adversaries may use scripts automatically executed during boot or logon to maintain persistence. On Windows this includes logon scripts in Group Policy and profile-based scripts. On Linux/macOS this includes .bash_profile, .bashrc, .zshrc, and rc.common startup scripts. These run in the user's context at logon.",
       "external_references": [
@@ -1769,8 +1836,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--44bad7cd-27da-52c2-a902-dda6088e3c1b",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Software Discovery",
       "description": "Adversaries may enumerate installed software to identify security products, vulnerable applications, and potential targets. Commands include 'wmic product get name', listing /Applications (macOS), querying package managers (dpkg -l, rpm -qa), and checking browser extensions. This informs tool selection and exploit targeting.",
       "external_references": [
@@ -1794,8 +1861,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--213c407b-8599-54f2-a0dc-677f7c68076d",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "System Network Connections Discovery",
       "description": "Adversaries may attempt to discover active network connections to and from compromised systems. Commands include 'netstat -ano', 'ss -tlnp', and 'Get-NetTCPConnection'. This reveals listening services, connected clients, C2 connections, and potential lateral movement targets.",
       "external_references": [
@@ -1819,8 +1886,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--8d794115-ee11-5f26-b175-6856c0648136",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Stage Capabilities",
       "description": "Adversaries may upload, install, or otherwise set up capabilities that can be used during targeting. This includes staging malware on compromised websites or cloud storage, creating lookalike domains, registering accounts on third-party services, and preparing C2 infrastructure before an operation begins.",
       "external_references": [
@@ -1838,14 +1905,23 @@
       ],
       "x_mitre_is_subtechnique": false,
       "x_shadowtrace_attack_version": "v15.1",
-      "x_mitre_detection": "Monitor threat intelligence feeds for newly-registered domains with characteristics similar to your brand. Track DNS registration patterns for suspicious domains. Monitor for malware staging URLs shared on threat intel platforms. Proactively scan for credential harvesting pages impersonating your organization."
+      "x_mitre_detection": "Monitor threat intelligence feeds for newly-registered domains with characteristics similar to your brand. Track DNS registration patterns for suspicious domains. Monitor for malware staging URLs shared on threat intel platforms. Proactively scan for credential harvesting pages impersonating your organization.",
+      "x_shadowtrace_keywords": [
+        "stage capabilities",
+        "newly registered",
+        "lookalike domain"
+      ],
+      "x_shadowtrace_aliases": [
+        "能力预置",
+        "基础设施准备"
+      ]
     },
     {
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--51f11c3e-4cc5-5543-8fae-093a5acb136e",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Active Scanning",
       "description": "Adversaries may actively scan target networks, infrastructure, and web applications to gather information that can be used during targeting. This includes port scanning, vulnerability scanning, web application scanning, and DNS zone enumeration. Scanning may be performed directly or through compromised intermediary systems.",
       "external_references": [
@@ -1869,8 +1945,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--4b20b476-af9a-53cd-87f5-8ffeca9509ab",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Phishing for Information",
       "description": "Adversaries may send phishing messages to elicit sensitive information from victims. This includes sending emails with links to credential harvesting pages, social engineering phone calls, and impersonating IT support on messaging platforms. Information gathered is used to plan and execute intrusions.",
       "external_references": [
@@ -1894,8 +1970,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--ef58c083-ef03-54a8-92c6-757347c2d6dc",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Taint Shared Content",
       "description": "Adversaries may deliver payloads to remote systems by adding malicious content to shared storage locations, such as network file shares or cloud-synced folders. When users or automated processes access the tainted content, the payload is executed, enabling lateral movement.",
       "external_references": [
@@ -1919,8 +1995,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--004e9e42-f035-57fe-8de8-0c7a18428288",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Software Deployment Tools",
       "description": "Adversaries may use enterprise software deployment tools (SCCM, PDQ Deploy, Chocolatey, Ansible, Puppet, GPO) to execute code across many systems simultaneously. Access to these tools provides a trusted mechanism for distributing malware to large numbers of hosts.",
       "external_references": [
@@ -1948,8 +2024,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--e221c0ce-4ba2-5741-a37b-0f74d5d5d5dc",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Execution Guardrails",
       "description": "Adversaries may use execution guardrails (environment checks) to constrain execution to intended targets. This includes checking domain membership, computer name, user locale, system language, time zones, and specific file/directory presence. Malware may self-delete or sleep indefinitely if guardrails are not met.",
       "external_references": [
@@ -1973,8 +2049,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--ecdaee74-7ffe-5cd5-9241-bef3fcb9c0e5",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Indicator Removal: Clear Windows Event Logs",
       "description": "Adversaries may clear Windows Event Logs to hide their activity. This can be done via wevtutil cl, Clear-EventLog, or direct Event Log API calls. Clearing the Security log (Event ID 1102) is particularly concerning as it removes the audit trail of authentication, account management, and policy changes.",
       "external_references": [
@@ -1998,8 +2074,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--fec4b98d-c6e3-58a9-838e-0582eabaa3be",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Scheduled Task/Job",
       "description": "Adversaries may abuse task scheduling functionality to execute programs at a specific time or on a recurring basis. On Windows this includes Scheduled Tasks (schtasks), on Linux/macOS this includes cron jobs and at jobs. Scheduled tasks may be configured to run with SYSTEM/root privileges and survive reboots.",
       "external_references": [
@@ -2031,8 +2107,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--b0d3ab04-b2a8-537c-9b60-7e86bcd41b58",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Event Triggered Execution",
       "description": "Adversaries may establish persistence or elevate privileges using mechanisms that execute code in response to system events. This includes WMI event subscriptions, Accessibility Features backdoors (sethc.exe, utilman.exe replacement), AppCert DLLs, Image File Execution Options (IFEO), and Netsh Helper DLLs.",
       "external_references": [
@@ -2060,8 +2136,8 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--da89d9a1-d44d-5b91-9d6b-f00510dcd368",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "System Services",
       "description": "Adversaries may abuse system services to execute commands or programs. On Windows this includes using 'sc start', 'net start', or direct service control manager APIs. On Linux/macOS this includes systemctl, service, and launchctl. Service execution typically runs with elevated privileges.",
       "external_references": [
@@ -2085,10 +2161,10 @@
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--74bb969f-f36c-50a5-96c8-2c7687636aaa",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Windows Management Instrumentation",
-      "description": "Adversaries may abuse Windows Management Instrumentation (WMI) to execute malicious commands and payloads. WMI provides a powerful interface for local and remote system management, including process creation (Win32_Process.Create), service management, registry access, and file operations.",
+      "description": "Adversaries may abuse Windows Management Instrumentation (WMI) to execute malicious commands and payloads. WMI provides a powerful interface for local and remote system management, including process creation (Win32_Process.Create), service management, registry access, and file operations. Remote WMI is a lateral execution path distinct from RDP.",
       "external_references": [
         {
           "source_name": "mitre-attack",
@@ -2104,16 +2180,24 @@
       ],
       "x_mitre_is_subtechnique": false,
       "x_shadowtrace_attack_version": "v15.1",
-      "x_mitre_detection": "Monitor WMI process creation events (Event ID 4688 with parent wmiprvse.exe). Track WMI permanent event subscriptions. Alert on WMI usage from non-admin workstations targeting servers. Detect WMI scripting via wmic.exe and PowerShell WMI cmdlets from unexpected processes."
+      "x_mitre_detection": "Monitor WMI process creation events (Event ID 4688 with parent wmiprvse.exe). Track WMI permanent event subscriptions. Alert on WMI usage from non-admin workstations targeting servers. Detect WMI scripting via wmic.exe and PowerShell WMI cmdlets from unexpected processes. Correlate WMI with subsequent lateral connections.",
+      "x_shadowtrace_keywords": [
+        "WMI",
+        "lateral"
+      ],
+      "x_shadowtrace_aliases": [
+        "WMI",
+        "Windows Management Instrumentation"
+      ]
     },
     {
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--2527fe20-fc15-5c01-b38e-3d9aa4a652e3",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "Access Token Manipulation",
-      "description": "Adversaries may modify access tokens to impersonate other users or processes. This includes token duplication, token stealing (stealing SYSTEM token from a service), and manipulating token privileges (enabling SeDebugPrivilege, SeImpersonatePrivilege). Token manipulation can allow code to run under a different security context.",
+      "description": "Adversaries may modify access tokens to impersonate other users or processes. This includes token duplication, token stealing (stealing SYSTEM token from a service), and manipulating token privileges (enabling SeDebugPrivilege, SeImpersonatePrivilege). Local privilege abuse often uses net.exe to add groups or enable rights.",
       "external_references": [
         {
           "source_name": "mitre-attack",
@@ -2133,14 +2217,23 @@
       ],
       "x_mitre_is_subtechnique": false,
       "x_shadowtrace_attack_version": "v15.1",
-      "x_mitre_detection": "Monitor for process token privilege changes (Event ID 4703 with SeDebugPrivilege, SeImpersonatePrivilege, SeAssignPrimaryTokenPrivilege). Track process creation with mismatched parent and child security contexts. Detect use of runas and token manipulation tool signatures."
+      "x_mitre_detection": "Monitor for process token privilege changes (Event ID 4703 with SeDebugPrivilege, SeImpersonatePrivilege, SeAssignPrimaryTokenPrivilege). Track process creation with mismatched parent and child security contexts. Detect use of runas, net.exe, and token manipulation tool signatures.",
+      "x_shadowtrace_keywords": [
+        "token manipulation",
+        "net.exe",
+        "privilege"
+      ],
+      "x_shadowtrace_aliases": [
+        "令牌操纵",
+        "特权提升"
+      ]
     },
     {
       "type": "attack-pattern",
       "spec_version": "2.1",
       "id": "attack-pattern--51ea98d3-e235-5daf-97d2-d119c2bf939e",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "name": "File and Directory Permissions Modification",
       "description": "Adversaries may modify file or directory permissions to evade access controls. On Windows this includes using icacls, takeown, and cacls. On Linux/macOS this includes chmod, chown, chflags, and setfacl. Changing permissions may grant the adversary access to protected files or prevent security products from accessing malicious files.",
       "external_references": [
@@ -2164,8 +2257,8 @@
       "type": "relationship",
       "spec_version": "2.1",
       "id": "relationship--51fe7fb6-90b8-57cf-9868-ae651ef48ce1",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "relationship_type": "subtechnique-of",
       "source_ref": "attack-pattern--379ff88b-648e-5ef3-bb7d-791a4f7833db",
       "target_ref": "attack-pattern--01ee6dcd-9901-563f-87ee-bb297975b7d6"
@@ -2174,8 +2267,8 @@
       "type": "relationship",
       "spec_version": "2.1",
       "id": "relationship--b9979233-7815-5bde-a290-b9e178c7bca3",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "relationship_type": "subtechnique-of",
       "source_ref": "attack-pattern--983b39cd-8c01-5987-b3a6-7c73e1518876",
       "target_ref": "attack-pattern--1fe2609e-f181-5357-88a6-7e483b021689"
@@ -2184,8 +2277,8 @@
       "type": "relationship",
       "spec_version": "2.1",
       "id": "relationship--33be7993-bd9f-55f8-bac8-6c91b6d5127e",
-      "created": "2026-08-28T16:27:45.000Z",
-      "modified": "2026-08-28T16:27:45.000Z",
+      "created": "2026-08-30T15:30:52.000Z",
+      "modified": "2026-08-30T15:30:52.000Z",
       "relationship_type": "subtechnique-of",
       "source_ref": "attack-pattern--ecdaee74-7ffe-5cd5-9241-bef3fcb9c0e5",
       "target_ref": "attack-pattern--f10a4203-9ddb-5626-9faf-df2e06b1853d"

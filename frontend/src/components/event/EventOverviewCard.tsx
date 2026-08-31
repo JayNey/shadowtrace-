@@ -27,6 +27,7 @@ import StatusBadge from "./StatusBadge";
 import SeverityTag from "./SeverityTag";
 import VerdictTag from "./VerdictTag";
 import WritebackBadge from "./WritebackBadge";
+import RagCitationStrip from "./RagCitationStrip";
 import { getSeverityConfig } from "./constants";
 import {
   isHighRiskNoneMismatch,
@@ -63,9 +64,16 @@ export function isLowConfidenceClassification(
 interface Props {
   detail: EventDetailResponse;
   onRefresh?: () => Promise<void>;
+  onNavigateTab?: (tabKey: string) => void;
+  primaryActionTool?: string;
 }
 
-export default function EventOverviewCard({ detail, onRefresh }: Props) {
+export default function EventOverviewCard({
+  detail,
+  onRefresh,
+  onNavigateTab,
+  primaryActionTool,
+}: Props) {
   const { event } = detail;
   const roles = currentAuthRoles();
   const canReclassify =
@@ -110,15 +118,6 @@ export default function EventOverviewCard({ detail, onRefresh }: Props) {
   }) && demotionCodes.length > 0;
 
   const snapshot = event.event_context_snapshot;
-  const ragOutput = snapshot?.rag_output as
-    | { org_context_matches?: Array<{ kind?: string; matched_value?: string }> }
-    | undefined;
-  const orgMatches = Array.isArray(snapshot?.org_context_matches)
-    ? snapshot.org_context_matches
-    : Array.isArray(ragOutput?.org_context_matches)
-      ? (ragOutput.org_context_matches ?? [])
-      : [];
-  const fpAdjudication = snapshot?.fp_adjudication ?? undefined;
 
   const openModal = () => {
     form.setFieldsValue({
@@ -209,6 +208,11 @@ export default function EventOverviewCard({ detail, onRefresh }: Props) {
           ) : null}
         </Col>
       </Row>
+      <RagCitationStrip
+        snapshot={snapshot}
+        primaryActionTool={primaryActionTool}
+        onNavigateTab={onNavigateTab}
+      />
       <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} style={{ marginTop: 20 }}>
         <Descriptions.Item label="事件类型">
           <Space wrap size={6}>
@@ -248,25 +252,6 @@ export default function EventOverviewCard({ detail, onRefresh }: Props) {
             externalUnsynced={event.external_unsynced}
           />
         </Descriptions.Item>
-        {fpAdjudication?.recommendation ? (
-          <Descriptions.Item label="误报裁决">
-            {fpAdjudication.recommendation}
-            {fpAdjudication.matched_window_id
-              ? ` (${fpAdjudication.matched_window_id})`
-              : ""}
-          </Descriptions.Item>
-        ) : null}
-        {orgMatches.length > 0 ? (
-          <Descriptions.Item label="组织上下文">
-            {orgMatches
-              .slice(0, 3)
-              .map((match) =>
-                [match.kind, match.matched_value].filter(Boolean).join(" "),
-              )
-              .filter(Boolean)
-              .join("；")}
-          </Descriptions.Item>
-        ) : null}
       </Descriptions>
 
       <Modal

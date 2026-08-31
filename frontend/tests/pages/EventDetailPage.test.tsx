@@ -1187,6 +1187,8 @@ describe("EventDetailPage", () => {
 
   it("navigates to audit tab from decision basis todo", async () => {
     const user = userEvent.setup();
+    const scrollIntoView = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
     mockGetEvent.mockResolvedValue({
       data: {
         ...makeDetail({ status: "reporting" }),
@@ -1197,6 +1199,24 @@ describe("EventDetailPage", () => {
     expect(await screen.findByTestId("event-todo-bar")).toBeInTheDocument();
     await user.click(screen.getByTestId("todo-nav-decision-basis"));
     expect(screen.getByTestId("location-hash")).toHaveTextContent("#audit");
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+  });
+
+  it("scrolls to tabs when the todo target is already open", async () => {
+    const user = userEvent.setup();
+    const scrollIntoView = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    mockGetEvent.mockResolvedValue({
+      data: {
+        ...makeDetail({ status: "reporting" }),
+        analysis_only_complete: true,
+      },
+    });
+    renderPage("/events/evt-70#audit");
+    expect(await screen.findByTestId("event-todo-bar")).toBeInTheDocument();
+    await user.click(screen.getByTestId("todo-nav-decision-basis"));
+    expect(screen.getByTestId("location-hash")).toHaveTextContent("#audit");
+    expect(scrollIntoView).toHaveBeenCalled();
   });
 
   it("renders outstanding side-effects panel and todo without actions-tab nav", async () => {

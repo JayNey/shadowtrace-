@@ -18,12 +18,17 @@ def test_emotet_history_case_no_longer_reuses_gold_path_host() -> None:
     emotet = by_id["case-10000003"]
     gold = by_id["case-10000017"]
     emotet_blob = f"{emotet['summary']} {emotet['key_entities']}"
+    gold_blob = f"{gold['summary']} {gold['key_entities']}"
     assert "PC-FIN-023" not in emotet_blob
     assert "zhangsan" not in emotet_blob
-    assert "PC-FIN-023" in gold["key_entities"]
+    assert "PC-FIN-023" not in gold_blob
+    assert "zhangsan" not in gold_blob
+    assert "unknown-upload-example.com" not in gold_blob
+    assert "finance_report.zip" not in gold_blob
     assert "7z.exe" in gold["key_entities"]
-    assert "unknown-upload-example.com" in gold["key_entities"]
+    assert "PC-FIN-041" in gold["key_entities"]
     assert gold["event_type"] == "data_exfiltration"
+    assert gold["case_label"] == "true_positive"
 
 
 def test_attack_seed_has_gold_path_aliases() -> None:

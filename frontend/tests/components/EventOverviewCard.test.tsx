@@ -239,4 +239,74 @@ describe("EventOverviewCard", () => {
       await screen.findByText(/classification cannot change while verifying/),
     ).toBeInTheDocument();
   });
+
+  it("shows pending citation strip when rag_citations is absent", () => {
+    renderCard(makeDetail({ event_context_snapshot: {} }));
+    expect(screen.getByTestId("rag-citation-pending")).toHaveTextContent("检索未完成");
+    expect(screen.queryByTestId("rag-citation-fp")).not.toBeInTheDocument();
+    expect(screen.queryByText("误报裁决")).not.toBeInTheDocument();
+    expect(screen.queryByText("组织上下文")).not.toBeInTheDocument();
+  });
+
+  it("shows empty citation slots after retrieval with no hits", () => {
+    renderCard(
+      makeDetail({
+        event_context_snapshot: {
+          rag_citations: { retrieved: true, degraded: false },
+        },
+      }),
+    );
+    expect(screen.queryByTestId("rag-citation-pending")).not.toBeInTheDocument();
+    expect(screen.getByTestId("rag-citation-fp-value")).toHaveTextContent("未命中误报卡");
+    expect(screen.getByTestId("rag-citation-org-value")).toHaveTextContent("无组织约束");
+    expect(screen.getByTestId("rag-citation-playbook-value")).toHaveTextContent("无剧本引用");
+    expect(screen.getByTestId("rag-citation-attack-value")).toHaveTextContent("无攻击技术");
+  });
+
+  it("shows hit citation slots and optional tool / adjudication suffix", async () => {
+    const user = userEvent.setup();
+    const onNavigateTab = vi.fn();
+    render(
+      <AntApp>
+        <EventOverviewCard
+          detail={makeDetail({
+            event_context_snapshot: {
+              rag_citations: {
+                retrieved: true,
+                degraded: true,
+                fp_case_id: "case-00000001",
+                playbook_ids: ["pb-c8d9e0f1"],
+                attack_techniques: [
+                  { technique_id: "T1021", technique_name: "Remote Services" },
+                ],
+              },
+              org_context_matches: [
+                { kind: "time_window", matched_value: "08:00-12:00" },
+              ],
+              fp_adjudication: { recommendation: "close_as_fp" },
+            },
+          })}
+          primaryActionTool="block_domain"
+          onNavigateTab={onNavigateTab}
+        />
+      </AntApp>,
+    );
+    expect(screen.getByTestId("rag-citation-degraded")).toHaveTextContent("检索降级");
+    expect(screen.getByTestId("rag-citation-fp-value")).toHaveTextContent(
+      "命中 case-00000001 · close_as_fp",
+    );
+    expect(screen.getByTestId("rag-citation-org-value")).toHaveTextContent(
+      "time_window 08:00-12:00",
+    );
+    expect(screen.getByTestId("rag-citation-playbook-value")).toHaveTextContent(
+      "pb-c8d9e0f1 · block_domain",
+    );
+    expect(screen.getByTestId("rag-citation-attack-value")).toHaveTextContent(
+      "T1021 Remote Services",
+    );
+    await user.click(screen.getByTestId("rag-citation-playbook-value"));
+    expect(onNavigateTab).toHaveBeenCalledWith("actions");
+    await user.click(screen.getByTestId("rag-citation-attack-value"));
+    expect(onNavigateTab).toHaveBeenCalledWith("report");
+  });
 });

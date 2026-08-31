@@ -37,6 +37,7 @@ SNAPSHOT_SUMMARY_KEYS = frozenset(
         "execution_substate",
         "org_context_matches",
         "fp_adjudication",
+        "rag_citations",
     }
 )
 
@@ -69,6 +70,12 @@ _MAX_RISK_ASSESSMENT_BYTES = 8_192
 _MAX_SNAPSHOT_BYTES = 65_536
 _MAX_ORG_CONTEXT_MATCHES = 8
 _MAX_MATCHED_VALUE_CHARS = 160
+_MAX_RAG_PLAYBOOK_IDS = 2
+_MAX_RAG_ATTACK_TECHNIQUES = 3
+_MAX_FP_CASE_ID_CHARS = 128
+_MAX_TECHNIQUE_ID_CHARS = 32
+_MAX_TECHNIQUE_NAME_CHARS = 128
+_MAX_PLAYBOOK_ID_CHARS = 32
 
 
 def _strip_forbidden(value: Any) -> Any:
@@ -253,6 +260,58 @@ def _bound_org_context_matches(raw: Any) -> list[dict[str, str]]:
             continue
         out.append({"kind": kind, "matched_value": value})
     return out
+
+
+def _bound_rag_citations(rag: Any) -> dict[str, Any] | None:
+    """API-facing RAG hits: ids only, no quoted text / citations / query plans.
+
+    Presence of a ``rag_output`` object (including empty defaults) means retrieval
+    ran. Missing ``rag_output`` must not emit this key so the UI can say
+    「检索未完成」 instead of four empty 「未命中」 slots.
+    """
+    if not isinstance(rag, dict):
+        return None
+    bounded: dict[str, Any] = {"retrieved": True, "degraded": bool(rag.get("degraded"))}
+
+    fp_raw = rag.get("fp_similarity")
+    if isinstance(fp_raw, dict):
+        case_id = str(fp_raw.get("matched_case_id") or "").strip()[:_MAX_FP_CASE_ID_CHARS]
+        if case_id and case_id.lower() not in {"none", "null"}:
+            bounded["fp_case_id"] = case_id
+
+    playbook_ids: list[str] = []
+    refs = rag.get("playbook_refs")
+    if isinstance(refs, list):
+        for item in refs:
+            if not isinstance(item, dict):
+                continue
+            playbook_id = str(item.get("playbook_id") or "").strip()[:_MAX_PLAYBOOK_ID_CHARS]
+            if playbook_id and playbook_id not in playbook_ids:
+                playbook_ids.append(playbook_id)
+            if len(playbook_ids) >= _MAX_RAG_PLAYBOOK_IDS:
+                break
+    if playbook_ids:
+        bounded["playbook_ids"] = playbook_ids
+
+    techniques: list[dict[str, str]] = []
+    raw_tech = rag.get("attack_techniques")
+    if isinstance(raw_tech, list):
+        for item in raw_tech:
+            if not isinstance(item, dict):
+                continue
+            technique_id = str(item.get("technique_id") or "").strip()[:_MAX_TECHNIQUE_ID_CHARS]
+            if not technique_id:
+                continue
+            name = str(item.get("technique_name") or "").strip()[:_MAX_TECHNIQUE_NAME_CHARS]
+            entry: dict[str, str] = {"technique_id": technique_id}
+            if name:
+                entry["technique_name"] = name
+            techniques.append(entry)
+            if len(techniques) >= _MAX_RAG_ATTACK_TECHNIQUES:
+                break
+    if techniques:
+        bounded["attack_techniques"] = techniques
+    return bounded
 
 
 def _bound_fp_adjudication(raw: Any) -> dict[str, str] | None:
@@ -451,6 +510,10 @@ def project_snapshot_for_api(snapshot: dict[str, Any] | None) -> dict[str, Any] 
     fp = _bound_fp_adjudication(snapshot.get("fp_adjudication"))
     if fp is not None:
         projected["fp_adjudication"] = fp
+
+    rag_citations = _bound_rag_citations(snapshot.get("rag_output"))
+    if rag_citations is not None:
+        projected["rag_citations"] = rag_citations
 
     return _hard_project_api_snapshot(projected)
 
