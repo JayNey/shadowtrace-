@@ -115,6 +115,10 @@ export function useEventDetail(eventId: string | undefined) {
   const [report, setReport] = useState<InvestigationReport | null>(null);
   const [loading, setLoading] = useState(true);
   const mountedRef = useRef(true);
+  const eventIdentityRef = useRef<string | undefined>(eventId);
+  const resourceGenerationRef = useRef<Record<string, number>>({});
+  const fullLoadTokenRef = useRef(0);
+  const socketRefreshTimerRef = useRef<number | undefined>(undefined);
   const eventRef = useRef<EventDetailResponse | null>(null);
   const actionsRef = useRef<Action[]>([]);
 
@@ -124,12 +128,33 @@ export function useEventDetail(eventId: string | undefined) {
   const refresh = useCallback(
     async (resource: DetailResource = "all"): Promise<DetailRefreshResult> => {
       if (!eventId) {
-        setLoading(false);
+        if (mountedRef.current) setLoading(false);
         return { actionsOk: false, eventOk: false };
       }
       const isAll = resource === "all";
-      if (isAll) setLoading(true);
+      const resources = isAll
+        ? ["event", "traces", "actions", "executionJobs", "dispositions", "writebacks", "connectors"]
+        : resource === "writebacks"
+          ? ["event", "dispositions", "writebacks"]
+          : resource === "actions" || resource === "executionJobs"
+            ? ["actions", "executionJobs"]
+            : resource === "dispositions"
+              ? ["dispositions", "writebacks"]
+              : [resource];
+      const generations = new Map<string, number>();
+      for (const item of resources) {
+        const next = (resourceGenerationRef.current[item] ?? 0) + 1;
+        resourceGenerationRef.current[item] = next;
+        generations.set(item, next);
+      }
+      const fullLoadToken = isAll ? ++fullLoadTokenRef.current : 0;
+      if (isAll && mountedRef.current) setLoading(true);
+      const isResourceCurrent = (item: string) =>
+        mountedRef.current &&
+        eventIdentityRef.current === eventId &&
+        resourceGenerationRef.current[item] === generations.get(item);
 
+      try {
       const eventPromise =
         isAll || resource === "event" || resource === "writebacks"
           ? getEvent(eventId)
@@ -153,61 +178,79 @@ export function useEventDetail(eventId: string | undefined) {
           dispositionsPromise,
           connectorsPromise,
         ]);
-      if (!mountedRef.current) return { actionsOk: false, eventOk: false };
-
       let actionsOk = false;
       let eventOk = false;
       let nextEvent = eventRef.current;
-      if (eventResult.status === "fulfilled" && eventResult.value) {
+      if (
+        eventResult.status === "fulfilled" &&
+        eventResult.value &&
+        isResourceCurrent("event")
+      ) {
         nextEvent = eventResult.value.data;
         eventRef.current = nextEvent;
         setEvent(nextEvent);
         eventOk = true;
       }
-      if (tracesResult.status === "fulfilled" && tracesResult.value) {
+      if (
+        tracesResult.status === "fulfilled" &&
+        tracesResult.value &&
+        isResourceCurrent("traces")
+      ) {
         setTraces(tracesResult.value.data.items);
       }
 
       let nextActions = actionsRef.current;
-      if (actionsResult.status === "fulfilled" && actionsResult.value) {
+      if (
+        actionsResult.status === "fulfilled" &&
+        actionsResult.value &&
+        isResourceCurrent("actions")
+      ) {
         nextActions = actionsResult.value.data.items;
         actionsRef.current = nextActions;
         setActions(nextActions);
         actionsOk = true;
       }
-      if (dispositionsResult.status === "fulfilled" && dispositionsResult.value) {
+      if (
+        dispositionsResult.status === "fulfilled" &&
+        dispositionsResult.value &&
+        isResourceCurrent("dispositions")
+      ) {
         setDispositions(dispositionsResult.value.data.items);
       }
-      if (connectorsResult.status === "fulfilled" && connectorsResult.value) {
+      if (
+        connectorsResult.status === "fulfilled" &&
+        connectorsResult.value &&
+        isResourceCurrent("connectors")
+      ) {
         setConnectors(connectorsResult.value.data.items);
       }
 
       if ((isAll || resource === "event") && shouldFetchEventEvidence(nextEvent)) {
         try {
           const evidenceResult = await getEventEvidence(eventId);
-          if (mountedRef.current) {
+          if (isResourceCurrent("event")) {
             setEvidenceDetail(evidenceResult.data);
           }
         } catch {
-          if (mountedRef.current) {
+          if (isResourceCurrent("event")) {
             setEvidenceDetail(null);
           }
         }
       } else if (isAll || resource === "event") {
-        setEvidenceDetail(null);
+        if (isResourceCurrent("event")) setEvidenceDetail(null);
       }
 
       if (isAll || resource === "event") {
         try {
           const reportResult = await getReport(eventId);
-          if (mountedRef.current) {
+          if (isResourceCurrent("event")) {
             setReport(
               coerceInvestigationReport(reportResult.data.report) ??
                 coerceInvestigationReport(reportResult.data),
             );
           }
         } catch {
-          if (mountedRef.current) {
+          if (isResourceCurrent("event")) {
             setReport(null);
           }
         }
@@ -216,7 +259,7 @@ export function useEventDetail(eventId: string | undefined) {
       if (isAll && nextEvent?.event.current_primary_source_record_id) {
         void getSourceRecord(nextEvent.event.current_primary_source_record_id)
           .then((response) => {
-            if (mountedRef.current) setSourceRecord(response.data);
+            if (isResourceCurrent("event")) setSourceRecord(response.data);
           })
           .catch(() => undefined);
       }
@@ -231,7 +274,7 @@ export function useEventDetail(eventId: string | undefined) {
         const fetched = await Promise.allSettled(
           [...jobIds].map((jobId) => getExecutionJob(jobId)),
         );
-        if (mountedRef.current) {
+        if (isResourceCurrent("executionJobs")) {
           const apiJobs = fetched.flatMap((result) =>
             result.status === "fulfilled" ? [result.value.data] : [],
           );
@@ -251,7 +294,7 @@ export function useEventDetail(eventId: string | undefined) {
         const fetched = await Promise.allSettled(
           [...writebackIds].map((writebackId) => getWriteback(writebackId)),
         );
-        if (mountedRef.current) {
+        if (isResourceCurrent("writebacks")) {
           const apiWritebacks = fetched.flatMap((result) =>
             result.status === "fulfilled" ? [result.value.data] : [],
           );
@@ -259,17 +302,26 @@ export function useEventDetail(eventId: string | undefined) {
         }
       }
 
-      if (isAll && mountedRef.current) setLoading(false);
       return { actionsOk, eventOk };
+      } finally {
+        if (isAll && mountedRef.current && fullLoadToken === fullLoadTokenRef.current) {
+          setLoading(false);
+        }
+      }
     },
     [eventId],
   );
 
   useEffect(() => {
+    eventIdentityRef.current = eventId;
     mountedRef.current = true;
     void refresh("all");
     return () => {
       mountedRef.current = false;
+      eventIdentityRef.current = undefined;
+      for (const key of Object.keys(resourceGenerationRef.current)) {
+        resourceGenerationRef.current[key] += 1;
+      }
     };
   }, [refresh]);
 
@@ -277,6 +329,29 @@ export function useEventDetail(eventId: string | undefined) {
     if (!eventId) return;
     socketClient.connect();
     socketClient.subscribe(eventId);
+    const queuedResources = new Set<DetailResource>();
+    const queueRefresh = (resource: DetailResource) => {
+      queuedResources.add(resource);
+      if (socketRefreshTimerRef.current != null) return;
+      socketRefreshTimerRef.current = window.setTimeout(() => {
+        socketRefreshTimerRef.current = undefined;
+        if (queuedResources.has("all")) {
+          queuedResources.clear();
+          void refresh("all");
+          return;
+        }
+        if (queuedResources.has("writebacks")) {
+          queuedResources.delete("event");
+          queuedResources.delete("dispositions");
+        }
+        if (queuedResources.has("actions")) {
+          queuedResources.delete("executionJobs");
+        }
+        const pending = [...queuedResources];
+        queuedResources.clear();
+        void Promise.all(pending.map((item) => refresh(item)));
+      }, 50);
+    };
     const unsubscribe = socketClient.onEvent((socketEvent) => {
       if (socketEvent.event_id !== eventId) return;
       if (
@@ -287,30 +362,34 @@ export function useEventDetail(eventId: string | undefined) {
         socketEvent.type === "report_generated" ||
         socketEvent.type === "classification_updated"
       ) {
-        void refresh("event");
+        queueRefresh("event");
       } else if (
         socketEvent.type === "action_executed" ||
         socketEvent.type === "action_verified" ||
         socketEvent.type === "approval_required" ||
         socketEvent.type === "approval_updated"
       ) {
-        void refresh("actions");
+        queueRefresh("actions");
         if (
           socketEvent.type === "approval_required" ||
           socketEvent.type === "approval_updated"
         ) {
-          void refresh("event");
+          queueRefresh("event");
         }
       } else if (socketEvent.type === "disposition_submitted") {
-        void refresh("dispositions");
+        queueRefresh("dispositions");
       } else if (socketEvent.type === "writeback_updated") {
-        void refresh("writebacks");
-        void refresh("event");
+        queueRefresh("writebacks");
       }
     });
     return () => {
       unsubscribe();
       socketClient.forgetEvent(eventId);
+      if (socketRefreshTimerRef.current != null) {
+        window.clearTimeout(socketRefreshTimerRef.current);
+        socketRefreshTimerRef.current = undefined;
+      }
+      queuedResources.clear();
     };
   }, [eventId, refresh]);
 

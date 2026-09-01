@@ -22,6 +22,7 @@ from sqlalchemy.pool import NullPool
 from app.api.v1.schemas import EventSummary
 from app.core.redis_client import RedisClient
 from app.db import models as orm
+from app.models.context import EventContext
 from app.models.enums import (
     DispositionIntentKind,
     DispositionPolicy,
@@ -34,6 +35,7 @@ from app.models.enums import (
 )
 from app.services.context_service import (
     CLOSED_TTL_SECONDS,
+    DEGRADED_CACHE_MAX_ENTRIES,
     EventContextStore,
     InitResult,
     SetResult,
@@ -340,7 +342,12 @@ async def test_refresh_closed_snapshot_from_journal_without_redis(
     await store.init_context(event_id, _summary(event_id, status=EventStatus.CLOSED))
     await store.set(event_id, "memory_output", {"cases": 2})
 
-    with patch.object(store._redis, "ping", new_callable=AsyncMock, return_value=False):
+    with patch.object(
+        store._redis.get_client(),
+        "hset",
+        new_callable=AsyncMock,
+        side_effect=ConnectionError("redis unavailable"),
+    ):
         with patch("app.services.context_service.asyncio.sleep", new_callable=AsyncMock):
             ctx = await store.refresh_closed_snapshot(event_id)
 
@@ -524,7 +531,12 @@ async def test_analysis_only_complete_redis_failure_keeps_durable_truth(
         result = await store.set(event_id, "analysis_only_complete", True)
 
     assert result.redis_ok is False
-    with patch.object(store._redis, "ping", new_callable=AsyncMock, return_value=False):
+    with patch.object(
+        store._redis.get_client(),
+        "hset",
+        new_callable=AsyncMock,
+        side_effect=ConnectionError("redis unavailable"),
+    ):
         rebuilt = await store.rebuild_context(event_id)
     assert rebuilt.analysis_only_complete is True
 
@@ -920,7 +932,12 @@ async def test_set_and_init_when_redis_down_persist_journal(
 ) -> None:
     event_id = await _seed_event(session_factory)
 
-    with patch.object(store._redis, "ping", new_callable=AsyncMock, return_value=False):
+    with patch.object(
+        store._redis.get_client(),
+        "hset",
+        new_callable=AsyncMock,
+        side_effect=ConnectionError("redis unavailable"),
+    ):
         with patch("app.services.context_service.asyncio.sleep", new_callable=AsyncMock):
             init = await store.init_context(event_id, _summary(event_id))
             assert init.redis_ok is False
@@ -951,7 +968,12 @@ async def test_degraded_memory_cache_refreshes_after_30s(
     await store.init_context(event_id, _summary(event_id))
     await store.set(event_id, "graph_output", {"nodes": 1})
 
-    with patch.object(store._redis, "ping", new_callable=AsyncMock, return_value=False):
+    with patch.object(
+        store._redis.get_client(),
+        "hget",
+        new_callable=AsyncMock,
+        side_effect=ConnectionError("redis unavailable"),
+    ):
         with patch("app.services.context_service.asyncio.sleep", new_callable=AsyncMock):
             first = await store.get(event_id, "graph_output")
             assert first == {"nodes": 1}
@@ -1003,7 +1025,12 @@ async def test_redis_recovery_rebuilds_when_database_version_is_newer(
         writer="EventService",
     )
 
-    with patch.object(store._redis, "ping", new_callable=AsyncMock, return_value=False):
+    with patch.object(
+        store._redis.get_client(),
+        "hset",
+        new_callable=AsyncMock,
+        side_effect=ConnectionError("redis unavailable"),
+    ):
         with patch("app.services.context_service.asyncio.sleep", new_callable=AsyncMock):
             await service.set_flag(
                 event_id,
@@ -1056,7 +1083,12 @@ async def test_on_redis_recovery_clears_sticky_redis_context_unavailable(
 
     # Simulate Redis failure — force a degraded write so the Redis version
     # lags behind PostgreSQL, which will trigger rebuild_context on next read.
-    with patch.object(store._redis, "ping", new_callable=AsyncMock, return_value=False):
+    with patch.object(
+        store._redis.get_client(),
+        "hset",
+        new_callable=AsyncMock,
+        side_effect=ConnectionError("redis unavailable"),
+    ):
         with patch("app.services.context_service.asyncio.sleep", new_callable=AsyncMock):
             await degraded.set_flag(
                 event_id,
@@ -1120,7 +1152,12 @@ async def test_flag_still_set_on_write_failure_no_regression(
     assert await degraded.has_flag(event_id, "redis_context_unavailable") is False
 
     # Simulate Redis down — write should still persist to PostgreSQL.
-    with patch.object(store._redis, "ping", new_callable=AsyncMock, return_value=False):
+    with patch.object(
+        store._redis.get_client(),
+        "hset",
+        new_callable=AsyncMock,
+        side_effect=ConnectionError("redis unavailable"),
+    ):
         with patch("app.services.context_service.asyncio.sleep", new_callable=AsyncMock):
             result = await degraded.set_flag(
                 event_id,
@@ -1179,3 +1216,15 @@ async def test_degraded_flag_service_logs_on_true_to_false_transition(
             writer="EventContextStore",
         )
     mock_info2.assert_not_called()
+
+
+def test_degraded_cache_deterministically_evicts_oldest_entry() -> None:
+    store = EventContextStore(AsyncMock(), AsyncMock())  # type: ignore[arg-type]
+    context = EventContext()
+    for index in range(DEGRADED_CACHE_MAX_ENTRIES + 1):
+        store._cache_degraded(f"evt-{index}", context)
+
+    assert len(store._degraded_cache) == DEGRADED_CACHE_MAX_ENTRIES
+    assert len(store._degraded_cache_ts) == DEGRADED_CACHE_MAX_ENTRIES
+    assert "evt-0" not in store._degraded_cache
+    assert f"evt-{DEGRADED_CACHE_MAX_ENTRIES}" in store._degraded_cache

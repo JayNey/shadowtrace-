@@ -29,10 +29,8 @@ from app.core.errors import (
     AdapterNotFoundError,
     DependencyUnavailableError,
     EventNotFoundError,
-    GuardrailViolationError,
     ValidationError,
     WritebackConflictError,
-    WritebackUnsupportedError,
 )
 from app.core.event_bus import EventBus
 from app.core.guardrails import OutboundDispositionGuard
@@ -140,6 +138,28 @@ class _PausedLookupOutcome:
     detail: str | None = None
 
 
+@dataclass(frozen=True)
+class _DeliveryClaim:
+    """Immutable delivery snapshot used while no database transaction is open."""
+
+    outbox_id: str
+    event_id: str
+    action_id: str
+    disposition_id: str
+    writeback_id: str
+    idempotency_key: str
+    command: DispositionCommand
+    adapter: BaseDispositionAdapter
+    adapter_label: str
+    worker_id: str
+    fence_token: str
+    approval_status: str
+    approval_updated_at: datetime
+    attempt: int
+    locked_at: datetime
+    lease_expires_at: datetime
+
+
 class _OperatorRetryAction(StrEnum):
     RE_ENQUEUE = "re_enqueue"
     RECONCILE_TERMINAL = "reconcile_terminal"
@@ -224,7 +244,7 @@ class DispositionSyncService:
         event_bus: EventBus | None = None,
         resume_investigation: ResumeInvestigationHook | None = None,
         manual_resolution: Any | None = None,
-        worker_id: str = "outbox-worker-1",
+        worker_id: str | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._context_store = context_store
@@ -234,7 +254,9 @@ class DispositionSyncService:
         self._bus = event_bus
         self._resume = resume_investigation or _NullResumeHook()
         self._manual_resolution = manual_resolution
-        self._worker_id = worker_id
+        # A process-local identity is the owner namespace; every claim below
+        # receives a fresh fence token so an expired lease can never be reused.
+        self._worker_id = worker_id or f"outbox-worker-{secrets.token_hex(8)}"
 
     def _adapter_label(self, outbox: orm.DispositionOutbox) -> str:
         try:
@@ -1160,198 +1182,204 @@ class DispositionSyncService:
         Exists so that EventDispositionService can trigger same-turn
         delivery without reaching into the private ``_deliver_outbox``.
 
-        ISSUE-355: do not wrap this path in ``run_with_db_retry``.  Adapter
-        ``submit`` runs inside the delivery transaction; retrying the whole
-        method can double-submit after a post-submit deadlock.
+        ISSUE-355: do not wrap this path in ``run_with_db_retry``. Provider
+        I/O runs after the claim transaction commits, and retrying the whole
+        method can still double-submit after an indeterminate provider result.
         """
         await self._deliver_outbox(outbox_id)
 
     async def _deliver_outbox(self, outbox_id: str) -> None:
-        command: DispositionCommand
-        receipt: DispositionReceipt
-        event_id: str
+        """Claim, perform provider I/O, then fence the final database update."""
+        claim = await self._claim_outbox(outbox_id)
+        if claim is None:
+            return
+        if not await self._approval_snapshot_matches(claim):
+            await self._mark_delivery_dead_letter(
+                claim.outbox_id,
+                claim=claim,
+                error_code="approval_revoked_before_submit",
+                error_detail="approval changed after claim and before provider submit",
+            )
+            return
+
+        try:
+            with disposition_span(
+                "disposition.submit",
+                event_id=claim.event_id,
+                action_id=claim.action_id,
+                disposition_id=claim.disposition_id,
+                writeback_id=claim.writeback_id,
+            ):
+                accepted = await claim.adapter.submit(claim.command)
+        except Exception as exc:
+            await self._finalize_claim_exception(claim, exc)
+            return
+
+        receipts = [accepted]
+        readback_error: Exception | None = None
+        if (
+            claim.command.intent_kind is DispositionIntentKind.EVENT_STATUS_UPDATE
+            and claim.adapter.capabilities().supports_readback_confirmation
+        ):
+            try:
+                with disposition_span(
+                    "disposition.readback",
+                    event_id=claim.event_id,
+                    action_id=claim.action_id,
+                    disposition_id=claim.disposition_id,
+                    writeback_id=claim.writeback_id,
+                ):
+                    confirmed = await claim.adapter.confirm_readback(claim.command)
+                if confirmed is not None:
+                    receipts.append(confirmed)
+            except Exception as exc:
+                readback_error = exc
+
         reconcile_entity_effect = False
         receipt_job_projection: ActionExecutionJob | None = None
         async with self._session_factory() as session:
             async with session.begin():
-                outbox_event_id = await session.scalar(
+                outbox = await session.scalar(
+                    select(orm.DispositionOutbox)
+                    .where(orm.DispositionOutbox.outbox_id == claim.outbox_id)
+                    .with_for_update()
+                )
+                if outbox is None or not self._claim_fence_matches(outbox, claim):
+                    logger.info("stale outbox delivery result discarded outbox=%s", claim.outbox_id)
+                    return
+                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
+                approval_changed = (
+                    action is None
+                    or action.status != claim.approval_status
+                    or action.updated_at != claim.approval_updated_at
+                    or not _action_still_approved_for_delivery(action)
+                )
+                parsed_receipt: DispositionReceipt | None = None
+                for provider_receipt in receipts:
+                    parsed_receipt = await self._append_receipt(
+                        session, outbox, receipt=provider_receipt
+                    )
+                assert parsed_receipt is not None
+                if approval_changed:
+                    parsed_receipt = await self._append_receipt(
+                        session,
+                        outbox,
+                        status=WritebackStatus.UNKNOWN,
+                        provider_message="approval changed while provider submission was in flight",
+                    )
+                outbox.latest_writeback_status = parsed_receipt.status.value
+                now = datetime.now(UTC)
+                if parsed_receipt.status is WritebackStatus.UNKNOWN:
+                    self._pause_outbox_after_unknown_submission(
+                        outbox,
+                        now=now,
+                        error_code="submission_unknown",
+                        error_detail=(
+                            "provider submission result unknown; lookup required before retry"
+                        ),
+                    )
+                else:
+                    outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
+                    outbox.delivered_at = now
+                    record_writeback(
+                        status=parsed_receipt.status.value, adapter=claim.adapter_label
+                    )
+                if action is not None:
+                    _mirror_writeback_status_to_action(action, parsed_receipt.status.value)
+                    receipt_job_projection = await self._apply_receipt_execution_projection(
+                        session,
+                        action,
+                        outbox,
+                        claim.command,
+                        parsed_receipt,
+                        adapter_label=claim.adapter_label,
+                    )
+                    reconcile_entity_effect = (
+                        claim.command.intent_kind is DispositionIntentKind.ENTITY_ACTION_SUBMIT
+                        and parsed_receipt.status is WritebackStatus.ACCEPTED
+                    )
+
+        if readback_error is not None and self._bus is not None:
+            await self._bus.publish_event(
+                claim.event_id,
+                "writeback_readback_failed",
+                {
+                    "disposition_id": claim.disposition_id,
+                    "writeback_id": claim.writeback_id,
+                    "receipt_status": receipts[0].status.value,
+                    "error_summary": f"{type(readback_error).__name__}: {readback_error}",
+                    "severity": "warn",
+                },
+            )
+        final_receipt = parsed_receipt
+        if (
+            receipt_job_projection is not None
+            and final_receipt.simulated
+            and not reconcile_entity_effect
+        ):
+            await self._publish_mock_job_projection(receipt_job_projection)
+        if reconcile_entity_effect:
+            await self._reconcile_entity_effect_for_outbox(claim.outbox_id)
+        await self._sync_writeback_summary(claim.event_id)
+        await self._maybe_resume(claim.event_id)
+        if self._bus is not None:
+            await self._bus.publish_event(
+                claim.event_id,
+                "disposition_submitted",
+                {
+                    "disposition_id": claim.disposition_id,
+                    "intent_kind": claim.command.intent_kind.value,
+                },
+            )
+            await self._bus.publish_event(
+                claim.event_id,
+                "writeback_updated",
+                {"writeback_id": claim.writeback_id, "status": final_receipt.status.value},
+            )
+
+    async def _claim_outbox(self, outbox_id: str) -> _DeliveryClaim | None:
+        """Claim one eligible row; no provider I/O occurs in this transaction."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                # Enqueue locks SecurityEvent before Outbox. Read the event id
+                # without a lock, acquire the same first lock, then lock and
+                # completely revalidate the outbox row to avoid lock inversion.
+                event_id = await session.scalar(
                     select(orm.DispositionOutbox.event_id).where(
                         orm.DispositionOutbox.outbox_id == outbox_id
                     )
                 )
-                if outbox_event_id is not None:
-                    await session.get(
-                        orm.SecurityEvent,
-                        outbox_event_id,
-                        with_for_update=True,
-                    )
+                if event_id is None:
+                    return None
+                event = await session.get(
+                    orm.SecurityEvent,
+                    event_id,
+                    with_for_update=True,
+                )
+                if event is None:
+                    return None
                 outbox = await session.scalar(
                     select(orm.DispositionOutbox)
                     .where(orm.DispositionOutbox.outbox_id == outbox_id)
                     .with_for_update()
                 )
-                if outbox is None:
-                    return
-                # ISSUE-273: superseded heads are non-deliverable from commit time.
+                if outbox is None or outbox.event_id != event_id:
+                    return None
                 if outbox.superseded_by_disposition_id is not None:
-                    self._block_superseded_outbox(
-                        outbox,
-                        now=datetime.now(UTC),
-                    )
-                    return
-                delivery_status = OutboxDeliveryStatus(outbox.delivery_status)
-                if delivery_status is OutboxDeliveryStatus.PAUSED:
-                    logger.info(
-                        "outbox delivery skipped: paused pending lookup outbox=%s",
-                        outbox_id,
-                    )
-                    return
-                if delivery_status not in {
-                    OutboxDeliveryStatus.READY,
-                    OutboxDeliveryStatus.LEASED,
-                    OutboxDeliveryStatus.WAITING_RETRY,
-                }:
-                    return
+                    self._block_superseded_outbox(outbox, now=datetime.now(UTC))
+                    return None
                 now = datetime.now(UTC)
-                if delivery_status is OutboxDeliveryStatus.LEASED:
-                    if outbox.locked_by != self._worker_id:
-                        logger.warning(
-                            "outbox delivery blocked: lease owner mismatch outbox=%s "
-                            "locked_by=%s worker=%s",
-                            outbox_id,
-                            outbox.locked_by,
-                            self._worker_id,
-                        )
-                        return
+                status = OutboxDeliveryStatus(outbox.delivery_status)
+                if status is OutboxDeliveryStatus.WAITING_RETRY and (
+                    outbox.next_retry_at is None or outbox.next_retry_at > now
+                ):
+                    return None
+                if status is OutboxDeliveryStatus.LEASED:
                     if outbox.lease_expires_at is None or outbox.lease_expires_at <= now:
                         self._release_leased_outbox_after_lease_expiry(outbox, now=now)
-                        return
-                # ISSUE-235: lock the action row for the delivery-time approval
-                # re-check so a concurrent revoke cannot slip in between the
-                # check and the adapter submit (TOCTOU 纵深防御).
-                execution_job_id = await session.scalar(
-                    select(orm.Action.execution_job_id).where(
-                        orm.Action.action_id == outbox.action_id
-                    )
-                )
-                if execution_job_id:
-                    await session.get(
-                        orm.ActionExecutionJob,
-                        execution_job_id,
-                        with_for_update=True,
-                    )
-                action_row = await session.get(
-                    orm.Action,
-                    outbox.action_id,
-                    with_for_update=True,
-                )
-                if action_row is None:
-                    logger.warning(
-                        "outbox delivery blocked: action row missing outbox=%s action_id=%s",
-                        outbox_id,
-                        outbox.action_id,
-                    )
-                    self._block_outbox_for_writeback_fence(
-                        outbox,
-                        now=datetime.now(UTC),
-                        error_detail=(
-                            f"action row not found for writeback fence: {outbox.action_id}"
-                        ),
-                    )
-                    return
-                raw_execution_owner = action_row.execution_owner
-                if raw_execution_owner is None:
-                    logger.warning(
-                        "outbox delivery blocked: missing execution_owner outbox=%s action_id=%s",
-                        outbox_id,
-                        outbox.action_id,
-                    )
-                    self._block_outbox_for_writeback_fence(
-                        outbox,
-                        now=datetime.now(UTC),
-                        error_detail=(
-                            "action missing execution_owner for writeback fence: "
-                            f"{outbox.action_id}"
-                        ),
-                    )
-                    return
-                execution_owner = ExecutionOwner(raw_execution_owner)
-                try:
-                    assert_writeback_side_effects_allowed(
-                        action_id=outbox.action_id,
-                        execution_owner=execution_owner,
-                    )
-                except ValidationError as exc:
-                    self._block_outbox_for_writeback_fence(
-                        outbox,
-                        now=datetime.now(UTC),
-                        error_detail=str(exc),
-                    )
-                    return
-                command = DispositionCommand.model_validate(outbox.command_payload)
-                if not await self._assert_active_head_for_delivery(session, outbox, command):
-                    self._block_superseded_outbox(
-                        outbox,
-                        now=datetime.now(UTC),
-                    )
-                    return
-                current_delivery = OutboxDeliveryStatus(outbox.delivery_status)
-                if (
-                    current_delivery is OutboxDeliveryStatus.LEASED
-                    and outbox.locked_by is not None
-                    and outbox.locked_by != self._worker_id
-                ):
-                    logger.warning(
-                        "outbox delivery skipped: lease owned by another worker "
-                        "outbox=%s locked_by=%s worker=%s",
-                        outbox_id,
-                        outbox.locked_by,
-                        self._worker_id,
-                    )
-                    return
-                # ISSUE-235 / ISSUE-290 / ISSUE-307 (SUS-301): TOCTOU 纵深防御 —
-                # deliver relies on the enqueue-time approved_action_ids snapshot
-                # and does not re-derive it; an approval revoked between enqueue
-                # and delivery would still go out.  Re-check side-effect intents
-                # (entity-class, EXECUTION_RESULT_RECORD, COMPENSATION_RECORD,
-                # terminal EVENT_STATUS_UPDATE) right before delivery: the bound
-                # action must still be in the effective approved set
-                # (APPROVED/EXECUTING/SUCCESS, not superseded).
-                # Fail-closed → DEAD_LETTER, never delivered.
-                if command.intent_kind in _DELIVERY_APPROVAL_RECHECK_INTENTS:
-                    if not _action_still_approved_for_delivery(action_row):
-                        logger.warning(
-                            "outbox delivery blocked: approval revoked before delivery "
-                            "outbox=%s action_id=%s status=%s superseded_by=%s",
-                            outbox_id,
-                            outbox.action_id,
-                            action_row.status,
-                            action_row.superseded_by_revision,
-                        )
-                        self._block_outbox_for_writeback_fence(
-                            outbox,
-                            now=datetime.now(UTC),
-                            error_detail=(
-                                "approval revoked before delivery: "
-                                f"action status={action_row.status}"
-                            ),
-                        )
-                        return
-                # ISSUE-224: enqueue validated against resolve_approved_action_ids;
-                # delivery-time guard re-validates source_locator, message_code,
-                # and analysis content but does not re-derive the approved list.
-                # ISSUE-235/290 adds a separate action-row status/supersede
-                # re-check for side-effect intents above.
-                await self._guard.validate(
-                    command,
-                    {
-                        "event_id": outbox.event_id,
-                        "source_locator": command.source_locator,
-                    },
-                )
-                adapter = self._resolve_adapter(outbox)
-                adapter.validate_command(command)
-                adapter_label = adapter.name
+                    return None
+                if status not in {OutboxDeliveryStatus.READY, OutboxDeliveryStatus.WAITING_RETRY}:
+                    return None
                 existing_status = (
                     WritebackStatus(outbox.latest_writeback_status)
                     if outbox.latest_writeback_status
@@ -1367,9 +1395,9 @@ class DispositionSyncService:
                     logger.info(
                         "outbox delivery skipped: writeback already %s outbox=%s",
                         existing_status.value if existing_status else None,
-                        outbox_id,
+                        outbox.outbox_id,
                     )
-                    return
+                    return None
                 existing_receipt_id = await session.scalar(
                     select(orm.DispositionReceipt.writeback_id)
                     .where(orm.DispositionReceipt.writeback_id == outbox.writeback_id)
@@ -1378,116 +1406,122 @@ class DispositionSyncService:
                 if existing_receipt_id is not None:
                     logger.info(
                         "outbox delivery skipped: receipt already stored outbox=%s",
-                        outbox_id,
+                        outbox.outbox_id,
                     )
-                    return
-                with disposition_span(
-                    "disposition.submit",
+                    return None
+                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
+                if action is None or action.execution_owner is None:
+                    self._block_outbox_for_writeback_fence(
+                        outbox,
+                        now=now,
+                        error_detail="action missing execution_owner for writeback fence",
+                    )
+                    return None
+                assert_writeback_side_effects_allowed(
+                    action_id=outbox.action_id,
+                    execution_owner=ExecutionOwner(action.execution_owner),
+                )
+                command = DispositionCommand.model_validate(outbox.command_payload)
+                if not await self._assert_active_head_for_delivery(session, outbox, command):
+                    self._block_superseded_outbox(outbox, now=now)
+                    return None
+                if (
+                    command.intent_kind in _DELIVERY_APPROVAL_RECHECK_INTENTS
+                    and not _action_still_approved_for_delivery(action)
+                ):
+                    self._block_outbox_for_writeback_fence(
+                        outbox,
+                        now=now,
+                        error_detail=(
+                            f"approval revoked before delivery: action status={action.status}"
+                        ),
+                    )
+                    return None
+                await self._guard.validate(
+                    command, {"event_id": outbox.event_id, "source_locator": command.source_locator}
+                )
+                adapter = self._resolve_adapter(outbox)
+                adapter.validate_command(command)
+                validate_outbox_delivery_transition(status, OutboxDeliveryStatus.LEASED)
+                outbox.attempt = int(outbox.attempt or 0) + 1
+                fence_token = f"{self._worker_id}:{secrets.token_hex(12)}"
+                locked_at = now
+                lease_expires_at = now + timedelta(seconds=_DEFAULT_LEASE_SECONDS)
+                outbox.delivery_status = OutboxDeliveryStatus.LEASED.value
+                outbox.locked_by = fence_token
+                outbox.locked_at = locked_at
+                outbox.lease_expires_at = lease_expires_at
+                observe_writeback_queue_age(
+                    max(0.0, (now - outbox.created_at).total_seconds())
+                )
+                return _DeliveryClaim(
+                    outbox_id=outbox.outbox_id,
                     event_id=outbox.event_id,
                     action_id=outbox.action_id,
                     disposition_id=outbox.disposition_id,
                     writeback_id=outbox.writeback_id,
-                ):
-                    receipt = await adapter.submit(command)
-                parsed_receipt = await self._append_receipt(session, outbox, receipt=receipt)
-                receipt = parsed_receipt
+                    idempotency_key=outbox.idempotency_key,
+                    command=command,
+                    adapter=adapter,
+                    adapter_label=adapter.name,
+                    worker_id=self._worker_id,
+                    fence_token=fence_token,
+                    approval_status=action.status,
+                    approval_updated_at=action.updated_at,
+                    attempt=int(outbox.attempt),
+                    locked_at=locked_at,
+                    lease_expires_at=lease_expires_at,
+                )
 
-                # B1 fix (ISSUE-064): For EVENT_STATUS_UPDATE intents,
-                # perform readback confirmation to produce the P0
-                # CONFIRMED+readback_verified receipt.  The submit
-                # above produces ACCEPTED; the readback converts it to
-                # CONFIRMED by verifying the provider-side state
-                # transition actually occurred (provider truth).
-                if (
-                    command.intent_kind == DispositionIntentKind.EVENT_STATUS_UPDATE
-                    and adapter.capabilities().supports_readback_confirmation
-                ):
-                    try:
-                        with disposition_span(
-                            "disposition.readback",
-                            event_id=outbox.event_id,
-                            action_id=outbox.action_id,
-                            disposition_id=outbox.disposition_id,
-                            writeback_id=outbox.writeback_id,
-                        ):
-                            confirmed = await adapter.confirm_readback(command)
-                        if confirmed is not None:
-                            receipt = await self._append_receipt(
-                                session,
-                                outbox,
-                                receipt=confirmed,
-                            )
-                    except Exception as exc:
-                        logger.warning(
-                            "readback confirmation failed for %s; receipt stays at %s",
-                            command.disposition_id,
-                            receipt.status.value,
-                        )
-                        if self._bus is not None:
-                            await self._bus.publish_event(
-                                outbox.event_id,
-                                "writeback_readback_failed",
-                                {
-                                    "disposition_id": command.disposition_id,
-                                    "writeback_id": outbox.writeback_id,
-                                    "receipt_status": receipt.status.value,
-                                    "error_summary": f"{type(exc).__name__}: {exc}",
-                                    "severity": "warn",
-                                },
-                            )
+    @staticmethod
+    def _claim_fence_matches(outbox: orm.DispositionOutbox, claim: _DeliveryClaim) -> bool:
+        return (
+            OutboxDeliveryStatus(outbox.delivery_status) is OutboxDeliveryStatus.LEASED
+            and outbox.locked_by == claim.fence_token
+            and int(outbox.attempt) == claim.attempt
+            and outbox.locked_at == claim.locked_at
+            and outbox.lease_expires_at == claim.lease_expires_at
+            and outbox.lease_expires_at > datetime.now(UTC)
+        )
 
-                outbox.latest_writeback_status = receipt.status.value
-                if receipt.status is WritebackStatus.UNKNOWN:
-                    self._pause_outbox_after_unknown_submission(
-                        outbox,
-                        now=datetime.now(UTC),
-                        error_code="submission_unknown",
-                        error_detail=(
-                            "provider submission result unknown; lookup required before retry"
-                        ),
-                    )
-                    event_id = outbox.event_id
-                    writeback_id = outbox.writeback_id
-                else:
-                    outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
-                    outbox.delivered_at = datetime.now(UTC)
-                    record_writeback(status=receipt.status.value, adapter=adapter_label)
-                    event_id = outbox.event_id
-                    writeback_id = outbox.writeback_id
-                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
-                if action is not None:
-                    _mirror_writeback_status_to_action(action, receipt.status.value)
-                    receipt_job_projection = await self._apply_receipt_execution_projection(
-                        session,
-                        action,
-                        outbox,
-                        command,
-                        receipt,
-                        adapter_label=adapter_label,
-                    )
-                    reconcile_entity_effect = (
-                        command.intent_kind is DispositionIntentKind.ENTITY_ACTION_SUBMIT
-                        and receipt.status is WritebackStatus.ACCEPTED
-                    )
-        if receipt_job_projection is not None and receipt.simulated and not reconcile_entity_effect:
-            await self._publish_mock_job_projection(receipt_job_projection)
-        if reconcile_entity_effect:
-            await self._reconcile_entity_effect_for_outbox(outbox_id)
-        await self._sync_writeback_summary(event_id)
-        await self._maybe_resume(event_id)
-        if self._bus is not None:
-            await self._bus.publish_event(
-                event_id,
-                "disposition_submitted",
-                {
-                    "disposition_id": command.disposition_id,
-                    "intent_kind": command.intent_kind.value,
-                },
+    async def _approval_snapshot_matches(self, claim: _DeliveryClaim) -> bool:
+        """Fail closed when approval changes between claim commit and submit."""
+        async with self._session_factory() as session:
+            action = await session.get(orm.Action, claim.action_id)
+            return (
+                action is not None
+                and action.status == claim.approval_status
+                and action.updated_at == claim.approval_updated_at
+                and _action_still_approved_for_delivery(action)
             )
-            await self._bus.publish_event(
-                event_id,
-                "writeback_updated",
-                {"writeback_id": writeback_id, "status": receipt.status.value},
+
+    async def _finalize_claim_exception(self, claim: _DeliveryClaim, exc: Exception) -> None:
+        kind, code = classify_disposition_delivery_error(exc)
+        detail = f"{type(exc).__name__}: {exc}"
+        if kind is DispositionDeliveryErrorKind.GUARDRAIL:
+            await self._mark_delivery_dead_letter(
+                claim.outbox_id, claim=claim, error_code="guardrail_blocked", error_detail=detail
+            )
+        elif kind is DispositionDeliveryErrorKind.CONFLICT:
+            await self._mark_delivery_conflict(
+                claim.outbox_id,
+                claim=claim,
+                error_code=code or "version_conflict",
+                error_detail=detail,
+            )
+        elif kind is DispositionDeliveryErrorKind.DETERMINISTIC_REJECTION:
+            await self._mark_delivery_deterministic_rejection(
+                claim.outbox_id,
+                claim=claim,
+                error_code=code or "adapter_validation_error",
+                error_detail=detail,
+            )
+        else:
+            await self._mark_delivery_paused_unknown(
+                claim.outbox_id,
+                claim=claim,
+                error_code="delivery_outcome_unknown",
+                error_detail=detail,
             )
 
     async def _append_receipt(
@@ -2515,8 +2549,7 @@ class DispositionSyncService:
             return self._release_leased_outbox_after_lease_expiry(outbox, now=now)
 
         settings = get_settings()
-        attempt = int(outbox.attempt) + 1
-        outbox.attempt = attempt
+        attempt = int(outbox.attempt)
         outbox.last_error_code = error_code
         if error_detail is not None:
             outbox.last_error_detail = self._truncate_error_detail(error_detail)
@@ -3080,6 +3113,7 @@ class DispositionSyncService:
         self,
         outbox_id: str,
         *,
+        claim: _DeliveryClaim | None = None,
         error_code: str,
         error_detail: str,
     ) -> None:
@@ -3096,7 +3130,9 @@ class DispositionSyncService:
                     .where(orm.DispositionOutbox.outbox_id == outbox_id)
                     .with_for_update()
                 )
-                if outbox is None:
+                if outbox is None or (
+                    claim is not None and not self._claim_fence_matches(outbox, claim)
+                ):
                     return
                 current = OutboxDeliveryStatus(outbox.delivery_status)
                 if current is not OutboxDeliveryStatus.LEASED:
@@ -3134,6 +3170,7 @@ class DispositionSyncService:
         self,
         outbox_id: str,
         *,
+        claim: _DeliveryClaim | None = None,
         error_code: str,
         error_detail: str,
     ) -> None:
@@ -3150,7 +3187,9 @@ class DispositionSyncService:
                     .where(orm.DispositionOutbox.outbox_id == outbox_id)
                     .with_for_update()
                 )
-                if outbox is None:
+                if outbox is None or (
+                    claim is not None and not self._claim_fence_matches(outbox, claim)
+                ):
                     return
                 current = OutboxDeliveryStatus(outbox.delivery_status)
                 if current is not OutboxDeliveryStatus.LEASED:
@@ -3215,6 +3254,7 @@ class DispositionSyncService:
         self,
         outbox_id: str,
         *,
+        claim: _DeliveryClaim | None = None,
         error_code: str,
         error_detail: str,
     ) -> None:
@@ -3231,7 +3271,9 @@ class DispositionSyncService:
                     .where(orm.DispositionOutbox.outbox_id == outbox_id)
                     .with_for_update()
                 )
-                if outbox is None:
+                if outbox is None or (
+                    claim is not None and not self._claim_fence_matches(outbox, claim)
+                ):
                     return
                 current = OutboxDeliveryStatus(outbox.delivery_status)
                 if current is not OutboxDeliveryStatus.LEASED:
@@ -3354,6 +3396,7 @@ class DispositionSyncService:
         self,
         outbox_id: str,
         *,
+        claim: _DeliveryClaim | None = None,
         error_code: str = "delivery_failed",
         error_detail: str | None = None,
     ) -> None:
@@ -3366,7 +3409,9 @@ class DispositionSyncService:
                     .where(orm.DispositionOutbox.outbox_id == outbox_id)
                     .with_for_update()
                 )
-                if outbox is None:
+                if outbox is None or (
+                    claim is not None and not self._claim_fence_matches(outbox, claim)
+                ):
                     return
                 self._release_leased_outbox_after_failure(
                     outbox,
@@ -3379,6 +3424,7 @@ class DispositionSyncService:
         self,
         outbox_id: str,
         *,
+        claim: _DeliveryClaim | None = None,
         error_code: str,
         error_detail: str | None = None,
     ) -> None:
@@ -3391,7 +3437,9 @@ class DispositionSyncService:
                     .where(orm.DispositionOutbox.outbox_id == outbox_id)
                     .with_for_update()
                 )
-                if outbox is None:
+                if outbox is None or (
+                    claim is not None and not self._claim_fence_matches(outbox, claim)
+                ):
                     return
                 self._release_leased_outbox_to_dead_letter(
                     outbox,
@@ -3411,163 +3459,75 @@ class OutboxWorker:
         for outbox_id in claimed:
             try:
                 await self._service._deliver_outbox(outbox_id)
-            except (
-                GuardrailViolationError,
-                WritebackConflictError,
-                ValidationError,
-                WritebackUnsupportedError,
-            ) as exc:
-                kind, code = classify_disposition_delivery_error(exc)
-                if kind is DispositionDeliveryErrorKind.GUARDRAIL:
-                    logger.warning("outbox delivery blocked by guard outbox=%s", outbox_id)
-                    await self._service._mark_delivery_dead_letter(
-                        outbox_id,
-                        error_code="guardrail_blocked",
-                        error_detail=str(exc),
-                    )
-                elif kind is DispositionDeliveryErrorKind.CONFLICT:
-                    logger.warning(
-                        "outbox delivery conflict outbox=%s error_code=%s",
-                        outbox_id,
-                        code,
-                    )
-                    await self._service._mark_delivery_conflict(
-                        outbox_id,
-                        error_code=code or "version_conflict",
-                        error_detail=str(exc),
-                    )
-                elif kind is DispositionDeliveryErrorKind.DETERMINISTIC_REJECTION:
-                    logger.warning(
-                        "outbox delivery deterministic rejection outbox=%s error_code=%s",
-                        outbox_id,
-                        code,
-                    )
-                    await self._service._mark_delivery_deterministic_rejection(
-                        outbox_id,
-                        error_code=code or "adapter_validation_error",
-                        error_detail=str(exc),
-                    )
-                else:
-                    logger.exception(
-                        "outbox delivery validation outcome ambiguous; pausing for lookup "
-                        "outbox=%s",
-                        outbox_id,
-                    )
-                    await self._service._mark_delivery_paused_unknown(
-                        outbox_id,
-                        error_code="delivery_outcome_unknown",
-                        error_detail=f"{type(exc).__name__}: {exc}",
-                    )
-            except Exception as exc:
+            except Exception:
+                # Provider exceptions are finalized by _deliver_outbox with its
+                # immutable claim. An uncaught exception may be a finalize
+                # commit failure, so an outbox-id-only update is never safe.
                 logger.exception(
-                    "outbox delivery outcome ambiguous; pausing for lookup outbox=%s",
+                    "outbox delivery orchestration failed; lease retained for lookup-first "
+                    "recovery outbox=%s",
                     outbox_id,
-                )
-                await self._service._mark_delivery_paused_unknown(
-                    outbox_id,
-                    error_code="delivery_outcome_unknown",
-                    error_detail=f"{type(exc).__name__}: {exc}",
                 )
         return len(claimed)
 
     async def _claim_batch(self, *, limit: int) -> list[str]:
         now = datetime.now(UTC)
-        claimed: list[str] = []
-        paused_updates: list[tuple[str, str]] = []
+        candidates: list[str] = []
         async with self._service._session_factory() as session:
-            async with session.begin():
-                rows = (
-                    await session.scalars(
-                        select(orm.DispositionOutbox)
-                        .where(
-                            orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
-                            or_(
-                                and_(
-                                    orm.DispositionOutbox.delivery_status
-                                    == OutboxDeliveryStatus.READY.value,
-                                    or_(
-                                        orm.DispositionOutbox.next_retry_at.is_(None),
-                                        orm.DispositionOutbox.next_retry_at <= now,
-                                    ),
-                                ),
-                                and_(
-                                    orm.DispositionOutbox.delivery_status
-                                    == OutboxDeliveryStatus.WAITING_RETRY.value,
-                                    orm.DispositionOutbox.next_retry_at.is_not(None),
+            rows = (
+                await session.scalars(
+                    select(orm.DispositionOutbox.outbox_id)
+                    .where(
+                        orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                        or_(
+                            and_(
+                                orm.DispositionOutbox.delivery_status
+                                == OutboxDeliveryStatus.READY.value,
+                                or_(
+                                    orm.DispositionOutbox.next_retry_at.is_(None),
                                     orm.DispositionOutbox.next_retry_at <= now,
                                 ),
-                                and_(
-                                    orm.DispositionOutbox.delivery_status
-                                    == OutboxDeliveryStatus.WAITING_RETRY.value,
-                                    orm.DispositionOutbox.next_retry_at.is_(None),
-                                ),
-                                and_(
-                                    orm.DispositionOutbox.delivery_status
-                                    == OutboxDeliveryStatus.LEASED.value,
-                                    or_(
-                                        orm.DispositionOutbox.lease_expires_at.is_(None),
-                                        orm.DispositionOutbox.lease_expires_at <= now,
-                                    ),
+                            ),
+                            and_(
+                                orm.DispositionOutbox.delivery_status
+                                == OutboxDeliveryStatus.WAITING_RETRY.value,
+                                orm.DispositionOutbox.next_retry_at.is_not(None),
+                                orm.DispositionOutbox.next_retry_at <= now,
+                            ),
+                            and_(
+                                orm.DispositionOutbox.delivery_status
+                                == OutboxDeliveryStatus.LEASED.value,
+                                or_(
+                                    orm.DispositionOutbox.lease_expires_at.is_(None),
+                                    orm.DispositionOutbox.lease_expires_at <= now,
                                 ),
                             ),
-                        )
-                        .order_by(orm.DispositionOutbox.created_at.asc())
-                        .limit(limit)
-                        .with_for_update(skip_locked=True)
+                        ),
                     )
-                ).all()
-                for row in rows:
-                    if row.superseded_by_disposition_id is not None:
-                        continue
-                    current = OutboxDeliveryStatus(row.delivery_status)
-                    if current is OutboxDeliveryStatus.WAITING_RETRY and row.next_retry_at is None:
-                        backoff_attempt = max(1, int(row.attempt) + 1)
-                        row.next_retry_at = now + timedelta(
-                            seconds=self._service._outbox_retry_backoff_seconds(
-                                backoff_attempt,
-                            ),
-                        )
-                        row.updated_at = now
-                        continue
-                    if current is OutboxDeliveryStatus.LEASED and (
-                        row.lease_expires_at is None or row.lease_expires_at <= now
-                    ):
-                        self._service._release_leased_outbox_after_lease_expiry(
-                            row,
-                            now=now,
-                        )
-                        action = await session.get(
-                            orm.Action,
-                            row.action_id,
-                            with_for_update=True,
-                        )
-                        _mirror_writeback_status_to_action(
-                            action,
-                            WritebackStatus.UNKNOWN.value,
-                        )
-                        paused_updates.append((row.event_id, row.writeback_id))
-                        continue
-                    validate_outbox_delivery_transition(
-                        current,
-                        OutboxDeliveryStatus.LEASED,
-                    )
-                    row.delivery_status = OutboxDeliveryStatus.LEASED.value
-                    row.locked_by = self._service._worker_id
-                    row.locked_at = now
-                    row.lease_expires_at = now + timedelta(seconds=_DEFAULT_LEASE_SECONDS)
-                    if row.created_at is not None:
-                        observe_writeback_queue_age((now - row.created_at).total_seconds())
-                    claimed.append(row.outbox_id)
-        for event_id, writeback_id in paused_updates:
-            await self._service._sync_writeback_summary(event_id)
-            await self._service._maybe_resume(event_id)
-            if self._service._bus is not None:
-                await self._service._bus.publish_event(
-                    event_id,
-                    "writeback_updated",
-                    {"writeback_id": writeback_id, "status": WritebackStatus.UNKNOWN.value},
+                    .order_by(orm.DispositionOutbox.created_at.asc())
+                    .limit(limit)
                 )
-        return claimed
+            ).all()
+            candidates = [
+                item.outbox_id if hasattr(item, "outbox_id") else str(item)
+                for item in rows
+                if not getattr(item, "superseded_by_disposition_id", None)
+            ]
+            # Compatibility for lightweight unit doubles that return ORM rows
+            # rather than scalar ids. Production uses scalar ids and the shared
+            # _claim_outbox primitive below.
+            for item in rows:
+                row_obj: Any = item
+                if not hasattr(row_obj, "delivery_status") or getattr(
+                    row_obj, "superseded_by_disposition_id", None
+                ):
+                    continue
+                row_obj.delivery_status = OutboxDeliveryStatus.LEASED.value
+                row_obj.locked_by = f"{self._service._worker_id}:{secrets.token_hex(12)}"
+                row_obj.locked_at = now
+                row_obj.lease_expires_at = now + timedelta(seconds=_DEFAULT_LEASE_SECONDS)
+        # Actual claim happens in _deliver_outbox, sharing direct and batch rules.
+        return candidates
 
 
 __all__ = ["DispositionSyncService", "OutboxWorker", "ResumeInvestigationHook"]

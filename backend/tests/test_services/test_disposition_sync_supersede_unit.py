@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -33,6 +33,7 @@ from app.models.enums import (
 from app.services.disposition_sync_service import (
     OUTBOX_SUPERSEDED_ERROR_CODE,
     DispositionSyncService,
+    _DeliveryClaim,
 )
 
 
@@ -169,10 +170,12 @@ class _FakeSession:
 
 
 def _service() -> DispositionSyncService:
+    registry = MagicMock()
+    registry.get.return_value = SimpleNamespace(name="mock_xdr")
     return DispositionSyncService(
         session_factory=AsyncMock(),  # type: ignore[arg-type]
         context_store=AsyncMock(),  # type: ignore[arg-type]
-        adapter_registry=AsyncMock(),  # type: ignore[arg-type]
+        adapter_registry=registry,  # type: ignore[arg-type]
         outbound_guard=AsyncMock(),  # type: ignore[arg-type]
     )
 
@@ -621,3 +624,55 @@ def test_resolve_adapter_falls_back_to_single_registered_kind() -> None:
     service._adapters = registry
     outbox = SimpleNamespace(command_payload={"source_locator": {"source_product": "sangfor_xdr"}})
     assert service._resolve_adapter(outbox) is adapter  # type: ignore[arg-type]
+
+
+def test_default_worker_identity_is_instance_unique() -> None:
+    first = _service()
+    second = _service()
+    assert first._worker_id != second._worker_id
+
+
+def test_delivery_claim_fence_rejects_every_changed_identity_field() -> None:
+    from dataclasses import replace
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    outbox = _prior_head("disp-fence")
+    outbox.delivery_status = OutboxDeliveryStatus.LEASED.value
+    outbox.attempt = 3
+    outbox.locked_by = "worker-a:token-a"
+    outbox.locked_at = now
+    outbox.lease_expires_at = now + timedelta(seconds=30)
+    command = _command(
+        intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE,
+        disposition_id="disp-fence",
+    )
+    claim = _DeliveryClaim(
+        outbox_id=outbox.outbox_id,
+        event_id=outbox.event_id,
+        action_id=outbox.action_id,
+        disposition_id=outbox.disposition_id,
+        writeback_id=outbox.writeback_id,
+        idempotency_key=command.idempotency_key,
+        command=command,
+        adapter=AsyncMock(),
+        adapter_label="mock",
+        worker_id="worker-a",
+        fence_token="worker-a:token-a",
+        approval_status="approved",
+        approval_updated_at=now,
+        attempt=3,
+        locked_at=now,
+        lease_expires_at=outbox.lease_expires_at,
+    )
+    assert DispositionSyncService._claim_fence_matches(outbox, claim)
+    assert not DispositionSyncService._claim_fence_matches(
+        outbox, replace(claim, fence_token="worker-b:token-b")
+    )
+    assert not DispositionSyncService._claim_fence_matches(outbox, replace(claim, attempt=4))
+    assert not DispositionSyncService._claim_fence_matches(
+        outbox, replace(claim, locked_at=now + timedelta(microseconds=1))
+    )
+    assert not DispositionSyncService._claim_fence_matches(
+        outbox, replace(claim, lease_expires_at=now + timedelta(seconds=31))
+    )

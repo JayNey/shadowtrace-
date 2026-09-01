@@ -62,9 +62,10 @@ def reset_embedding_client() -> None:
 async def close_embedding_client() -> None:
     """Dispose network resources held by the process-local client."""
     global _client
-    if _client is not None:
-        await _client.close()
+    client = _client
     _client = None
+    if client is not None:
+        await client.close()
 
 
 __all__ = ["close_embedding_client", "get_embedding_client", "reset_embedding_client"]

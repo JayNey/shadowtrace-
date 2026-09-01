@@ -394,14 +394,12 @@ class StateMachineService:
         self._bus = event_bus
         self._audit_log = audit_log
         self._degraded = degraded_flags
-        self._projection_locks: dict[str, asyncio.Lock] = {}
+        # Fixed lock striping bounds process memory while preserving per-event
+        # serialization.  PostgreSQL remains the authority for correctness.
+        self._projection_locks = tuple(asyncio.Lock() for _ in range(128))
 
     def _projection_lock(self, event_id: str) -> asyncio.Lock:
-        lock = self._projection_locks.get(event_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._projection_locks[event_id] = lock
-        return lock
+        return self._projection_locks[hash(event_id) % len(self._projection_locks)]
 
     # ------------------------------------------------------------------ #
     # Public API

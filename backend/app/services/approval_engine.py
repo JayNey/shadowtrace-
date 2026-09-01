@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -342,7 +343,8 @@ class ApprovalEngine:
         self._resume = resume_investigation
         self._impact_assessment = impact_assessment_service
         self._manual_resolution = manual_resolution
-        self._approval_required_published: set[str] = set()
+        self._approval_required_published: OrderedDict[str, None] = OrderedDict()
+        self._approval_publish_cache_limit = 8192
 
     async def evaluate_plan(
         self,
@@ -823,6 +825,12 @@ class ApprovalEngine:
         }
         now = datetime.now(UTC)
         if existing is not None:
+            if isinstance(existing.detail, dict) and existing.detail.get(
+                "approval_required_published_at"
+            ):
+                detail["approval_required_published_at"] = existing.detail[
+                    "approval_required_published_at"
+                ]
             existing.decision = decision.decision.value
             existing.detail = detail
             existing.timeout_at = timeout_at
@@ -1026,11 +1034,14 @@ class ApprovalEngine:
             return EventStatus(raw) if raw else None
 
     async def _publish_approval_required(self, action: Action, approval_cycle: int) -> None:
-        key = f"{action.action_id}:{approval_cycle}"
-        if key in self._approval_required_published:
+        key = f"{action.event_id}:{action.action_id}:{approval_cycle}"
+        if key in self._approval_required_published or await self._approval_was_published(
+            action.action_id, approval_cycle
+        ):
+            self._remember_approval_publication(key)
             return
         if self._event_bus is None:
-            self._approval_required_published.add(key)
+            self._remember_approval_publication(key)
             return
         minutes = get_settings().approval_timeout_minutes
         deadline = datetime.now(UTC) + timedelta(minutes=minutes)
@@ -1047,7 +1058,34 @@ class ApprovalEngine:
             ),
         }
         if await self._event_bus.publish_event(action.event_id, "approval_required", payload):
-            self._approval_required_published.add(key)
+            await self._mark_approval_published(action.action_id, approval_cycle)
+            self._remember_approval_publication(key)
+
+    def _remember_approval_publication(self, key: str) -> None:
+        """Remember publications deterministically; terminal cycles are pruned by key."""
+        self._approval_required_published.pop(key, None)
+        if len(self._approval_required_published) >= self._approval_publish_cache_limit:
+            self._approval_required_published.popitem(last=False)
+        self._approval_required_published[key] = None
+
+    async def _approval_was_published(self, action_id: str, approval_cycle: int) -> bool:
+        async with self._session_factory() as session:
+            row = await self._load_record_row(session, action_id, approval_cycle)
+            return bool(
+                row is not None
+                and isinstance(row.detail, dict)
+                and row.detail.get("approval_required_published_at")
+            )
+
+    async def _mark_approval_published(self, action_id: str, approval_cycle: int) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await self._load_record_row(session, action_id, approval_cycle)
+                if row is None:
+                    return
+                detail = dict(row.detail) if isinstance(row.detail, dict) else {}
+                detail["approval_required_published_at"] = datetime.now(UTC).isoformat()
+                row.detail = detail
 
     async def _publish_approval_updated(
         self,

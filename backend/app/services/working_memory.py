@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,6 +20,9 @@ from app.services.degraded_flag_service import DegradedFlagService
 logger = logging.getLogger(__name__)
 
 SCRATCHPAD_LIMIT = 200
+ACCESS_LOG_LIMIT = 512
+EVENT_CACHE_LIMIT = 2048
+CAPABILITY_LIMIT = 8192
 WM_KEY_PREFIX = "shadowtrace:wm:"
 WRITE_CAS_MAX_ATTEMPTS = 3
 
@@ -161,9 +165,12 @@ class WorkingMemory:
         self._redis = redis
         self._degraded_flags = degraded_flags
         self._wm_strict = get_settings().wm_strict if wm_strict is None else wm_strict
-        self._access_logs: dict[str, list[MemoryAccessLog]] = {}
-        self._redis_degrade_marked: set[str] = set()
-        self._issued_capabilities: dict[WriterCapability, str] = {}
+        # MemoryAccessLog has no ORM/table or external contract; this is its
+        # in-process observability projection. EventContext writes retain their
+        # durable journal independently. Bound every runtime index deterministically.
+        self._access_logs: OrderedDict[str, list[MemoryAccessLog]] = OrderedDict()
+        self._redis_degrade_marked: OrderedDict[str, None] = OrderedDict()
+        self._issued_capabilities: OrderedDict[WriterCapability, str] = OrderedDict()
 
     def bind_degraded_flag_service(self, service: DegradedFlagService) -> None:
         """Wire DegradedFlagService after construction (breaks init cycles)."""
@@ -183,6 +190,8 @@ class WorkingMemory:
                 details={"writer": writer},
             )
         capability = WriterCapability(owner=canonical, _nonce=object())
+        if len(self._issued_capabilities) >= CAPABILITY_LIMIT:
+            self._issued_capabilities.popitem(last=False)
         self._issued_capabilities[capability] = canonical
         return BoundWorkingMemory(self, capability)
 
@@ -341,7 +350,13 @@ class WorkingMemory:
             key=key,
             allowed=allowed,
         )
-        self._access_logs.setdefault(event_id, []).append(log)
+        if event_id not in self._access_logs and len(self._access_logs) >= EVENT_CACHE_LIMIT:
+            self._access_logs.popitem(last=False)
+        entries = self._access_logs.setdefault(event_id, [])
+        self._access_logs.move_to_end(event_id)
+        entries.append(log)
+        if len(entries) > ACCESS_LOG_LIMIT:
+            del entries[: len(entries) - ACCESS_LOG_LIMIT]
 
     async def _write_with_version_retry(
         self,
@@ -406,7 +421,8 @@ class WorkingMemory:
             )
             return
         if await self._degraded_flags.has_flag(event_id, "redis_context_unavailable"):
-            self._redis_degrade_marked.add(event_id)
+            self._redis_degrade_marked[event_id] = None
+            self._redis_degrade_marked.move_to_end(event_id)
             return
         await self._degraded_flags.set_flag(
             event_id,
@@ -414,7 +430,9 @@ class WorkingMemory:
             True,
             writer="WorkingMemory",
         )
-        self._redis_degrade_marked.add(event_id)
+        if len(self._redis_degrade_marked) >= EVENT_CACHE_LIMIT:
+            self._redis_degrade_marked.popitem(last=False)
+        self._redis_degrade_marked[event_id] = None
 
     async def _mirror_wm_scratchpad(self, event_id: str, entries: list[Any]) -> None:
         """Best-effort mirror into ``shadowtrace:wm:{event_id}`` Hash."""

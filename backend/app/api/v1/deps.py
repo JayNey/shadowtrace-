@@ -1199,6 +1199,23 @@ def reset_investigation_stack_cache() -> None:
     _investigation_stack = None
 
 
+async def close_loop_bound_redis_resources() -> None:
+    """Close the Redis client on the event loop that used it."""
+    if _redis_client is not None:
+        await _redis_client.aclose()
+
+
+async def close_loop_bound_adapter_resources() -> None:
+    """Close adapter clients owned by the task-local dependency graph."""
+    if _adapter_registry is None:
+        return
+    for name in _adapter_registry.list_names():
+        adapter = _adapter_registry.get(name)
+        closer = getattr(adapter, "aclose", None)
+        if closer is not None:
+            await closer()
+
+
 def reset_loop_bound_redis_resources() -> None:
     """Drop Redis and redis-backed singletons after Celery ``asyncio.run`` (ISSUE-252).
 
@@ -1207,8 +1224,6 @@ def reset_loop_bound_redis_resources() -> None:
     ``asyncio.run`` binds fresh clients. SessionProvider is intentionally kept —
     worker NullPool engines are already loop-safe across consecutive runs.
     """
-    import asyncio
-
     global _redis_client, _context_store, _degraded_flags
     global _event_service, _state_machine, _event_bus, _pipeline, _approval_engine
     global _super_agent, _event_lease, _investigation_stack, _investigation_intent_service
@@ -1221,7 +1236,6 @@ def reset_loop_bound_redis_resources() -> None:
     global _detection_promotion, _detection_context_projector, _detection_context_service
     global _decision_record_service, _execution_job_query
 
-    client = _redis_client
     _redis_client = None
     _context_store = None
     _degraded_flags = None
@@ -1255,19 +1269,9 @@ def reset_loop_bound_redis_resources() -> None:
     _detection_context_projector = None
     _detection_context_service = None
 
-    if client is None:
-        return
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        # No running loop (Celery Strategy B after asyncio.run) — close cleanly.
-        try:
-            asyncio.run(client.aclose())
-        except Exception:
-            logger.debug("Redis aclose after Celery task failed", exc_info=True)
-        return
-    # Called from inside a running loop (tests / reset_deps): drop references only.
-    # Closing via asyncio.run would nest loops; RedisClient rebind handles reuse.
+    # This reset is invoked after the task runner has exited.  Never create a
+    # second event loop here: the Celery worker shutdown hook owns final disposal.
+    # Dropping references is sufficient to force fresh loop-bound clients next run.
 
 
 def reset_deps() -> None:
