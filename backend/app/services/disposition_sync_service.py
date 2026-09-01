@@ -128,6 +128,9 @@ class _PausedLookupClaim:
     command: DispositionCommand
     adapter: BaseDispositionAdapter
     provider_job_id: str | None
+    attempt: int
+    locked_at: datetime
+    lease_expires_at: datetime
 
 
 @dataclass(frozen=True)
@@ -2733,9 +2736,12 @@ class DispositionSyncService:
                         .limit(1)
                     )
                     token = f"{self._worker_id}:reconcile:{secrets.token_hex(8)}"
+                    locked_at = now
+                    lease_expires_at = now + timedelta(seconds=_DEFAULT_LEASE_SECONDS)
+                    row.attempt = int(row.attempt or 0) + 1
                     row.locked_by = token
-                    row.locked_at = now
-                    row.lease_expires_at = now + timedelta(seconds=_DEFAULT_LEASE_SECONDS)
+                    row.locked_at = locked_at
+                    row.lease_expires_at = lease_expires_at
                     row.updated_at = now
                     action = await session.get(orm.Action, row.action_id, with_for_update=True)
                     _mirror_writeback_status_to_action(action, WritebackStatus.UNKNOWN.value)
@@ -2756,6 +2762,9 @@ class DispositionSyncService:
                                 if latest_receipt is not None
                                 else None
                             ),
+                            attempt=int(row.attempt),
+                            locked_at=locked_at,
+                            lease_expires_at=lease_expires_at,
                         )
                     )
         return claims
@@ -2831,6 +2840,9 @@ class DispositionSyncService:
                 if (
                     OutboxDeliveryStatus(outbox.delivery_status) is not OutboxDeliveryStatus.PAUSED
                     or outbox.locked_by != claim.token
+                    or int(outbox.attempt) != claim.attempt
+                    or outbox.locked_at != claim.locked_at
+                    or outbox.lease_expires_at != claim.lease_expires_at
                     or outbox.superseded_by_disposition_id is not None
                     or outbox.idempotency_key != claim.idempotency_key
                     or outbox.command_payload_sha256 != claim.command_payload_sha256
@@ -2976,6 +2988,9 @@ class DispositionSyncService:
                     or OutboxDeliveryStatus(outbox.delivery_status)
                     is not OutboxDeliveryStatus.PAUSED
                     or outbox.locked_by != claim.token
+                    or int(outbox.attempt) != claim.attempt
+                    or outbox.locked_at != claim.locked_at
+                    or outbox.lease_expires_at != claim.lease_expires_at
                 ):
                     return
                 outbox.locked_by = None

@@ -38,6 +38,7 @@ function eventResponse(eventId: string) {
     data: {
       event: {
         event_id: eventId,
+        title: eventId,
         status: "received",
         current_primary_source_record_id: null,
         event_context_snapshot: {},
@@ -76,7 +77,7 @@ describe("useEventDetail request races", () => {
     vi.useRealTimers();
   });
 
-  it("does not let an old eventId response overwrite the new event", async () => {
+  it("test_event_id_switch_invalidates_all_old_requests", async () => {
     const old = deferred<ReturnType<typeof eventResponse>>();
     api.getEvent.mockImplementation((eventId: string) =>
       eventId === "event-a" ? old.promise : Promise.resolve(eventResponse(eventId)),
@@ -92,7 +93,7 @@ describe("useEventDetail request races", () => {
     expect(result.current.event?.event.event_id).toBe("event-b");
   });
 
-  it("coalesces high-frequency socket events without dropping distinct resources", async () => {
+  it("test_distinct_resources_in_same_window_are_all_refreshed", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const { result } = renderHook(() => useEventDetail("event-a"));
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -127,7 +128,7 @@ describe("useEventDetail request races", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
   });
 
-  it("invalidates an in-flight request when eventId becomes undefined", async () => {
+  it("test_event_id_undefined_cannot_restore_old_state", async () => {
     const initial = deferred<ReturnType<typeof eventResponse>>();
     api.getEvent.mockReturnValue(initial.promise);
     const { result, rerender } = renderHook(
@@ -141,7 +142,7 @@ describe("useEventDetail request races", () => {
     expect(result.current.loading).toBe(false);
   });
 
-  it("clears the pending socket timer on unmount", async () => {
+  it("test_unmount_prevents_late_state_updates", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const { result, unmount } = renderHook(() => useEventDetail("event-a"));
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -151,5 +152,103 @@ describe("useEventDetail request races", () => {
     await act(async () => vi.advanceTimersByTimeAsync(100));
     expect(api.getEvent).not.toHaveBeenCalled();
     expect(api.listDispositions).not.toHaveBeenCalled();
+  });
+
+  it("test_same_resource_socket_events_make_one_request", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { result } = renderHook(() => useEventDetail("event-a"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    vi.clearAllMocks();
+    act(() => {
+      for (let index = 0; index < 20; index += 1) {
+        socketHandler?.({ event_id: "event-a", type: "approval_updated" });
+      }
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(50));
+    expect(api.listActions).toHaveBeenCalledTimes(1);
+    expect(api.getEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("test_writeback_refresh_does_not_drop_event_refresh", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { result } = renderHook(() => useEventDetail("event-a"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    vi.clearAllMocks();
+    act(() => {
+      socketHandler?.({ event_id: "event-a", type: "state_change" });
+      socketHandler?.({ event_id: "event-a", type: "writeback_updated" });
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(50));
+    expect(api.getEvent).toHaveBeenCalledTimes(1);
+    expect(api.listDispositions).toHaveBeenCalledTimes(1);
+  });
+
+  it("test_approval_event_refreshes_actions_and_required_event_data", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { result } = renderHook(() => useEventDetail("event-a"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    vi.clearAllMocks();
+    act(() => socketHandler?.({ event_id: "event-a", type: "approval_required" }));
+    await act(async () => vi.advanceTimersByTimeAsync(50));
+    expect(api.listActions).toHaveBeenCalledTimes(1);
+    expect(api.getEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("test_disposition_event_refreshes_dispositions", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { result } = renderHook(() => useEventDetail("event-a"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    vi.clearAllMocks();
+    act(() => socketHandler?.({ event_id: "event-a", type: "disposition_submitted" }));
+    await act(async () => vi.advanceTimersByTimeAsync(50));
+    expect(api.listDispositions).toHaveBeenCalledTimes(1);
+  });
+
+  it("test_interleaved_event_actions_dispositions_writebacks_keep_latest_state", async () => {
+    const { result } = renderHook(() => useEventDetail("event-a"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    const staleEvent = deferred<ReturnType<typeof eventResponse>>();
+    const latestEvent = deferred<ReturnType<typeof eventResponse>>();
+    const staleDispositions = deferred<{ data: { items: never[] } }>();
+    const latestDispositions = deferred<{ data: { items: never[] } }>();
+    api.getEvent
+      .mockReturnValueOnce(staleEvent.promise)
+      .mockReturnValueOnce(latestEvent.promise);
+    api.listActions.mockResolvedValueOnce({
+      data: { items: [{ action_id: "action-latest" }] },
+    });
+    api.listDispositions
+      .mockReturnValueOnce(staleDispositions.promise)
+      .mockReturnValueOnce(latestDispositions.promise);
+
+    let eventRefresh!: Promise<unknown>;
+    let actionRefresh!: Promise<unknown>;
+    let dispositionRefresh!: Promise<unknown>;
+    let writebackRefresh!: Promise<unknown>;
+    act(() => {
+      eventRefresh = result.current.refresh("event");
+      actionRefresh = result.current.refresh("actions");
+      dispositionRefresh = result.current.refresh("dispositions");
+      writebackRefresh = result.current.refresh("writebacks");
+    });
+    const latest = eventResponse("event-a");
+    latest.data.event.title = "latest";
+    await act(async () => {
+      latestEvent.resolve(latest);
+      latestDispositions.resolve({ data: { items: [] } });
+      staleEvent.resolve(eventResponse("event-a"));
+      staleDispositions.resolve({ data: { items: [] } });
+      await Promise.all([
+        eventRefresh,
+        actionRefresh,
+        dispositionRefresh,
+        writebackRefresh,
+      ]);
+    });
+    expect(result.current.event?.event.title).toBe("latest");
+    expect(result.current.actions[0]?.action_id).toBe("action-latest");
+    expect(result.current.dispositions).toEqual([]);
+    expect(result.current.writebacks).toEqual([]);
   });
 });

@@ -7,6 +7,7 @@ Requires Compose PostgreSQL (+ Redis for bus/state tests). Run from ``backend/``
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -177,6 +178,7 @@ async def cleanup(
     async with session_factory() as session:
         async with session.begin():
             for table in (
+                orm.ApprovalPublication,
                 ApprovalRecordORM,
                 orm.EventAuditLog,
                 orm.EventContextJournal,
@@ -313,6 +315,76 @@ async def _insert_action(
                 )
             )
     return action.model_copy(update={"event_id": event_id})
+
+
+@pytest.mark.asyncio
+async def test_approval_required_publication_is_singleton_across_workers(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    cleanup: None,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(session_factory, event_id, _action_model())
+    bus = FakeEventBus()
+    worker_a = ApprovalEngine(session_factory, event_bus=bus)  # type: ignore[arg-type]
+    worker_b = ApprovalEngine(session_factory, event_bus=bus)  # type: ignore[arg-type]
+    await asyncio.gather(
+        worker_a._publish_approval_required(action, 0),
+        worker_b._publish_approval_required(action, 0),
+    )
+    assert len([event for event in bus.published if event[1] == "approval_required"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_approval_required_publish_failure_is_retriable(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    cleanup: None,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(session_factory, event_id, _action_model())
+    bus = AsyncMock()
+    bus.publish_event.side_effect = [False, True]
+    worker_a = ApprovalEngine(session_factory, event_bus=bus)
+    worker_b = ApprovalEngine(session_factory, event_bus=bus)
+    await worker_a._publish_approval_required(action, 0)
+    await worker_b._publish_approval_required(action, 0)
+    assert bus.publish_event.await_count == 2
+    async with session_factory() as session:
+        marker = await session.scalar(select(orm.ApprovalPublication))
+    assert marker is not None and marker.status == "published"
+
+
+@pytest.mark.asyncio
+async def test_new_approval_cycle_publishes_new_event(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    cleanup: None,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(session_factory, event_id, _action_model())
+    bus = FakeEventBus()
+    engine = ApprovalEngine(session_factory, event_bus=bus)  # type: ignore[arg-type]
+    await engine._publish_approval_required(action, 0)
+    await engine._publish_approval_required(action, 1)
+    assert [event[1] for event in bus.published] == ["approval_required", "approval_required"]
+
+
+@pytest.mark.asyncio
+async def test_approval_publication_is_tenant_isolated(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    cleanup: None,
+) -> None:
+    first_event = await _create_event(session_factory, store)
+    second_event = await _create_event(session_factory, store)
+    first = await _insert_action(session_factory, first_event, _action_model())
+    second = await _insert_action(session_factory, second_event, _action_model())
+    bus = FakeEventBus()
+    engine = ApprovalEngine(session_factory, event_bus=bus)  # type: ignore[arg-type]
+    await engine._publish_approval_required(first, 0)
+    await engine._publish_approval_required(second, 0)
+    assert {event[0] for event in bus.published} == {first_event, second_event}
 
 
 # --------------------------------------------------------------------------- #

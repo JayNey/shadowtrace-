@@ -437,8 +437,11 @@ class EventContextStore:
             },
         )
         # Keep degraded memory view coherent when Redis is down.
-        if not redis_ok and event_id in self._degraded_cache:
-            current = self._degraded_cache[event_id]
+        if not redis_ok:
+            current = self._get_degraded_if_fresh(event_id)
+        else:
+            current = None
+        if current is not None:
             updated = EventContext.model_validate({**_context_as_dict(current), key: value})
             self._cache_degraded(event_id, updated)
 
@@ -549,8 +552,11 @@ class EventContextStore:
                 "timestamp": datetime.now(UTC).isoformat(),
             },
         )
-        if not redis_ok and event_id in self._degraded_cache:
-            current = self._degraded_cache[event_id]
+        if not redis_ok:
+            current = self._get_degraded_if_fresh(event_id)
+        else:
+            current = None
+        if current is not None:
             self._cache_degraded(
                 event_id,
                 EventContext.model_validate(

@@ -229,7 +229,7 @@ def _release_celery_task_loop_resources() -> None:
     # drops references and must not start another loop.
     from app.core.embedding.factory import reset_embedding_client
 
-    reset_embedding_client()
+    reset_embedding_client(close=False)
 
 
 def _task_meta_key(task_id: str) -> str:

@@ -315,6 +315,18 @@ export function useEventDetail(eventId: string | undefined) {
   useEffect(() => {
     eventIdentityRef.current = eventId;
     mountedRef.current = true;
+    eventRef.current = null;
+    actionsRef.current = [];
+    setEvent(null);
+    setTraces([]);
+    setActions([]);
+    setExecutionJobs([]);
+    setDispositions([]);
+    setWritebacks([]);
+    setSourceRecord(null);
+    setConnectors([]);
+    setEvidenceDetail(null);
+    setReport(null);
     void refresh("all");
     return () => {
       mountedRef.current = false;

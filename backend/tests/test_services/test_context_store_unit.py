@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -7,6 +8,7 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.redis_client import RedisClient
+from app.models.context import EventContext
 from app.services.context_service import EventContextStore, ctx_key, version_field
 
 
@@ -97,6 +99,62 @@ async def test_database_errors_are_not_misclassified_as_redis_failures(error: Ex
 
 @pytest.mark.asyncio
 async def test_context_validation_error_propagates_after_valid_redis_read() -> None:
+    store, client = _store()
+    client.hgetall.return_value = {
+        b"risk_assessment": RedisClient.dumps("not-a-dict"),
+        b"risk_assessment__version": RedisClient.dumps(1),
+    }
+    store._load_current_field_versions = AsyncMock(  # type: ignore[method-assign]
+        return_value={"risk_assessment": 1}
+    )
+    with pytest.raises(ValidationError):
+        await store.get_full_context("event-a")
+    assert not store._degraded_cache
+
+
+def test_concurrent_degraded_cache_update_and_eviction_has_no_keyerror() -> None:
+    store, _ = _store()
+    with patch("app.services.context_service.DEGRADED_CACHE_MAX_ENTRIES", 4):
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [
+                executor.submit(store._cache_degraded, f"event-{index}", EventContext())
+                for index in range(100)
+            ]
+            for future in futures:
+                future.result()
+    assert len(store._degraded_cache) <= 4
+
+
+def test_degraded_cache_and_timestamp_index_remain_consistent() -> None:
+    store, _ = _store()
+    with patch("app.services.context_service.DEGRADED_CACHE_MAX_ENTRIES", 2):
+        for index in range(20):
+            store._cache_degraded(f"event-{index}", EventContext())
+            store._get_degraded_if_fresh(f"event-{index}")
+    assert list(store._degraded_cache) == list(store._degraded_cache_ts)
+
+
+def test_degraded_cache_expires_after_30_seconds() -> None:
+    store, _ = _store()
+    with patch("app.services.context_service.time.monotonic", side_effect=[0.0, 31.0]):
+        store._cache_degraded("event-a", EventContext())
+        assert store._get_degraded_if_fresh("event-a") is None
+    assert not store._degraded_cache
+    assert not store._degraded_cache_ts
+
+
+@pytest.mark.asyncio
+async def test_postgres_error_is_not_converted_to_degraded_cache() -> None:
+    store, client = _store()
+    client.hget.return_value = None
+    store.rebuild_context = AsyncMock(side_effect=SQLAlchemyError("db"))  # type: ignore[method-assign]
+    with pytest.raises(SQLAlchemyError):
+        await store.get("event-a", "risk_assessment")
+    assert not store._degraded_cache
+
+
+@pytest.mark.asyncio
+async def test_validation_error_is_not_converted_to_degraded_cache() -> None:
     store, client = _store()
     client.hgetall.return_value = {
         b"risk_assessment": RedisClient.dumps("not-a-dict"),

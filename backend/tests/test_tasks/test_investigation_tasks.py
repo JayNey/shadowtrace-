@@ -26,6 +26,25 @@ from tests.support.investigation_task_doubles import make_run_analysis_only_body
 
 
 @pytest.mark.asyncio
+async def test_all_owned_resources_close_after_one_close_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.v1 import deps
+
+    first = MagicMock(aclose=AsyncMock(side_effect=RuntimeError("close failed")))
+    second = MagicMock(aclose=AsyncMock())
+    registry = MagicMock()
+    registry.list_names.return_value = ["first", "second"]
+    registry.get.side_effect = {"first": first, "second": second}.__getitem__
+    monkeypatch.setattr(deps, "_adapter_registry", registry)
+
+    await deps.close_loop_bound_adapter_resources()
+
+    first.aclose.assert_awaited_once()
+    second.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_execute_investigation_skips_when_lease_already_held(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

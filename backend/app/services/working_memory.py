@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from threading import RLock
 from typing import Any
+
+from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.errors import GuardrailViolationError
 from app.core.redis_client import RedisClient
+from app.db import models as orm
 from app.models.context import EventContext
 from app.models.working_memory import MemoryAccessLog, ScratchpadEntry
 from app.services.context_service import EventContextStore
@@ -23,6 +28,7 @@ SCRATCHPAD_LIMIT = 200
 ACCESS_LOG_LIMIT = 512
 EVENT_CACHE_LIMIT = 2048
 CAPABILITY_LIMIT = 8192
+CAPABILITY_TTL_SECONDS = 30 * 60
 WM_KEY_PREFIX = "shadowtrace:wm:"
 WRITE_CAS_MAX_ATTEMPTS = 3
 
@@ -149,6 +155,11 @@ class BoundWorkingMemory:
         """
         return self._memory.for_writer(writer)
 
+    def release(self) -> None:
+        self._memory.release(self._capability)
+
+    revoke = release
+
 
 class WorkingMemory:
     """Owner-gated EventContext access with scratchpad + access audit."""
@@ -165,12 +176,14 @@ class WorkingMemory:
         self._redis = redis
         self._degraded_flags = degraded_flags
         self._wm_strict = get_settings().wm_strict if wm_strict is None else wm_strict
-        # MemoryAccessLog has no ORM/table or external contract; this is its
-        # in-process observability projection. EventContext writes retain their
-        # durable journal independently. Bound every runtime index deterministically.
+        # Durable history lives in memory_access_audit_log. This bounded map is
+        # only a process-local diagnostic projection.
         self._access_logs: OrderedDict[str, list[MemoryAccessLog]] = OrderedDict()
         self._redis_degrade_marked: OrderedDict[str, None] = OrderedDict()
+        self._redis_degrade_lock = RLock()
         self._issued_capabilities: OrderedDict[WriterCapability, str] = OrderedDict()
+        self._capability_last_used: OrderedDict[WriterCapability, float] = OrderedDict()
+        self._capability_lock = RLock()
 
     def bind_degraded_flag_service(self, service: DegradedFlagService) -> None:
         """Wire DegradedFlagService after construction (breaks init cycles)."""
@@ -190,10 +203,25 @@ class WorkingMemory:
                 details={"writer": writer},
             )
         capability = WriterCapability(owner=canonical, _nonce=object())
-        if len(self._issued_capabilities) >= CAPABILITY_LIMIT:
-            self._issued_capabilities.popitem(last=False)
-        self._issued_capabilities[capability] = canonical
+        with self._capability_lock:
+            self._purge_expired_capabilities()
+            if len(self._issued_capabilities) >= CAPABILITY_LIMIT:
+                raise GuardrailViolationError(
+                    "working-memory capability capacity exhausted; release an active capability",
+                    error_code="working_memory_capability_capacity_exhausted",
+                    details={"limit": CAPABILITY_LIMIT},
+                )
+            self._issued_capabilities[capability] = canonical
+            self._capability_last_used[capability] = time.monotonic()
         return BoundWorkingMemory(self, capability)
+
+    def release(self, capability: WriterCapability) -> None:
+        """Revoke a capability; subsequent access fails closed."""
+        with self._capability_lock:
+            self._issued_capabilities.pop(capability, None)
+            self._capability_last_used.pop(capability, None)
+
+    revoke = release
 
     async def read(
         self,
@@ -201,21 +229,38 @@ class WorkingMemory:
         key: str,
         reader: WriterCapability,
     ) -> Any:
-        reader_name = self._resolve_capability(reader)
+        try:
+            reader_name = self._resolve_capability(reader)
+        except GuardrailViolationError:
+            await self._record_access_durable(
+                event_id,
+                agent_name=self._capability_label(reader),
+                op="read",
+                key=key,
+                allowed=False,
+            )
+            raise
         if key not in FIELD_OWNERSHIP:
+            await self._record_access_durable(
+                event_id,
+                agent_name=reader_name,
+                op="read",
+                key=key,
+                allowed=False,
+            )
             raise GuardrailViolationError(
                 f"unregistered EventContext field: {key!r}",
                 error_code="working_memory_unauthorized_write",
                 details={"event_id": event_id, "key": key, "reader": reader_name},
             )
-        value = await self._store.get(event_id, key)
-        self._record_access(
+        await self._record_access_durable(
             event_id,
             agent_name=reader_name,
             op="read",
             key=key,
             allowed=True,
         )
+        value = await self._store.get(event_id, key)
         return value
 
     async def write(
@@ -227,7 +272,7 @@ class WorkingMemory:
     ) -> None:
         writer_name = self._capability_label(writer)
         if key not in FIELD_OWNERSHIP:
-            self._record_access(
+            await self._record_access_durable(
                 event_id,
                 agent_name=writer_name,
                 op="write",
@@ -241,9 +286,19 @@ class WorkingMemory:
             )
 
         owner = FIELD_OWNERSHIP[key]
-        canonical = self._resolve_capability(writer)
+        try:
+            canonical = self._resolve_capability(writer)
+        except GuardrailViolationError:
+            await self._record_access_durable(
+                event_id,
+                agent_name=writer_name,
+                op="write",
+                key=key,
+                allowed=False,
+            )
+            raise
         if canonical != owner:
-            self._record_access(
+            await self._record_access_durable(
                 event_id,
                 agent_name=canonical,
                 op="write",
@@ -261,8 +316,10 @@ class WorkingMemory:
                 },
             )
 
+        await self._record_access_durable(
+            event_id, agent_name=canonical, op="write", key=key, allowed=True
+        )
         await self._write_with_version_retry(event_id, key, value)
-        self._record_access(event_id, agent_name=canonical, op="write", key=key, allowed=True)
 
     async def append_scratchpad(
         self,
@@ -271,7 +328,17 @@ class WorkingMemory:
         *,
         writer: WriterCapability,
     ) -> None:
-        agent_name = self._resolve_capability(writer)
+        try:
+            agent_name = self._resolve_capability(writer)
+        except GuardrailViolationError:
+            await self._record_access_durable(
+                event_id,
+                agent_name=self._capability_label(writer),
+                op="write",
+                key="scratchpad",
+                allowed=False,
+            )
+            raise
         entry = ScratchpadEntry(
             agent_name=agent_name,
             timestamp=datetime.now(UTC),
@@ -284,17 +351,17 @@ class WorkingMemory:
             entries.append(serialized)
             return entries[-SCRATCHPAD_LIMIT:]
 
-        entries = await self._write_with_version_retry(
-            event_id,
-            "scratchpad",
-            transform=append_to,
-        )
-        self._record_access(
+        await self._record_access_durable(
             event_id,
             agent_name=agent_name,
             op="write",
             key="scratchpad",
             allowed=True,
+        )
+        entries = await self._write_with_version_retry(
+            event_id,
+            "scratchpad",
+            transform=append_to,
         )
         await self._mirror_wm_scratchpad(event_id, entries)
 
@@ -312,6 +379,27 @@ class WorkingMemory:
         return [ScratchpadEntry.model_validate(item) for item in raw]
 
     async def get_access_log(self, event_id: str) -> list[MemoryAccessLog]:
+        factory = getattr(self._store, "_session_factory", None)
+        if isinstance(self._store, EventContextStore) and factory is not None:
+            async with factory() as session:
+                rows = (
+                    await session.scalars(
+                        select(orm.MemoryAccessAuditLog)
+                        .where(orm.MemoryAccessAuditLog.event_id == event_id)
+                        .order_by(orm.MemoryAccessAuditLog.id)
+                    )
+                ).all()
+            if rows:
+                return [
+                    MemoryAccessLog(
+                        timestamp=row.timestamp,
+                        agent_name=row.agent_name,
+                        op=row.op,
+                        key=row.key,
+                        allowed=row.allowed,
+                    )
+                    for row in rows
+                ]
         return list(self._access_logs.get(event_id, []))
 
     # ------------------------------------------------------------------ #
@@ -320,7 +408,13 @@ class WorkingMemory:
 
     def _resolve_capability(self, capability: WriterCapability) -> str:
         try:
-            return self._issued_capabilities[capability]
+            with self._capability_lock:
+                self._purge_expired_capabilities()
+                owner = self._issued_capabilities[capability]
+                self._capability_last_used[capability] = time.monotonic()
+                self._capability_last_used.move_to_end(capability)
+                self._issued_capabilities.move_to_end(capability)
+                return owner
         except (KeyError, TypeError) as exc:
             raise GuardrailViolationError(
                 "unrecognized working-memory writer capability",
@@ -357,6 +451,31 @@ class WorkingMemory:
         entries.append(log)
         if len(entries) > ACCESS_LOG_LIMIT:
             del entries[: len(entries) - ACCESS_LOG_LIMIT]
+
+    async def _record_access_durable(self, event_id: str, **kwargs: Any) -> None:
+        self._record_access(event_id, **kwargs)
+        factory = getattr(self._store, "_session_factory", None)
+        if not isinstance(self._store, EventContextStore) or factory is None:
+            return
+        log = self._access_logs[event_id][-1]
+        async with factory() as session:
+            async with session.begin():
+                session.add(
+                    orm.MemoryAccessAuditLog(
+                        event_id=event_id,
+                        timestamp=log.timestamp,
+                        agent_name=log.agent_name,
+                        op=log.op,
+                        key=log.key,
+                        allowed=log.allowed,
+                    )
+                )
+
+    def _purge_expired_capabilities(self) -> None:
+        cutoff = time.monotonic() - CAPABILITY_TTL_SECONDS
+        for capability, last_used in list(self._capability_last_used.items()):
+            if last_used <= cutoff:
+                self.release(capability)
 
     async def _write_with_version_retry(
         self,
@@ -411,8 +530,8 @@ class WorkingMemory:
 
     async def _maybe_mark_redis_unavailable(self, event_id: str, redis_ok: bool) -> None:
         if redis_ok:
-            return
-        if event_id in self._redis_degrade_marked:
+            with self._redis_degrade_lock:
+                self._redis_degrade_marked.pop(event_id, None)
             return
         if self._degraded_flags is None:
             logger.warning(
@@ -420,19 +539,24 @@ class WorkingMemory:
                 event_id,
             )
             return
-        if await self._degraded_flags.has_flag(event_id, "redis_context_unavailable"):
+        with self._redis_degrade_lock:
+            if event_id in self._redis_degrade_marked:
+                self._redis_degrade_marked.move_to_end(event_id)
+                return
+            if len(self._redis_degrade_marked) >= EVENT_CACHE_LIMIT:
+                self._redis_degrade_marked.popitem(last=False)
             self._redis_degrade_marked[event_id] = None
-            self._redis_degrade_marked.move_to_end(event_id)
-            return
-        await self._degraded_flags.set_flag(
-            event_id,
-            "redis_context_unavailable",
-            True,
-            writer="WorkingMemory",
-        )
-        if len(self._redis_degrade_marked) >= EVENT_CACHE_LIMIT:
-            self._redis_degrade_marked.popitem(last=False)
-        self._redis_degrade_marked[event_id] = None
+        try:
+            await self._degraded_flags.set_flag(
+                event_id,
+                "redis_context_unavailable",
+                True,
+                writer="WorkingMemory",
+            )
+        except Exception:
+            with self._redis_degrade_lock:
+                self._redis_degrade_marked.pop(event_id, None)
+            raise
 
     async def _mirror_wm_scratchpad(self, event_id: str, entries: list[Any]) -> None:
         """Best-effort mirror into ``shadowtrace:wm:{event_id}`` Hash."""

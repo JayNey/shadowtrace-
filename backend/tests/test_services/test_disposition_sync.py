@@ -1463,7 +1463,7 @@ async def test_expired_lease_outbox_paused_not_waiting_retry(
 
 
 @pytest.mark.asyncio
-async def test_expired_lease_lookup_reconciles_without_resubmit(
+async def test_finalize_commit_failure_uses_lookup_first(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,
     mock_xdr_client: httpx.AsyncClient,
@@ -2115,7 +2115,7 @@ async def _ready_outbox_for_concurrency(
 
 
 @pytest.mark.asyncio
-async def test_submit_wait_does_not_hold_postgres_outbox_lock(
+async def test_submit_blocking_does_not_hold_database_row_lock(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,
     mock_xdr_client: httpx.AsyncClient,
@@ -2190,12 +2190,7 @@ async def test_direct_delivery_has_one_claim_against_direct_or_batch(
     assert submit_count == 1
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "outcome",
-    ["success", "failure", "unknown", "conflict", "deterministic_rejection"],
-)
-async def test_stale_worker_outcomes_cannot_modify_reclaimed_lease(
+async def _assert_stale_worker_outcome_cannot_modify_reclaimed_lease(
     outcome: str,
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,
@@ -2228,32 +2223,121 @@ async def test_stale_worker_outcomes_cannot_modify_reclaimed_lease(
     delivery = asyncio.create_task(sync.deliver_outbox(outbox_id))
     await asyncio.wait_for(submit_started.wait(), timeout=2)
 
-    b_locked_at = datetime.now(UTC)
-    b_lease_expires_at = b_locked_at + timedelta(seconds=30)
+    # Expire A's real lease, then drive the production lookup-first reclaim path.
     async with session_factory() as session:
         async with session.begin():
             row = await session.get(orm.DispositionOutbox, outbox_id, with_for_update=True)
             assert row is not None
-            row.locked_by = "worker-b:fence-b"
-            row.locked_at = b_locked_at
-            row.lease_expires_at = b_lease_expires_at
-            row.attempt += 1
+            row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    assert await sync._claim_outbox(outbox_id) is None
+    lookup_claims = await sync._claim_paused_outboxes(limit=1)
+    assert len(lookup_claims) == 1
+    worker_b = lookup_claims[0]
+    assert worker_b.outbox_id == outbox_id
     release_submit.set()
     await delivery
 
     async with session_factory() as session:
         row = await session.get(orm.DispositionOutbox, outbox_id)
         assert row is not None
-        assert row.delivery_status == OutboxDeliveryStatus.LEASED.value
-        assert row.locked_by == "worker-b:fence-b"
-        assert row.locked_at == b_locked_at
-        assert row.lease_expires_at == b_lease_expires_at
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+        assert row.locked_by == worker_b.token
+        assert row.attempt == worker_b.attempt
+        assert row.locked_at == worker_b.locked_at
+        assert row.lease_expires_at == worker_b.lease_expires_at
         receipt_count = await session.scalar(
             select(func.count(orm.DispositionReceipt.writeback_id)).where(
                 orm.DispositionReceipt.writeback_id == row.writeback_id
             )
         )
         assert receipt_count == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_success_cannot_modify_real_reclaimed_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    await _assert_stale_worker_outcome_cannot_modify_reclaimed_lease(
+        "success", session_factory, store, mock_xdr_client, cleanup
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_failure_cannot_modify_real_reclaimed_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    await _assert_stale_worker_outcome_cannot_modify_reclaimed_lease(
+        "failure", session_factory, store, mock_xdr_client, cleanup
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_unknown_cannot_modify_real_reclaimed_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    await _assert_stale_worker_outcome_cannot_modify_reclaimed_lease(
+        "unknown", session_factory, store, mock_xdr_client, cleanup
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["conflict", "deterministic_rejection"])
+async def test_stale_worker_terminal_error_cannot_modify_real_reclaimed_claim(
+    outcome: str,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    await _assert_stale_worker_outcome_cannot_modify_reclaimed_lease(
+        outcome, session_factory, store, mock_xdr_client, cleanup
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_worker_b_reclaims_after_worker_a_lease_expiry(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    sync, outbox_id = await _ready_outbox_for_concurrency(
+        session_factory, store, mock_xdr_client
+    )
+    worker_a = await sync._claim_outbox(outbox_id)
+    assert worker_a is not None
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.DispositionOutbox, outbox_id, with_for_update=True)
+            assert row is not None
+            row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    # Expired egress is UNKNOWN: the delivery claim converts to PAUSED and the
+    # next real worker acquires the lookup-first reconciliation lease.
+    assert await sync._claim_outbox(outbox_id) is None
+    claims = await sync._claim_paused_outboxes(limit=1)
+    assert len(claims) == 1
+    worker_b = claims[0]
+    assert worker_b.outbox_id == outbox_id
+    assert worker_b.token != worker_a.fence_token
+    assert worker_b.attempt == worker_a.attempt + 1
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+        assert row.locked_by == worker_b.token
+        assert row.attempt == worker_b.attempt
+        assert row.locked_at == worker_b.locked_at
+        assert row.lease_expires_at == worker_b.lease_expires_at
 
 
 @pytest.mark.asyncio
@@ -4516,7 +4600,7 @@ async def test_worker_deliver_event_status_update_rejected_after_supersede(
 
 
 @pytest.mark.asyncio
-async def test_deliver_event_status_update_confirms_when_still_approved(
+async def test_accepted_then_confirmed_receipts_are_append_only(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,
     mock_xdr_client: httpx.AsyncClient,

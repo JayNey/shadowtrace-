@@ -14,7 +14,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -208,6 +208,77 @@ async def test_non_owner_write_rejected_and_logged(
     assert denied
     assert denied[-1].agent_name == "EvidenceAgent"
     assert denied[-1].key == "triage_result"
+
+
+@pytest.mark.asyncio
+async def test_memory_access_log_persists_beyond_projection_capacity(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    reader = wm.for_writer("RiskAgent")
+    with patch("app.services.working_memory.ACCESS_LOG_LIMIT", 2):
+        for _ in range(5):
+            await reader.read(event_id, "triage_result")
+    assert len(wm._access_logs[event_id]) == 2
+    assert len(await wm.get_access_log(event_id)) == 5
+
+
+@pytest.mark.asyncio
+async def test_denied_write_is_persisted_as_audit_record(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    writer = wm.for_writer("EvidenceAgent")
+    with pytest.raises(GuardrailViolationError):
+        await writer.write(event_id, "triage_result", {"forbidden": True})
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(orm.MemoryAccessAuditLog).where(
+                orm.MemoryAccessAuditLog.event_id == event_id,
+                orm.MemoryAccessAuditLog.allowed.is_(False),
+            )
+        )
+    assert row is not None and row.key == "triage_result"
+
+
+@pytest.mark.asyncio
+async def test_access_log_projection_eviction_does_not_delete_audit_history(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    await wm.for_writer("RiskAgent").read(event_id, "triage_result")
+    wm._access_logs.clear()
+    logs = await wm.get_access_log(event_id)
+    assert len(logs) == 1 and logs[0].op == "read"
+
+
+@pytest.mark.asyncio
+async def test_access_log_is_append_only(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    reader = wm.for_writer("RiskAgent")
+    await reader.read(event_id, "triage_result")
+    await reader.read(event_id, "triage_result")
+    async with session_factory() as session:
+        count = await session.scalar(
+            select(func.count()).select_from(orm.MemoryAccessAuditLog).where(
+                orm.MemoryAccessAuditLog.event_id == event_id
+            )
+        )
+    assert count == 2
 
 
 @pytest.mark.asyncio

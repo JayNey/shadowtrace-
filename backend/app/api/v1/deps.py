@@ -1213,7 +1213,10 @@ async def close_loop_bound_adapter_resources() -> None:
         adapter = _adapter_registry.get(name)
         closer = getattr(adapter, "aclose", None)
         if closer is not None:
-            await closer()
+            try:
+                await closer()
+            except Exception:
+                logger.warning("adapter close failed name=%s", name, exc_info=True)
 
 
 def reset_loop_bound_redis_resources() -> None:
