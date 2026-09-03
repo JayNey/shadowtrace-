@@ -84,6 +84,7 @@ from app.services.disposition_sync_service import (
     OUTBOX_SUPERSEDED_ERROR_CODE,
     DispositionSyncService,
     OutboxWorker,
+    WritebackLookupKind,
 )
 from tests.test_services._mock_xdr_test_helpers import (
     SCENARIO_INCIDENT_ID,
@@ -186,6 +187,9 @@ async def cleanup(
     async with session_factory() as session:
         async with session.begin():
             for table in (
+                orm.ApprovalPublication,
+                orm.ApprovalRecordORM,
+                orm.MemoryAccessAuditLog,
                 orm.EventAuditLog,
                 orm.EventContextJournal,
                 orm.EventContextFieldVersion,
@@ -216,6 +220,14 @@ def _locator(*, object_id: str = "88442201") -> SourceObjectLocator:
         source_kind=SourceObjectKind.INCIDENT,
         source_object_id=object_id,
     )
+
+
+def _settings_overlay(**overrides: object) -> Settings:
+    from app.core.config import Settings, get_settings
+
+    payload = get_settings().model_dump()
+    payload.update(overrides)
+    return Settings.model_construct(**payload)
 
 
 async def _seed_event_action_source(
@@ -250,18 +262,33 @@ async def _seed_event_action_source(
                         display_name="Mock XDR",
                     )
                 )
-            session.add(
-                orm.SourceObject(
-                    source_record_id=source_record_id,
-                    source_product="mock_xdr",
-                    source_tenant_id="tenant-demo",
-                    connector_id=connector_id,
-                    source_kind=SourceObjectKind.INCIDENT.value,
-                    source_object_id=object_id,
-                    current_concurrency_token=concurrency_token,
-                    next_outbox_sequence=0,
+            existing_object = await session.scalar(
+                select(orm.SourceObject).where(
+                    orm.SourceObject.source_product == "mock_xdr",
+                    orm.SourceObject.source_tenant_id == "tenant-demo",
+                    orm.SourceObject.connector_id == connector_id,
+                    orm.SourceObject.source_kind == SourceObjectKind.INCIDENT.value,
+                    orm.SourceObject.source_object_id == object_id,
                 )
             )
+            if existing_object is None:
+                session.add(
+                    orm.SourceObject(
+                        source_record_id=source_record_id,
+                        source_product="mock_xdr",
+                        source_tenant_id="tenant-demo",
+                        connector_id=connector_id,
+                        source_kind=SourceObjectKind.INCIDENT.value,
+                        source_object_id=object_id,
+                        current_concurrency_token=concurrency_token,
+                        next_outbox_sequence=0,
+                    )
+                )
+            else:
+                source_record_id = existing_object.source_record_id
+                concurrency_token = (
+                    existing_object.current_concurrency_token or concurrency_token
+                )
     async with session_factory() as session:
         async with session.begin():
             session.add(
@@ -319,6 +346,7 @@ def _sync_service(
     client: httpx.AsyncClient,
     *,
     resume: AsyncMock | None = None,
+    event_bus: Any | None = None,
 ) -> DispositionSyncService:
     registry = DispositionAdapterRegistry()
     adapter = MockXDRDispositionAdapter(
@@ -332,6 +360,7 @@ def _sync_service(
         context_store=store,
         adapter_registry=registry,
         outbound_guard=OutboundDispositionGuard(),
+        event_bus=event_bus,
         resume_investigation=resume,
     )
 
@@ -1181,10 +1210,15 @@ async def test_sync_lookup_and_resolve_skip_writeback_status_when_not_applicable
                 )
             )
 
-    await sync.update_writeback_status_from_lookup(
-        lookup_writeback_id,
-        WritebackStatus.CONFIRMED,
-    )
+    async with session_factory() as session:
+        async with session.begin():
+            lookup_outbox = await session.scalar(
+                select(orm.DispositionOutbox).where(
+                    orm.DispositionOutbox.writeback_id == lookup_writeback_id
+                )
+            )
+            assert lookup_outbox is not None
+            lookup_outbox.latest_writeback_status = WritebackStatus.CONFIRMED.value
     await sync.resolve_writeback(
         resolve_writeback_id,
         "manual_confirmed",
@@ -1887,15 +1921,7 @@ async def test_lookup_update_blocks_illegal_transition(
     mock_xdr_client: httpx.AsyncClient,
     cleanup: None,
 ) -> None:
-    """ISSUE-062 Blocker #1: FAILED → CONFIRMED without evidence_adjudication is rejected.
-
-    update_writeback_status_from_lookup must call validate_writeback_status_transition
-    before writing the provider-resolved status.  FAILED → CONFIRMED requires
-    evidence_adjudication=True, and while the lookup itself provides that evidence,
-    the validate call ensures the transition is structurally valid.  This test
-    constructs a FAILED outbox and attempts to update it to CONFIRMED via the
-    lookup path; the transition is allowed with evidence_adjudication=True.
-    """
+    """FAILED → CONFIRMED via fenced lookup is allowed with evidence_adjudication."""
     (
         event_id,
         action_id,
@@ -1904,37 +1930,28 @@ async def test_lookup_update_blocks_illegal_transition(
         concurrency_token,
     ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
     sync = _sync_service(session_factory, store, mock_xdr_client)
-    writeback_id = f"wbk-{_sfx()}"
-    outbox_id = f"obx-{_sfx()}"
-    async with session_factory() as session:
-        async with session.begin():
-            session.add(
-                orm.DispositionOutbox(
-                    outbox_id=outbox_id,
-                    writeback_id=writeback_id,
-                    disposition_id=f"disp-{_sfx()}",
-                    action_id=action_id,
-                    event_id=event_id,
-                    closure_cycle=1,
-                    source_record_id=source_record_id,
-                    source_locator_hash="hash",
-                    source_sequence=1,
-                    intent_kind="entity_action_submit",
-                    logical_slot="default",
-                    idempotency_key=f"idem-{_sfx()}",
-                    command_payload={
-                        "source_locator": locator.model_dump(mode="json"),
-                    },
-                    command_payload_sha256="deadbeef",
-                    delivery_status="delivered",
-                    latest_writeback_status=WritebackStatus.FAILED.value,
-                )
-            )
-    # FAILED → CONFIRMED with evidence_adjudication=True (provider-side
-    # lookup provides the evidence) should be accepted — the validate call
-    # must not throw.
-    await sync.update_writeback_status_from_lookup(writeback_id, WritebackStatus.CONFIRMED)
-    # Verify the status was actually written.
+    writeback_id, outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DELIVERED,
+        writeback_status=WritebackStatus.FAILED,
+    )
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+
+    async def _found(*_args: Any, **_kwargs: Any) -> DispositionReceipt:
+        return _complete_confirmed_receipt(
+            writeback_id,
+            evidence=ConfirmationEvidence.READBACK_VERIFIED,
+        )
+
+    adapter.lookup_submission = _found  # type: ignore[method-assign]
+    outcome = await sync.reconcile_writeback_lookup(writeback_id)
+    assert outcome.kind is WritebackLookupKind.FOUND
     async with session_factory() as session:
         outbox = await session.get(orm.DispositionOutbox, outbox_id)
         assert outbox is not None
@@ -1948,13 +1965,7 @@ async def test_lookup_update_blocks_illegal_transition_to_pending(
     mock_xdr_client: httpx.AsyncClient,
     cleanup: None,
 ) -> None:
-    """ISSUE-062 Blocker #1: FAILED → PENDING without adapter_allows_safe_retry is rejected.
-
-    Even when the status comes from a provider-side lookup, FAILED → PENDING
-    requires adapter_allows_safe_retry=True — a status query alone does not
-    prove the adapter can safely retry.  This test verifies the transition
-    guard is enforced.
-    """
+    """FAILED → PENDING from a lookup receipt still requires safe-retry proof."""
     (
         event_id,
         action_id,
@@ -1963,35 +1974,36 @@ async def test_lookup_update_blocks_illegal_transition_to_pending(
         concurrency_token,
     ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
     sync = _sync_service(session_factory, store, mock_xdr_client)
-    writeback_id = f"wbk-{_sfx()}"
-    async with session_factory() as session:
-        async with session.begin():
-            session.add(
-                orm.DispositionOutbox(
-                    outbox_id=f"obx-{_sfx()}",
-                    writeback_id=writeback_id,
-                    disposition_id=f"disp-{_sfx()}",
-                    action_id=action_id,
-                    event_id=event_id,
-                    closure_cycle=1,
-                    source_record_id=source_record_id,
-                    source_locator_hash="hash",
-                    source_sequence=1,
-                    intent_kind="entity_action_submit",
-                    logical_slot="default",
-                    idempotency_key=f"idem-{_sfx()}",
-                    command_payload={
-                        "source_locator": locator.model_dump(mode="json"),
-                    },
-                    command_payload_sha256="deadbeef",
-                    delivery_status="delivered",
-                    latest_writeback_status=WritebackStatus.FAILED.value,
-                )
-            )
-    # FAILED → PENDING requires adapter_allows_safe_retry=True, which the
-    # default validate_writeback_status_transition call does not provide.
+    writeback_id, _outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DELIVERED,
+        writeback_status=WritebackStatus.FAILED,
+    )
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    now = datetime.now(UTC)
+
+    async def _pending(*_args: Any, **_kwargs: Any) -> DispositionReceipt:
+        return DispositionReceipt(
+            writeback_id=writeback_id,
+            sequence=1,
+            disposition_id="disp-pending",
+            action_id=action_id,
+            source_record_id=source_record_id,
+            status=WritebackStatus.PENDING,
+            observed_at=now,
+            submitted_at=now,
+            simulated=True,
+        )
+
+    adapter.lookup_submission = _pending  # type: ignore[method-assign]
     with pytest.raises(InvalidStateTransitionError):
-        await sync.update_writeback_status_from_lookup(writeback_id, WritebackStatus.PENDING)
+        await sync.reconcile_writeback_lookup(writeback_id)
 
 
 def factory_build_min_command(
@@ -2460,12 +2472,10 @@ async def test_outbox_max_attempts_moves_to_dead_letter(
     cleanup: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.core.config import Settings, get_settings
-    from app.models.enums import OutboxDeliveryStatus
-    from app.services.disposition_sync_service import OutboxWorker
+    from app.core.config import get_settings
 
     monkeypatch.setattr(get_settings, "cache_clear", lambda: None)
-    settings = Settings.model_validate({**get_settings().model_dump(), "OUTBOX_MAX_ATTEMPTS": 2})
+    settings = _settings_overlay(outbox_max_attempts=2)
     monkeypatch.setattr("app.services.disposition_sync_service.get_settings", lambda: settings)
 
     (
@@ -2483,7 +2493,7 @@ async def test_outbox_max_attempts_moves_to_dead_letter(
         source_record_id=source_record_id,
         locator=locator,
         concurrency_token=concurrency_token,
-        attempt=1,
+        attempt=2,
     )
 
     await sync._mark_delivery_waiting_retry(outbox_id, error_code="delivery_failed")
@@ -2545,10 +2555,12 @@ async def test_delivery_exception_pauses_unknown_without_hot_retry(
                 )
             )
 
-    async def _fail_delivery(_outbox_id: str) -> None:
+    async def _fail_submit(_command: object) -> None:
         raise RuntimeError("simulated adapter failure")
 
-    monkeypatch.setattr(sync, "_deliver_outbox", _fail_delivery)
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    monkeypatch.setattr(adapter, "submit", _fail_submit)
     worker = OutboxWorker(sync)
     assert await worker.run_once(limit=1) == 1
 
@@ -2557,7 +2569,7 @@ async def test_delivery_exception_pauses_unknown_without_hot_retry(
         assert row is not None
         assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
         assert row.latest_writeback_status == WritebackStatus.UNKNOWN.value
-        assert row.attempt == 0
+        assert row.attempt == 1
         assert row.next_retry_at is None
         assert row.last_error_code == "delivery_outcome_unknown"
         assert row.last_error_detail is not None
@@ -2671,13 +2683,14 @@ async def test_guardrail_blocked_moves_to_dead_letter(
                 )
             )
 
-    async def _guardrail_block(_outbox_id: str) -> None:
+    async def _guardrail_block(command: object, context: object) -> None:
+        del command, context
         raise GuardrailViolationError(
             "blocked writeback field",
             error_code="guardrail_violation",
         )
 
-    monkeypatch.setattr(sync, "_deliver_outbox", _guardrail_block)
+    monkeypatch.setattr(sync._guard, "validate", _guardrail_block)
     worker = OutboxWorker(sync)
     assert await worker.run_once(limit=1) == 1
 
@@ -3418,12 +3431,10 @@ async def test_deliver_outbox_blocked_when_writeback_fence_closed_after_enqueue(
     monkeypatch.setattr(adapter, "submit", _tracked_submit)
 
     monkeypatch.setattr(get_settings, "cache_clear", lambda: None)
-    blocked_settings = Settings.model_validate(
-        {
-            **get_settings().model_dump(),
-            "DISPOSITION_MODE": "live_xdr",
-            "ALLOW_XDR_WRITEBACK": False,
-        }
+    blocked_settings = _settings_overlay(
+        disposition_mode="live_xdr",
+        disposition_adapter_kind="http",
+        allow_xdr_writeback=False,
     )
     monkeypatch.setattr(
         "app.services.writeback_side_effect_fence.get_settings",
@@ -3516,12 +3527,7 @@ async def test_deliver_outbox_sync_ready_blocked_when_writeback_fence_closed(
     monkeypatch.setattr(adapter, "submit", _tracked_submit)
 
     monkeypatch.setattr(get_settings, "cache_clear", lambda: None)
-    blocked_settings = Settings.model_validate(
-        {
-            **get_settings().model_dump(),
-            "BLOCK_LIVE_ACTION_EXECUTION": True,
-        }
-    )
+    blocked_settings = _settings_overlay(block_live_action_execution=True)
     monkeypatch.setattr(
         "app.services.writeback_side_effect_fence.get_settings",
         lambda: blocked_settings,
@@ -3599,12 +3605,7 @@ async def test_deliver_outbox_blocked_when_action_execution_frozen(
 
     monkeypatch.setattr(adapter, "submit", _tracked_submit)
     monkeypatch.setattr(get_settings, "cache_clear", lambda: None)
-    blocked_settings = Settings.model_validate(
-        {
-            **get_settings().model_dump(),
-            "BLOCK_LIVE_ACTION_EXECUTION": True,
-        }
-    )
+    blocked_settings = _settings_overlay(block_live_action_execution=True)
     monkeypatch.setattr(
         "app.services.writeback_side_effect_fence.get_settings",
         lambda: blocked_settings,
@@ -3683,12 +3684,10 @@ async def test_deliver_outbox_fence_blocks_from_waiting_retry(
 
     monkeypatch.setattr(adapter, "submit", _tracked_submit)
     monkeypatch.setattr(get_settings, "cache_clear", lambda: None)
-    blocked_settings = Settings.model_validate(
-        {
-            **get_settings().model_dump(),
-            "DISPOSITION_MODE": "live_xdr",
-            "ALLOW_XDR_WRITEBACK": False,
-        }
+    blocked_settings = _settings_overlay(
+        disposition_mode="live_xdr",
+        disposition_adapter_kind="http",
+        allow_xdr_writeback=False,
     )
     monkeypatch.setattr(
         "app.services.writeback_side_effect_fence.get_settings",
@@ -6110,7 +6109,9 @@ async def test_later_claim_in_batch_is_revalidated_before_lookup(
     first_seed = await _seed_event_action_source(session_factory, store, mock_xdr_client)
     second_seed = await _seed_event_action_source(session_factory, store, mock_xdr_client)
     sync = _sync_service(session_factory, store, mock_xdr_client)
-    for event_id, action_id, source_record_id, locator, token in (first_seed, second_seed):
+    for seq, (event_id, action_id, source_record_id, locator, token) in enumerate(
+        (first_seed, second_seed), start=1
+    ):
         async with session_factory() as session:
             async with session.begin():
                 session.add(
@@ -6123,7 +6124,7 @@ async def test_later_claim_in_batch_is_revalidated_before_lookup(
                         closure_cycle=1,
                         source_record_id=source_record_id,
                         source_locator_hash="hash",
-                        source_sequence=1,
+                        source_sequence=seq,
                         intent_kind="entity_action_submit",
                         logical_slot="default",
                         idempotency_key=f"idem-{_sfx()}",
@@ -6163,3 +6164,590 @@ async def test_later_claim_in_batch_is_revalidated_before_lookup(
         assert later_row is not None
         assert later_row.delivery_status == OutboxDeliveryStatus.PAUSED.value
         assert later_row.locked_by == later.token
+
+
+def _complete_confirmed_receipt(
+    writeback_id: str,
+    *,
+    evidence: ConfirmationEvidence,
+    simulated: bool = True,
+    provider_record_id: str = "rec-lookup-1",
+    provider_job_id: str = "job-lookup-1",
+) -> DispositionReceipt:
+    now = datetime.now(UTC)
+    return DispositionReceipt(
+        writeback_id=writeback_id,
+        sequence=1,
+        disposition_id="disp-lookup",
+        action_id="act-lookup",
+        source_record_id="src-lookup",
+        status=WritebackStatus.CONFIRMED,
+        confirmation_evidence=evidence,
+        provider_record_id=provider_record_id,
+        provider_job_id=provider_job_id,
+        observed_at=now,
+        submitted_at=now,
+        confirmed_at=now,
+        simulated=simulated,
+        target_results=[
+            TargetWritebackResult(
+                canonical_target="host:pc-1",
+                status=TargetWritebackStatus.CONFIRMED,
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_retry_lookup_releases_db_lock_before_provider_io(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id, outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DELIVERED,
+        writeback_status=WritebackStatus.UNKNOWN,
+    )
+    claimed = asyncio.Event()
+    proceed = asyncio.Event()
+    lock_acquired = asyncio.Event()
+    lookup_started = asyncio.Event()
+
+    async def _gate(_claim: object) -> None:
+        claimed.set()
+        await proceed.wait()
+
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_lookup = adapter.lookup_submission
+
+    async def _lookup(*args: Any, **kwargs: Any) -> Any:
+        lookup_started.set()
+        assert lock_acquired.is_set()
+        return await original_lookup(*args, **kwargs)
+
+    sync._after_operator_retry_claim = _gate  # type: ignore[method-assign]
+    adapter.lookup_submission = _lookup  # type: ignore[method-assign]
+    engine_b, factory_b = await _independent_session_factory()
+    task = asyncio.create_task(sync.retry_writeback(writeback_id, operator="operator-1"))
+    await asyncio.wait_for(claimed.wait(), timeout=5)
+    async with factory_b() as session:
+        async with session.begin():
+            await session.get(orm.SecurityEvent, event_id, with_for_update=True)
+            await session.get(orm.DispositionOutbox, outbox_id, with_for_update=True)
+            await session.get(orm.Action, action_id, with_for_update=True)
+            lock_acquired.set()
+    proceed.set()
+    await task
+    await asyncio.wait_for(lookup_started.wait(), timeout=5)
+    await engine_b.dispose()
+
+
+@pytest.mark.asyncio
+async def test_operator_retry_stale_lookup_claim_cannot_finalize_or_publish(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    bus = _PublishBus()
+    resume = AsyncMock()
+    sync = _sync_service(
+        session_factory, store, mock_xdr_client, resume=resume, event_bus=bus
+    )
+    writeback_id, outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DELIVERED,
+        writeback_status=WritebackStatus.UNKNOWN,
+    )
+    claimed = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def _gate(_claim: object) -> None:
+        claimed.set()
+        await proceed.wait()
+
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+
+    async def _found(*_args: Any, **_kwargs: Any) -> DispositionReceipt:
+        return _complete_confirmed_receipt(
+            writeback_id, evidence=ConfirmationEvidence.READBACK_VERIFIED
+        )
+
+    sync._after_operator_retry_claim = _gate  # type: ignore[method-assign]
+    adapter.lookup_submission = _found  # type: ignore[method-assign]
+    engine_b, factory_b = await _independent_session_factory()
+    task = asyncio.create_task(sync.retry_writeback(writeback_id, operator="operator-1"))
+    await asyncio.wait_for(claimed.wait(), timeout=5)
+    async with factory_b() as session:
+        async with session.begin():
+            await session.get(orm.SecurityEvent, event_id, with_for_update=True)
+            outbox = await session.get(
+                orm.DispositionOutbox, outbox_id, with_for_update=True
+            )
+            assert outbox is not None
+            outbox.locked_by = "stolen-token"
+            outbox.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    proceed.set()
+    with pytest.raises(WritebackConflictError, match="expired or stolen"):
+        await task
+    await engine_b.dispose()
+    resume.assert_not_called()
+    assert bus.events == []
+    async with session_factory() as session:
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == writeback_id
+                )
+            )
+        ).all()
+        outbox = await session.get(orm.DispositionOutbox, outbox_id)
+        assert receipts == []
+        assert outbox is not None
+        assert outbox.latest_writeback_status == WritebackStatus.UNKNOWN.value
+
+
+@pytest.mark.asyncio
+async def test_operator_retry_never_accepted_requeues_same_outbox_once(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id, outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DELIVERED,
+        writeback_status=WritebackStatus.UNKNOWN,
+    )
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    lookups = 0
+
+    async def _never(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal lookups
+        lookups += 1
+        return None
+
+    adapter.lookup_submission = _never  # type: ignore[method-assign]
+    first = await sync.retry_writeback(writeback_id, operator="operator-1")
+    second = await sync.retry_writeback(writeback_id, operator="operator-1")
+    assert first is WritebackStatus.PENDING
+    assert second is WritebackStatus.PENDING
+    assert lookups == 1
+    async with session_factory() as session:
+        rows = (
+            await session.scalars(
+                select(orm.DispositionOutbox).where(
+                    orm.DispositionOutbox.writeback_id == writeback_id
+                )
+            )
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].outbox_id == outbox_id
+        assert rows[0].delivery_status == OutboxDeliveryStatus.READY.value
+        assert rows[0].latest_writeback_status == WritebackStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_recovery_lookup_persists_complete_confirmed_receipt(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id, outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DELIVERED,
+        writeback_status=WritebackStatus.UNKNOWN,
+    )
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    expected = _complete_confirmed_receipt(
+        writeback_id,
+        evidence=ConfirmationEvidence.READBACK_VERIFIED,
+        simulated=True,
+    )
+
+    async def _found(*_args: Any, **_kwargs: Any) -> DispositionReceipt:
+        return expected
+
+    adapter.lookup_submission = _found  # type: ignore[method-assign]
+    outcome = await sync.reconcile_writeback_lookup(writeback_id)
+    assert outcome.kind is WritebackLookupKind.FOUND
+    assert outcome.receipt is not None
+    assert outcome.receipt.status is WritebackStatus.CONFIRMED
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(orm.DispositionReceipt)
+            .where(orm.DispositionReceipt.writeback_id == writeback_id)
+            .order_by(orm.DispositionReceipt.sequence.desc())
+        )
+        assert row is not None
+        assert row.status == WritebackStatus.CONFIRMED.value
+        assert row.confirmation_evidence == ConfirmationEvidence.READBACK_VERIFIED.value
+        assert row.simulated is True
+        assert row.provider_record_id == "rec-lookup-1"
+        assert row.provider_job_id == "job-lookup-1"
+        assert row.confirmed_at is not None
+        assert row.target_results
+
+
+@pytest.mark.asyncio
+async def test_recovery_lookup_preserves_confirmation_evidence_and_simulated(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id, _outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DELIVERED,
+        writeback_status=WritebackStatus.UNKNOWN,
+    )
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+
+    async def _found(*_args: Any, **_kwargs: Any) -> DispositionReceipt:
+        return _complete_confirmed_receipt(
+            writeback_id,
+            evidence=ConfirmationEvidence.MANUAL_CONFIRMED,
+            simulated=False,
+        )
+
+    adapter.lookup_submission = _found  # type: ignore[method-assign]
+    outcome = await sync.reconcile_writeback_lookup(writeback_id)
+    assert outcome.kind is WritebackLookupKind.FOUND
+    assert outcome.receipt is not None
+    assert outcome.receipt.confirmation_evidence is ConfirmationEvidence.MANUAL_CONFIRMED
+    assert outcome.receipt.simulated is False
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(orm.DispositionReceipt).where(
+                orm.DispositionReceipt.writeback_id == writeback_id
+            )
+        )
+        assert row is not None
+        assert row.confirmation_evidence == ConfirmationEvidence.MANUAL_CONFIRMED.value
+        assert row.simulated is False
+
+
+@pytest.mark.asyncio
+async def test_recovery_lookup_rejects_result_after_claim_expiry(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    bus = _PublishBus()
+    resume = AsyncMock()
+    sync = _sync_service(
+        session_factory, store, mock_xdr_client, resume=resume, event_bus=bus
+    )
+    writeback_id, outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DELIVERED,
+        writeback_status=WritebackStatus.UNKNOWN,
+    )
+    claimed = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def _gate(_claim: object) -> None:
+        claimed.set()
+        await proceed.wait()
+
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+
+    async def _found(*_args: Any, **_kwargs: Any) -> DispositionReceipt:
+        return _complete_confirmed_receipt(
+            writeback_id, evidence=ConfirmationEvidence.READBACK_VERIFIED
+        )
+
+    sync._after_recovery_lookup_claim = _gate  # type: ignore[method-assign]
+    adapter.lookup_submission = _found  # type: ignore[method-assign]
+    engine_b, factory_b = await _independent_session_factory()
+    task = asyncio.create_task(sync.reconcile_writeback_lookup(writeback_id))
+    await asyncio.wait_for(claimed.wait(), timeout=5)
+    async with factory_b() as session:
+        async with session.begin():
+            await session.get(orm.SecurityEvent, event_id, with_for_update=True)
+            outbox = await session.get(
+                orm.DispositionOutbox, outbox_id, with_for_update=True
+            )
+            assert outbox is not None
+            outbox.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    proceed.set()
+    outcome = await task
+    await engine_b.dispose()
+    assert outcome.kind is WritebackLookupKind.STALE_CLAIM
+    resume.assert_not_called()
+    assert bus.events == []
+    async with session_factory() as session:
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == writeback_id
+                )
+            )
+        ).all()
+        assert receipts == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_lookup_cannot_overwrite_newer_confirmed_receipt(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id, outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DELIVERED,
+        writeback_status=WritebackStatus.UNKNOWN,
+    )
+    claimed = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def _gate(_claim: object) -> None:
+        claimed.set()
+        await proceed.wait()
+
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+
+    async def _found(*_args: Any, **_kwargs: Any) -> DispositionReceipt:
+        return _complete_confirmed_receipt(
+            writeback_id,
+            evidence=ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
+            provider_record_id="rec-stale",
+        )
+
+    sync._after_recovery_lookup_claim = _gate  # type: ignore[method-assign]
+    adapter.lookup_submission = _found  # type: ignore[method-assign]
+    engine_b, factory_b = await _independent_session_factory()
+    task = asyncio.create_task(sync.reconcile_writeback_lookup(writeback_id))
+    await asyncio.wait_for(claimed.wait(), timeout=5)
+    now = datetime.now(UTC)
+    async with factory_b() as session:
+        async with session.begin():
+            await session.get(orm.SecurityEvent, event_id, with_for_update=True)
+            outbox = await session.get(
+                orm.DispositionOutbox, outbox_id, with_for_update=True
+            )
+            assert outbox is not None
+            session.add(
+                orm.DispositionReceipt(
+                    writeback_id=writeback_id,
+                    sequence=1,
+                    disposition_id=outbox.disposition_id,
+                    action_id=action_id,
+                    source_record_id=source_record_id,
+                    status=WritebackStatus.CONFIRMED.value,
+                    confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED.value,
+                    provider_record_id="rec-newer",
+                    provider_job_id="job-newer",
+                    observed_at=now,
+                    submitted_at=now,
+                    confirmed_at=now,
+                    simulated=True,
+                    target_results=[],
+                    raw_result={},
+                    truncated=False,
+                )
+            )
+            outbox.latest_writeback_status = WritebackStatus.CONFIRMED.value
+    proceed.set()
+    outcome = await task
+    await engine_b.dispose()
+    assert outcome.kind is WritebackLookupKind.ALREADY_CONFIRMED
+    async with session_factory() as session:
+        rows = (
+            await session.scalars(
+                select(orm.DispositionReceipt)
+                .where(orm.DispositionReceipt.writeback_id == writeback_id)
+                .order_by(orm.DispositionReceipt.sequence.asc())
+            )
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].provider_record_id == "rec-newer"
+        assert rows[0].confirmation_evidence == ConfirmationEvidence.READBACK_VERIFIED.value
+
+
+@pytest.mark.asyncio
+async def test_recovery_confirmed_without_strong_evidence_cannot_close(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    from app.models.workflow import (
+        ClosedGateActionView,
+        TerminalEventWritebackView,
+        TransitionContext,
+        validate_closed_gate,
+    )
+    from app.models.side_effect_convergence import SideEffectConvergenceSummary
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id, _outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DELIVERED,
+        writeback_status=WritebackStatus.UNKNOWN,
+    )
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+
+    async def _found(*_args: Any, **_kwargs: Any) -> DispositionReceipt:
+        return _complete_confirmed_receipt(
+            writeback_id, evidence=ConfirmationEvidence.ADAPTER_ACKNOWLEDGED
+        )
+
+    adapter.lookup_submission = _found  # type: ignore[method-assign]
+    outcome = await sync.reconcile_writeback_lookup(writeback_id)
+    assert outcome.kind is WritebackLookupKind.FOUND
+    assert outcome.receipt is not None
+    receipt = outcome.receipt
+    with pytest.raises(InvalidStateTransitionError, match="strong confirmation_evidence"):
+        validate_closed_gate(
+            TransitionContext(
+                disposition_policy=DispositionPolicy.REQUIRED,
+                disposition_is_mock=True,
+                report_exists=True,
+                applicable_required_actions=[
+                    ClosedGateActionView(
+                        action_id=action_id,
+                        action_category=ActionCategory.RESPONSE,
+                        writeback_required=True,
+                        writeback_applicable=True,
+                        writeback_readiness=WritebackReadiness.READY,
+                        writeback_status=WritebackStatus.CONFIRMED,
+                        has_command=True,
+                        all_required_intents_confirmed=True,
+                        tool_name="block_ip",
+                    )
+                ],
+                terminal_event_writeback=TerminalEventWritebackView(
+                    action_id=action_id,
+                    disposition_id=receipt.disposition_id,
+                    writeback_id=writeback_id,
+                    closure_cycle=1,
+                    approved_disposition=SourceDisposition.CONTAINED,
+                    actual_disposition=SourceDisposition.CONTAINED,
+                    receipt_status=receipt.status,
+                    plan_revision=1,
+                    simulated=receipt.simulated,
+                    confirmation_evidence=receipt.confirmation_evidence,
+                ),
+                current_plan_revision=1,
+                current_closure_cycle=1,
+                side_effect_convergence=SideEffectConvergenceSummary(
+                    event_id=event_id,
+                    current_plan_revision=1,
+                ),
+            )
+        )

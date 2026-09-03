@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from sqlalchemy import or_, select, text, update
+from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -66,6 +66,12 @@ SYSTEM_TIMEOUT_OPERATOR = "system_timeout"
 APPROVAL_ENGINE_OPERATOR = "ApprovalEngine"
 
 ResumeHook = Callable[[str], Awaitable[ResumeStatus | None]]
+
+_PUBLICATION_PENDING = "pending"
+_PUBLICATION_PUBLISHING = "publishing"
+_PUBLICATION_PUBLISHED = "published"
+_PUBLICATION_CANCELLED = "cancelled"
+_PUBLICATION_CLAIM_TTL = timedelta(minutes=5)
 
 _APPROVAL_TERMINAL = frozenset({ActionStatus.APPROVED, ActionStatus.REJECTED})
 # Lifecycle statuses reachable after a human approve (not the decision itself).
@@ -164,6 +170,37 @@ def _idempotency_binding_from_record(
         operation=operation,
         payload_hash=_approval_payload_hash(comment=record.comment),
     )
+
+
+def _stable_publication_id(action_id: str, approval_cycle: int) -> str:
+    digest = hashlib.sha256(f"{action_id}:{approval_cycle}".encode()).hexdigest()[:16]
+    return f"apb-{digest}"
+
+
+def _publication_claim_active(row: orm.ApprovalPublication, *, now: datetime) -> bool:
+    return (
+        row.status == _PUBLICATION_PUBLISHING
+        and row.claim_token is not None
+        and row.claim_expires_at is not None
+        and row.claim_expires_at > now
+    )
+
+
+def _deadline_iso(timeout_at: datetime | None) -> str | None:
+    if timeout_at is None:
+        return None
+    if timeout_at.tzinfo is None:
+        timeout_at = timeout_at.replace(tzinfo=UTC)
+    return timeout_at.isoformat()
+
+
+@dataclass(frozen=True)
+class _PublicationAdmission:
+    publication_id: str
+    claim_token: str
+    action: Action
+    deadline_iso: str | None
+    already_published: bool = False
 
 
 def _persist_idempotency_detail(
@@ -470,15 +507,39 @@ class ApprovalEngine:
     async def handle_timeout(self, action_id: str, approval_cycle: int) -> None:
         async with self._session_factory() as session:
             async with session.begin():
-                row = await self._load_action_row(session, action_id)
+                event_id = await session.scalar(
+                    select(orm.Action.event_id).where(orm.Action.action_id == action_id)
+                )
+                if event_id is not None:
+                    await session.get(orm.SecurityEvent, event_id, with_for_update=True)
+                row = await self._load_action_row(session, action_id, for_update=True)
                 if row is None:
                     return
                 if row.status != ActionStatus.WAITING_APPROVAL.value:
                     return
-                record = await self._load_record_row(session, action_id, approval_cycle)
+                record = await self._load_record_row(
+                    session, action_id, approval_cycle, for_update=True
+                )
                 if record is None or record.decided_at is not None:
                     return
+                if record.decision != ApprovalDecisionKind.REQUIRE_APPROVAL.value:
+                    return
                 now = datetime.now(UTC)
+                publication = await self._lock_publication_row(
+                    session, action_id, approval_cycle
+                )
+                if publication is not None and _publication_claim_active(
+                    publication, now=now
+                ):
+                    raise ApprovalDecisionConflictError(
+                        "approval_required publication in flight",
+                        details={
+                            "action_id": action_id,
+                            "approval_cycle": approval_cycle,
+                            "publication_status": publication.status,
+                        },
+                    )
+                self._cancel_unpublished_publication_row(publication)
                 record.operator = SYSTEM_TIMEOUT_OPERATOR
                 record.comment = "approval timeout"
                 record.decision = ApprovalDecisionKind.AUTO_REJECT.value
@@ -509,12 +570,39 @@ class ApprovalEngine:
                 )
             )
         ).all()
-        for record in rows:
-            action = await self._load_action_row(session, record.action_id, for_update=True)
+        for candidate in rows:
+            await session.get(
+                orm.SecurityEvent, candidate.event_id, with_for_update=True
+            )
+            action = await self._load_action_row(
+                session, candidate.action_id, for_update=True
+            )
             if action is None:
                 continue
             if action.status != ActionStatus.WAITING_APPROVAL.value:
                 continue
+            record = await self._load_record_row(
+                session,
+                candidate.action_id,
+                int(candidate.approval_cycle),
+                for_update=True,
+            )
+            if (
+                record is None
+                or record.decided_at is not None
+                or record.timeout_at is None
+                or record.timeout_at > now
+                or record.decision != ApprovalDecisionKind.REQUIRE_APPROVAL.value
+            ):
+                continue
+            publication = await self._lock_publication_row(
+                session, record.action_id, int(record.approval_cycle)
+            )
+            if publication is not None and _publication_claim_active(
+                publication, now=now
+            ):
+                continue
+            self._cancel_unpublished_publication_row(publication)
             record.operator = SYSTEM_TIMEOUT_OPERATOR
             record.comment = "approval timeout"
             record.decision = ApprovalDecisionKind.AUTO_REJECT.value
@@ -570,6 +658,10 @@ class ApprovalEngine:
             async with session.begin():
                 await self._upsert_record(session, action, decision, approval_cycle)
                 await self._set_action_status(session, action, ActionStatus.WAITING_APPROVAL)
+                await self._ensure_pending_publication_marker(
+                    session, action, approval_cycle
+                )
+                await self._after_waiting_approval_persist(session)
         await self._ensure_event_waiting_approval(action.event_id)
         await self._publish_approval_required(action, approval_cycle)
 
@@ -632,11 +724,16 @@ class ApprovalEngine:
                                 "reason": gate.reason,
                             },
                         )
-                    pending = await self._load_pending_record_row(session, action_id)
-                    if pending is not None and isinstance(pending.detail, dict):
-                        validate_approval_binding(action, pending.detail)
 
-                record = await self._load_pending_record_row(session, action_id)
+                record = await self._load_pending_record_row(
+                    session, action_id, for_update=True
+                )
+                if (
+                    target_status is ActionStatus.APPROVED
+                    and record is not None
+                    and isinstance(record.detail, dict)
+                ):
+                    validate_approval_binding(action, record.detail)
 
                 if record is not None and record.decided_at is not None:
                     raise ApprovalDecisionConflictError(
@@ -676,6 +773,23 @@ class ApprovalEngine:
                         "approval record missing",
                         details={"action_id": action_id},
                     )
+
+                now = datetime.now(UTC)
+                publication = await self._lock_publication_row(
+                    session, action_id, int(record.approval_cycle)
+                )
+                if publication is not None and _publication_claim_active(
+                    publication, now=now
+                ):
+                    raise ApprovalDecisionConflictError(
+                        "approval_required publication in flight",
+                        details={
+                            "action_id": action_id,
+                            "approval_cycle": int(record.approval_cycle),
+                            "publication_status": publication.status,
+                        },
+                    )
+                self._cancel_unpublished_publication_row(publication)
 
                 if decision_id:
                     conflict = await session.scalar(
@@ -798,7 +912,13 @@ class ApprovalEngine:
                 elif decision.decision is ApprovalDecisionKind.AUTO_REJECT:
                     await self._set_action_status(session, action, ActionStatus.REJECTED)
                 else:
-                    await self._set_action_status(session, action, ActionStatus.WAITING_APPROVAL)
+                    await self._set_action_status(
+                        session, action, ActionStatus.WAITING_APPROVAL
+                    )
+                    await self._ensure_pending_publication_marker(
+                        session, action, approval_cycle
+                    )
+                    await self._after_waiting_approval_persist(session)
         if decision.decision is ApprovalDecisionKind.REQUIRE_APPROVAL:
             await self._ensure_event_waiting_approval(action.event_id)
             await self._publish_approval_required(action, approval_cycle)
@@ -1057,28 +1177,24 @@ class ApprovalEngine:
         """
         async with self._session_factory() as session:
             action_row = await self._load_action_row(session, action_id)
-            record = await self._load_record_row(session, action_id, approval_cycle)
-            if action_row is None or record is None:
-                return False
-            if action_row.status != ActionStatus.WAITING_APPROVAL.value:
-                return False
-            if record.approval_cycle != approval_cycle:
-                return False
-            if record.decided_at is not None:
-                return False
-            if record.decision != ApprovalDecisionKind.REQUIRE_APPROVAL.value:
+            if action_row is None:
                 return False
             action = _action_from_orm(action_row)
         return await self._publish_approval_required(action, approval_cycle)
 
     async def scan_unpublished_approvals(self) -> int:
-        """Production scanner: republish pending/expired/cancelled markers."""
+        """Production scanner: recover pending/expired/cancelled/missing markers."""
         now = datetime.now(UTC)
         async with self._session_factory() as session:
-            rows = (
+            marker_rows = (
                 await session.scalars(
                     select(orm.ApprovalPublication).where(
-                        orm.ApprovalPublication.status.in_(("pending", "cancelled")),
+                        or_(
+                            orm.ApprovalPublication.status.in_(
+                                (_PUBLICATION_PENDING, _PUBLICATION_CANCELLED)
+                            ),
+                            orm.ApprovalPublication.status == _PUBLICATION_PUBLISHING,
+                        ),
                         or_(
                             orm.ApprovalPublication.claim_token.is_(None),
                             orm.ApprovalPublication.claim_expires_at.is_(None),
@@ -1087,7 +1203,35 @@ class ApprovalEngine:
                     )
                 )
             ).all()
-            targets = [(row.action_id, int(row.approval_cycle)) for row in rows]
+            targets = {
+                (row.action_id, int(row.approval_cycle)) for row in marker_rows
+            }
+            orphan_rows = (
+                await session.execute(
+                    select(
+                        ApprovalRecordORM.action_id,
+                        ApprovalRecordORM.approval_cycle,
+                    )
+                    .join(orm.Action, orm.Action.action_id == ApprovalRecordORM.action_id)
+                    .outerjoin(
+                        orm.ApprovalPublication,
+                        and_(
+                            orm.ApprovalPublication.action_id == ApprovalRecordORM.action_id,
+                            orm.ApprovalPublication.approval_cycle
+                            == ApprovalRecordORM.approval_cycle,
+                        ),
+                    )
+                    .where(
+                        ApprovalRecordORM.decided_at.is_(None),
+                        ApprovalRecordORM.decision
+                        == ApprovalDecisionKind.REQUIRE_APPROVAL.value,
+                        orm.Action.status == ActionStatus.WAITING_APPROVAL.value,
+                        orm.ApprovalPublication.publication_id.is_(None),
+                    )
+                )
+            ).all()
+            for action_id, approval_cycle in orphan_rows:
+                targets.add((action_id, int(approval_cycle)))
         recovered = 0
         for action_id, approval_cycle in targets:
             if await self.ensure_published(action_id, approval_cycle):
@@ -1100,79 +1244,189 @@ class ApprovalEngine:
         """Abandon a pending publication claim so recovery can retry."""
         async with self._session_factory() as session:
             async with session.begin():
-                row = await session.scalar(
-                    select(orm.ApprovalPublication)
-                    .where(
-                        orm.ApprovalPublication.action_id == action_id,
-                        orm.ApprovalPublication.approval_cycle == approval_cycle,
-                    )
-                    .with_for_update()
-                )
-                if row is None or row.status == "published":
-                    return
-                row.status = "cancelled"
-                row.claim_token = None
-                row.claim_expires_at = None
+                row = await self._lock_publication_row(session, action_id, approval_cycle)
+                self._cancel_unpublished_publication_row(row)
+
+    async def _after_waiting_approval_persist(self, session: AsyncSession) -> None:
+        """Test seam: runs inside the WAITING_APPROVAL + marker commit."""
+
+    async def _after_publication_admission(self, admission: _PublicationAdmission) -> None:
+        """Test seam: runs after publishing admission commits, before Redis."""
 
     async def _publish_approval_required(self, action: Action, approval_cycle: int) -> bool:
         if self._event_bus is None:
             return False
-        if await self._approval_was_published(action.action_id, approval_cycle):
-            key = f"{action.event_id}:{action.action_id}:{approval_cycle}"
+        admission = await self._admit_approval_publication(action, approval_cycle)
+        if admission is None:
+            return False
+        if admission.already_published:
+            key = f"{admission.action.event_id}:{admission.action.action_id}:{approval_cycle}"
             self._remember_approval_publication(key)
             return True
-        claim_token = uuid.uuid4().hex
-        publication_id = await self._claim_approval_publication(
-            action, approval_cycle, claim_token
-        )
-        if not publication_id:
-            return False
-        deadline = await self._approval_deadline_iso(action.action_id, approval_cycle)
+        await self._after_publication_admission(admission)
         payload = {
-            "action_id": action.action_id,
-            "action_name": action.action_name,
-            "publication_id": publication_id,
+            "action_id": admission.action.action_id,
+            "action_name": admission.action.action_name,
+            "publication_id": admission.publication_id,
             "approval_cycle": approval_cycle,
-            "summary": action.reason or action.action_name,
-            "target_count": 1 if action.target else 0,
+            "summary": admission.action.reason or admission.action.action_name,
+            "target_count": 1 if admission.action.target else 0,
             "impact_assessment": (
-                action.impact_assessment.model_dump(mode="json")
-                if action.impact_assessment is not None
+                admission.action.impact_assessment.model_dump(mode="json")
+                if admission.action.impact_assessment is not None
                 else None
             ),
         }
-        if deadline is not None:
-            payload["deadline"] = deadline
+        if admission.deadline_iso is not None:
+            payload["deadline"] = admission.deadline_iso
         try:
             published = await self._event_bus.publish_event(
-                action.event_id, "approval_required", payload
+                admission.action.event_id, "approval_required", payload
             )
         except Exception:
             await self._release_approval_publication_claim(
-                action.action_id, approval_cycle, claim_token
+                admission.action.action_id, approval_cycle, admission.claim_token
             )
             raise
         if published:
             await self._mark_approval_published(
-                action.action_id, approval_cycle, claim_token=claim_token
+                admission.action.action_id,
+                approval_cycle,
+                claim_token=admission.claim_token,
             )
-            key = f"{action.event_id}:{action.action_id}:{approval_cycle}"
+            key = (
+                f"{admission.action.event_id}:{admission.action.action_id}:{approval_cycle}"
+            )
             self._remember_approval_publication(key)
             return True
         await self._release_approval_publication_claim(
-            action.action_id, approval_cycle, claim_token
+            admission.action.action_id, approval_cycle, admission.claim_token
         )
         return False
 
-    async def _approval_deadline_iso(self, action_id: str, approval_cycle: int) -> str | None:
+    async def _ensure_pending_publication_marker(
+        self,
+        session: AsyncSession,
+        action: Action,
+        approval_cycle: int,
+    ) -> None:
+        await session.execute(
+            pg_insert(orm.ApprovalPublication)
+            .values(
+                publication_id=_stable_publication_id(action.action_id, approval_cycle),
+                event_id=action.event_id,
+                action_id=action.action_id,
+                approval_cycle=approval_cycle,
+                status=_PUBLICATION_PENDING,
+                claim_token=None,
+                claim_expires_at=None,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    orm.ApprovalPublication.event_id,
+                    orm.ApprovalPublication.action_id,
+                    orm.ApprovalPublication.approval_cycle,
+                ]
+            )
+        )
+
+    async def _admit_approval_publication(
+        self, action: Action, approval_cycle: int
+    ) -> _PublicationAdmission | None:
+        """Irrevocable publishing admission. Redis publish happens after commit."""
+        claim_token = uuid.uuid4().hex
+        now = datetime.now(UTC)
+        expiry = now + _PUBLICATION_CLAIM_TTL
         async with self._session_factory() as session:
-            record = await self._load_record_row(session, action_id, approval_cycle)
-            if record is None or record.timeout_at is None:
-                return None
-            timeout_at = record.timeout_at
-            if timeout_at.tzinfo is None:
-                timeout_at = timeout_at.replace(tzinfo=UTC)
-            return timeout_at.isoformat()
+            async with session.begin():
+                await session.get(
+                    orm.SecurityEvent, action.event_id, with_for_update=True
+                )
+                action_row = await self._load_action_row(
+                    session, action.action_id, for_update=True
+                )
+                if action_row is None:
+                    return None
+                if action_row.status != ActionStatus.WAITING_APPROVAL.value:
+                    return None
+                record = await self._load_record_row(
+                    session, action.action_id, approval_cycle, for_update=True
+                )
+                if record is None:
+                    return None
+                if int(record.approval_cycle) != approval_cycle:
+                    return None
+                if record.decided_at is not None:
+                    return None
+                if record.decision != ApprovalDecisionKind.REQUIRE_APPROVAL.value:
+                    return None
+                locked_action = _action_from_orm(action_row)
+                deadline = _deadline_iso(record.timeout_at)
+                row = await self._lock_publication_row(
+                    session, action.action_id, approval_cycle
+                )
+                if row is None:
+                    await self._ensure_pending_publication_marker(
+                        session, locked_action, approval_cycle
+                    )
+                    await session.flush()
+                    row = await self._lock_publication_row(
+                        session, action.action_id, approval_cycle
+                    )
+                if row is None:
+                    return None
+                if row.status == _PUBLICATION_PUBLISHED:
+                    return _PublicationAdmission(
+                        publication_id=str(row.publication_id),
+                        claim_token="",
+                        action=locked_action,
+                        deadline_iso=deadline,
+                        already_published=True,
+                    )
+                if _publication_claim_active(row, now=now):
+                    return None
+                if row.status not in {
+                    _PUBLICATION_PENDING,
+                    _PUBLICATION_CANCELLED,
+                    _PUBLICATION_PUBLISHING,
+                }:
+                    return None
+                row.status = _PUBLICATION_PUBLISHING
+                row.claim_token = claim_token
+                row.claim_expires_at = expiry
+                row.published_at = None
+                await session.flush()
+                return _PublicationAdmission(
+                    publication_id=str(row.publication_id),
+                    claim_token=claim_token,
+                    action=locked_action,
+                    deadline_iso=deadline,
+                )
+
+    async def _lock_publication_row(
+        self,
+        session: AsyncSession,
+        action_id: str,
+        approval_cycle: int,
+    ) -> orm.ApprovalPublication | None:
+        return await session.scalar(
+            select(orm.ApprovalPublication)
+            .where(
+                orm.ApprovalPublication.action_id == action_id,
+                orm.ApprovalPublication.approval_cycle == approval_cycle,
+            )
+            .with_for_update()
+        )
+
+    @staticmethod
+    def _cancel_unpublished_publication_row(
+        row: orm.ApprovalPublication | None,
+    ) -> None:
+        if row is None or row.status == _PUBLICATION_PUBLISHED:
+            return
+        row.status = _PUBLICATION_CANCELLED
+        row.claim_token = None
+        row.claim_expires_at = None
 
     async def _release_approval_publication_claim(
         self, action_id: str, approval_cycle: int, claim_token: str
@@ -1184,93 +1438,22 @@ class ApprovalEngine:
                     .where(
                         orm.ApprovalPublication.action_id == action_id,
                         orm.ApprovalPublication.approval_cycle == approval_cycle,
-                        orm.ApprovalPublication.status == "pending",
+                        orm.ApprovalPublication.status == _PUBLICATION_PUBLISHING,
                         orm.ApprovalPublication.claim_token == claim_token,
                     )
-                    .values(claim_token=None, claim_expires_at=None)
-                )
-
-    async def _claim_approval_publication(
-        self, action: Action, approval_cycle: int, claim_token: str
-    ) -> str | None:
-        """Atomically claim one publication slot, with crash-retryable expiry."""
-        now = datetime.now(UTC)
-        expiry = now + timedelta(minutes=5)
-        async with self._session_factory() as session:
-            async with session.begin():
-                inserted = await session.execute(
-                    pg_insert(orm.ApprovalPublication)
                     .values(
-                        publication_id=uuid.uuid4().hex,
-                        event_id=action.event_id,
-                        action_id=action.action_id,
-                        approval_cycle=approval_cycle,
-                        status="pending",
-                        claim_token=claim_token,
-                        claim_expires_at=expiry,
+                        status=_PUBLICATION_PENDING,
+                        claim_token=None,
+                        claim_expires_at=None,
                     )
-                    .on_conflict_do_nothing(
-                        index_elements=[
-                            orm.ApprovalPublication.event_id,
-                            orm.ApprovalPublication.action_id,
-                            orm.ApprovalPublication.approval_cycle,
-                        ]
-                    )
-                    .returning(orm.ApprovalPublication.publication_id)
                 )
-                inserted_id = inserted.scalar_one_or_none()
-                if inserted_id is not None:
-                    return str(inserted_id)
-                row = await session.scalar(
-                    select(orm.ApprovalPublication)
-                    .where(
-                        orm.ApprovalPublication.event_id == action.event_id,
-                        orm.ApprovalPublication.action_id == action.action_id,
-                        orm.ApprovalPublication.approval_cycle == approval_cycle,
-                    )
-                    .with_for_update()
-                )
-                if row is None:
-                    return None
-                if row.status == "published":
-                    return None
-                if (
-                    row.status not in {"pending", "cancelled"}
-                ):
-                    return None
-                if (
-                    row.claim_token is not None
-                    and row.claim_expires_at is not None
-                    and row.claim_expires_at > now
-                ):
-                    return None
-                row.status = "pending"
-                row.claim_token = claim_token
-                row.claim_expires_at = expiry
-                await session.flush()
-                return str(row.publication_id)
 
     def _remember_approval_publication(self, key: str) -> None:
-        """Remember publications deterministically; terminal cycles are pruned by key."""
+        """Diagnostic cache only; correctness comes from the durable marker."""
         self._approval_required_published.pop(key, None)
         if len(self._approval_required_published) >= self._approval_publish_cache_limit:
             self._approval_required_published.popitem(last=False)
         self._approval_required_published[key] = None
-
-    async def _approval_was_published(self, action_id: str, approval_cycle: int) -> bool:
-        async with self._session_factory() as session:
-            publication = await session.scalar(
-                select(orm.ApprovalPublication)
-                .where(
-                    orm.ApprovalPublication.action_id == action_id,
-                    orm.ApprovalPublication.approval_cycle == approval_cycle,
-                    orm.ApprovalPublication.status == "published",
-                )
-                .limit(1)
-            )
-            if publication is not None:
-                return True
-            return False
 
     async def _mark_approval_published(
         self, action_id: str, approval_cycle: int, *, claim_token: str | None = None
@@ -1283,10 +1466,11 @@ class ApprovalEngine:
                             orm.ApprovalPublication.action_id == action_id,
                             orm.ApprovalPublication.approval_cycle == approval_cycle,
                             orm.ApprovalPublication.claim_token == claim_token,
+                            orm.ApprovalPublication.status == _PUBLICATION_PUBLISHING,
                         )
                     )
                     if publication is not None:
-                        publication.status = "published"
+                        publication.status = _PUBLICATION_PUBLISHED
                         publication.published_at = datetime.now(UTC)
                         publication.claim_expires_at = None
                         await session.flush()
@@ -1344,35 +1528,37 @@ class ApprovalEngine:
         self,
         session: AsyncSession,
         action_id: str,
+        *,
+        for_update: bool = False,
     ) -> ApprovalRecordORM | None:
-        return cast(
-            ApprovalRecordORM | None,
-            await session.scalar(
-                select(ApprovalRecordORM)
-                .where(
-                    ApprovalRecordORM.action_id == action_id,
-                    ApprovalRecordORM.decided_at.is_(None),
-                )
-                .order_by(ApprovalRecordORM.approval_cycle.desc())
-                .limit(1)
-            ),
+        stmt = (
+            select(ApprovalRecordORM)
+            .where(
+                ApprovalRecordORM.action_id == action_id,
+                ApprovalRecordORM.decided_at.is_(None),
+            )
+            .order_by(ApprovalRecordORM.approval_cycle.desc())
+            .limit(1)
         )
+        if for_update:
+            stmt = stmt.with_for_update()
+        return cast(ApprovalRecordORM | None, await session.scalar(stmt))
 
     async def _load_record_row(
         self,
         session: AsyncSession,
         action_id: str,
         approval_cycle: int,
+        *,
+        for_update: bool = False,
     ) -> ApprovalRecordORM | None:
-        return cast(
-            ApprovalRecordORM | None,
-            await session.scalar(
-                select(ApprovalRecordORM).where(
-                    ApprovalRecordORM.action_id == action_id,
-                    ApprovalRecordORM.approval_cycle == approval_cycle,
-                )
-            ),
+        stmt = select(ApprovalRecordORM).where(
+            ApprovalRecordORM.action_id == action_id,
+            ApprovalRecordORM.approval_cycle == approval_cycle,
         )
+        if for_update:
+            stmt = stmt.with_for_update()
+        return cast(ApprovalRecordORM | None, await session.scalar(stmt))
 
     async def _load_action_row(
         self,

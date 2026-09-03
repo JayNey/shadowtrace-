@@ -396,7 +396,7 @@ async def test_rule_path_wm_write() -> None:
     svc = StorylineService(working_memory=wm)
     await svc.generate(ctx)
 
-    assert wm._for_writer_calls == ["StorylineService"]
+    assert wm._for_writer_calls == []
     stored = await wm.read("evt-wm-001", "storyline")
     assert stored is not None
     assert stored["event_id"] == "evt-wm-001"

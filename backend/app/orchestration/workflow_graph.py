@@ -94,7 +94,6 @@ from app.services.report_input_builder import (
 )
 from app.services.state_machine_service import StateMachineService
 from app.services.tenant_resolution import resolve_tenant_id
-from app.services.working_memory import WorkingMemory
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +242,7 @@ class _DispositionSyncPort(Protocol):
         comment: str,
     ) -> Any: ...
 
-    async def lookup_writeback_status(
+    async def reconcile_writeback_lookup(
         self,
         writeback_id: str,
     ) -> Any: ...
@@ -1510,19 +1509,14 @@ def build_investigation_graph(
         store = cast(EventContextStore, services["context_store"])
         context = await store.get_full_context(state["event_id"])
         occurred_at = context.event.occurred_at if context.event is not None else None
-        wm_root = services.get("working_memory")
-        fp_wm = (
-            cast(WorkingMemory, wm_root).for_writer("PostEvidenceFpAdjudicator")
-            if wm_root is not None
-            else None
-        )
+        wm_fp = services.get("fp_adjudicator_memory")
         result = await run_post_evidence_fp_adjudication(
             event_id=state["event_id"],
             evidence_output=evidence,
             triage_result=triage,
             source_snapshot=state.get("source_snapshot") or context.source_snapshot,
             occurred_at=occurred_at,
-            working_memory=fp_wm,
+            working_memory=wm_fp,
             knowledge_store=services.get("knowledge_store"),
         )
         return _patch_state(

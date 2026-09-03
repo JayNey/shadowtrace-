@@ -37,7 +37,9 @@ from app.services.working_memory import (
     FIELD_OWNERSHIP,
     SCRATCHPAD_LIMIT,
     WRITER_ALIASES,
+    BoundWorkingMemory,
     WorkingMemory,
+    WriterCapability,
 )
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -499,6 +501,68 @@ async def test_redis_unavailable_marks_degraded_flag_once(
 
     flags = await store.get(event_id, "degraded_flags")
     assert "redis_context_unavailable=true" in flags
+
+
+@pytest.mark.asyncio
+async def test_bound_working_memory_has_no_cross_owner_binding_api(
+    wm: WorkingMemory,
+) -> None:
+    bound = wm.for_writer("TriageAgent")
+    assert not hasattr(BoundWorkingMemory, "for_writer")
+    assert not hasattr(bound, "for_writer")
+
+
+@pytest.mark.asyncio
+async def test_bound_working_memory_cannot_mint_cross_owner_capability(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    bound = wm.for_writer("TriageAgent")
+    forged = WriterCapability(owner="RiskAgent", _nonce=object())
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        await wm.write(event_id, "risk_assessment", {"score": 1}, writer=forged)
+    assert exc_info.value.error_code == "working_memory_unauthorized_write"
+    with pytest.raises(GuardrailViolationError) as bound_exc:
+        await bound.write(event_id, "risk_assessment", {"score": 1})
+    assert bound_exc.value.error_code == "working_memory_unauthorized_write"
+
+
+@pytest.mark.asyncio
+async def test_released_capability_cannot_write(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    bound = wm.for_writer("TriageAgent")
+    bound.release()
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        await bound.write(event_id, "triage_result", {"ok": True})
+    assert exc_info.value.error_code == "working_memory_unauthorized_write"
+
+
+@pytest.mark.asyncio
+async def test_live_binding_survives_idle_ttl_and_capacity_pressure(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    live = wm.for_writer("TriageAgent")
+    with (
+        patch("app.services.working_memory.CAPABILITY_LIMIT", 1),
+        patch("app.services.working_memory.CAPABILITY_TTL_SECONDS", 0),
+        patch("app.services.working_memory.time.monotonic", return_value=10_000.0),
+    ):
+        with pytest.raises(GuardrailViolationError):
+            wm.for_writer("RiskAgent")
+        await live.write(event_id, "triage_result", {"ok": True})
+    assert await store.get(event_id, "triage_result") == {"ok": True}
 
 
 @pytest.mark.asyncio

@@ -225,18 +225,26 @@ async def test_approval_publication_uses_durable_cycle_marker_after_cache_evicti
         target="host-1",
         impact_assessment=None,
     )
+    from app.services.approval_engine import _PublicationAdmission
+
+    already = _PublicationAdmission(
+        publication_id="pub-old",
+        claim_token="",
+        action=action,  # type: ignore[arg-type]
+        deadline_iso=None,
+        already_published=True,
+    )
+    fresh = _PublicationAdmission(
+        publication_id="a" * 32,
+        claim_token="tok",
+        action=action,  # type: ignore[arg-type]
+        deadline_iso="2099-01-01T00:00:00+00:00",
+        already_published=False,
+    )
     with patch.object(
         engine,
-        "_approval_was_published",
-        AsyncMock(side_effect=[True, False]),
-    ), patch.object(
-        engine,
-        "_claim_approval_publication",
-        AsyncMock(return_value="a" * 32),
-    ), patch.object(
-        engine,
-        "_approval_deadline_iso",
-        AsyncMock(return_value="2099-01-01T00:00:00+00:00"),
+        "_admit_approval_publication",
+        AsyncMock(side_effect=[already, fresh]),
     ), patch.object(engine, "_mark_approval_published", AsyncMock()) as mark:
         await engine._publish_approval_required(action, 0)  # type: ignore[arg-type]
         bus.publish_event.assert_not_awaited()

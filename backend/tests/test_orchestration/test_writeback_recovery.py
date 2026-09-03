@@ -36,6 +36,10 @@ from app.orchestration.writeback_recovery_handler import (
     resolve_writeback_statuses,
     writeback_recovery_graph_node,
 )
+from app.services.disposition_sync_service import (
+    WritebackLookupKind,
+    WritebackLookupOutcome,
+)
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -141,17 +145,22 @@ class FakeDispositionSync:
         self.resolutions.append((writeback_id, resolution, principal, comment))
         return SimpleNamespace(writeback_id=writeback_id)
 
-    async def lookup_writeback_status(self, writeback_id: str) -> WritebackStatus | None:
+    async def reconcile_writeback_lookup(self, writeback_id: str) -> WritebackLookupOutcome:
         self.lookups.append(writeback_id)
         if self._lookup_raises is not None:
             raise self._lookup_raises
-        return self._lookup_result
-
-    async def update_writeback_status_from_lookup(
-        self, writeback_id: str, status: WritebackStatus
-    ) -> None:
-        """Persist lookup-resolved status to the outbox (best-effort write)."""
-        self._lookup_result = status
+        status = self._lookup_result
+        if status is None:
+            return WritebackLookupOutcome(kind=WritebackLookupKind.NOT_FOUND)
+        if status is WritebackStatus.UNKNOWN:
+            return WritebackLookupOutcome(
+                kind=WritebackLookupKind.NOT_FOUND,
+                writeback_status=WritebackStatus.UNKNOWN,
+            )
+        return WritebackLookupOutcome(
+            kind=WritebackLookupKind.FOUND,
+            writeback_status=status,
+        )
 
 
 # ── Tests: WritebackRecoveryHandler.evaluate ─────────────────────────────────

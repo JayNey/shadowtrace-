@@ -602,7 +602,7 @@ async def _build_production_investigation_graph(
         "degraded_flags": stack["degraded_flags"],
         "context_store": stack["context_store"],
         "session_factory": stack["session_factory"],
-        "working_memory": stack["wm"],
+        "fp_adjudicator_memory": wm.for_writer("PostEvidenceFpAdjudicator"),
         "approval_engine": await get_approval_engine(),
         "action_execution": await get_action_execution(),
         "disposition_sync": await get_disposition_sync(),
@@ -842,7 +842,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         recovery_interval_seconds=settings.budget_redis_recovery_interval_seconds,
     )
     output_guard = OutputGuard(
-        violation_writer=WorkingMemoryGuardViolationWriter(wm),
+        violation_writer=WorkingMemoryGuardViolationWriter(wm.for_writer("OutputGuard")),
     )
     publication_service = AgentPublicationService(
         event_service,
@@ -937,6 +937,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         trace_service=trace_service,
         event_bus=event_bus,
         fp_matcher=fp_matcher,
+        fp_matcher_memory=wm.for_writer("FalsePositiveMatcher"),
         degraded_flags=_get_degraded_flags(),
         event_service=event_service,
     )
@@ -1042,7 +1043,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
     from app.services.output_quality_evaluator import build_output_quality_evaluator
 
     output_quality_evaluator = build_output_quality_evaluator(
-        working_memory=wm,
+        working_memory=wm.for_writer("OutputQualityEvaluator"),
         llm_client=llm_client,
         judge_enabled=settings.quality_judge_enabled,
         degraded_flags=_get_degraded_flags(),
@@ -1107,7 +1108,7 @@ async def get_pipeline() -> Any:
             report_agent=stack["report"],
             context_store=stack["context_store"],
             session_factory=stack["session_factory"],
-            working_memory=stack["wm"],
+            fp_adjudicator_memory=stack["wm"].for_writer("PostEvidenceFpAdjudicator"),
             degraded_flags=stack["degraded_flags"],
             settings=stack["settings"],
             memory_agent=stack["memory"],

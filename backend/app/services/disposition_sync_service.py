@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -29,6 +30,7 @@ from app.core.errors import (
     AdapterNotFoundError,
     DependencyUnavailableError,
     EventNotFoundError,
+    GuardrailViolationError,
     ValidationError,
     WritebackConflictError,
 )
@@ -48,6 +50,7 @@ from app.models.disposition import (
     DispositionOutboxRecord,
     DispositionReceipt,
     EntityEffectCompletion,
+    TargetWritebackResult,
     parse_entity_effect_target,
 )
 from app.models.enums import (
@@ -181,6 +184,25 @@ class _OperatorRetryAction(StrEnum):
     BLOCKED = "blocked"
 
 
+class WritebackLookupKind(StrEnum):
+    FOUND = "found"
+    NOT_FOUND = "not_found"
+    DEGRADED = "degraded"
+    STALE_CLAIM = "stale_claim"
+    ALREADY_CONFIRMED = "already_confirmed"
+    BUSY = "busy"
+
+
+@dataclass(frozen=True)
+class WritebackLookupOutcome:
+    """Structured, fenced lookup result. Never a bare WritebackStatus."""
+
+    kind: WritebackLookupKind
+    receipt: DispositionReceipt | None = None
+    writeback_status: WritebackStatus | None = None
+    reason: str = ""
+
+
 @dataclass(frozen=True)
 class _OperatorRetryDecision:
     action: _OperatorRetryAction
@@ -189,6 +211,17 @@ class _OperatorRetryDecision:
     receipt: DispositionReceipt | None = None
     lookup_never_accepted: bool = False
     adapter_allows_safe_retry: bool = False
+
+
+@dataclass(frozen=True)
+class _OperatorRetryClaim:
+    paused: _PausedLookupClaim
+    operator: str
+    operation_id: str | None
+    reason: str | None
+    from_delivery: str
+    latest: WritebackStatus | None
+    last_error_code: str | None
 
 
 class _NullResumeHook:
@@ -475,9 +508,6 @@ class DispositionSyncService:
         operation_id: str | None = None,
         reason: str | None = None,
     ) -> WritebackStatus:
-        result: WritebackStatus
-        sync_event_id: str | None = None
-        blocked_error: WritebackConflictError | None = None
         if operation_id is not None and not _OPERATOR_RETRY_OPERATION_ID_RE.fullmatch(
             operation_id,
         ):
@@ -485,381 +515,38 @@ class DispositionSyncService:
                 "operation_id must be 1-128 chars of [A-Za-z0-9._:-]",
                 details={"operation_id": operation_id},
             )
-        async with self._session_factory() as session:
-            async with session.begin():
-                outbox = await session.scalar(
-                    select(orm.DispositionOutbox)
-                    .where(orm.DispositionOutbox.writeback_id == writeback_id)
-                    .with_for_update()
-                )
-                if outbox is None:
-                    raise EventNotFoundError(
-                        f"writeback not found: {writeback_id}",
-                        details={"writeback_id": writeback_id},
-                    )
+        claim, immediate = await self._claim_operator_retry(
+            writeback_id,
+            operator=operator,
+            operation_id=operation_id,
+            reason=reason,
+        )
+        if immediate is not None:
+            return immediate
+        assert claim is not None
+        await self._after_operator_retry_claim(claim)
+        decision = await self._evaluate_operator_retry_lookup(
+            adapter=claim.paused.adapter,
+            command=claim.paused.command,
+            provider_job_id=claim.paused.provider_job_id,
+            last_error_code=claim.last_error_code,
+            writeback_id=writeback_id,
+        )
+        return await self._finalize_operator_retry(claim, decision)
 
-                delivery = OutboxDeliveryStatus(outbox.delivery_status)
-                latest = (
-                    WritebackStatus(outbox.latest_writeback_status)
-                    if outbox.latest_writeback_status
-                    else None
-                )
+    async def reconcile_writeback_lookup(self, writeback_id: str) -> WritebackLookupOutcome:
+        """Claim, lookup outside the DB transaction, then fence-finalize.
 
-                # CONFIRMED is forever denied — check before operation replay.
-                if operator_retry_writeback_status_blocked(latest):
-                    raise WritebackConflictError(
-                        "CONFIRMED writeback cannot be retried",
-                        details={
-                            "writeback_id": writeback_id,
-                            "status": latest.value if latest else None,
-                        },
-                    )
-
-                if outbox.superseded_by_disposition_id is not None:
-                    raise WritebackConflictError(
-                        "superseded outbox head cannot be retried",
-                        details={
-                            "writeback_id": writeback_id,
-                            "superseded_by_disposition_id": (outbox.superseded_by_disposition_id),
-                        },
-                    )
-
-                if operation_id is not None:
-                    replay_status = await self._find_operator_retry_replay(
-                        session,
-                        event_id=outbox.event_id,
-                        writeback_id=writeback_id,
-                        operation_id=operation_id,
-                    )
-                    if replay_status is not None:
-                        return replay_status
-
-                if latest is WritebackStatus.UNKNOWN and delivery is OutboxDeliveryStatus.DELIVERED:
-                    raise WritebackConflictError(
-                        "UNKNOWN writeback must be verified before retry",
-                        details={"writeback_id": writeback_id, "status": latest.value},
-                    )
-
-                if delivery in {
-                    OutboxDeliveryStatus.LEASED,
-                    OutboxDeliveryStatus.WAITING_RETRY,
-                }:
-                    raise WritebackConflictError(
-                        "outbox delivery in progress; operator retry not allowed",
-                        details={
-                            "writeback_id": writeback_id,
-                            "delivery_status": delivery.value,
-                        },
-                    )
-
-                if delivery is OutboxDeliveryStatus.READY:
-                    result = WritebackStatus.PENDING
-                    await self._record_operator_retry_audit(
-                        session,
-                        outbox,
-                        operator=operator,
-                        operation_id=operation_id,
-                        reason=reason,
-                        audit_reason="operator_retry:idempotent-ready",
-                        from_delivery=delivery.value,
-                        to_delivery=delivery.value,
-                        result_status=result,
-                    )
-                    record_writeback_retry(adapter=self._adapter_label(outbox))
-                else:
-                    if not delivery_status_eligible_for_operator_retry_pause(delivery, latest):
-                        raise WritebackConflictError(
-                            "illegal outbox state for operator retry",
-                            details={
-                                "writeback_id": writeback_id,
-                                "delivery_status": delivery.value,
-                                "writeback_status": latest.value if latest else None,
-                            },
-                        )
-
-                    paused_from = delivery.value
-                    if delivery in {
-                        OutboxDeliveryStatus.DEAD_LETTER,
-                        OutboxDeliveryStatus.DELIVERED,
-                    }:
-                        validate_outbox_delivery_transition(
-                            delivery,
-                            OutboxDeliveryStatus.PAUSED,
-                            operator_retry_pause=True,
-                        )
-                        outbox.delivery_status = OutboxDeliveryStatus.PAUSED.value
-                        outbox.locked_by = None
-                        outbox.locked_at = None
-                        outbox.lease_expires_at = None
-                        outbox.next_retry_at = None
-                        outbox.updated_at = datetime.now(UTC)
-                        session.add(
-                            orm.EventAuditLog(
-                                event_id=outbox.event_id,
-                                from_status=paused_from,
-                                to_status=OutboxDeliveryStatus.PAUSED.value,
-                                operator=operator,
-                                reason=self._operator_retry_pause_reason(reason),
-                            )
-                        )
-                        delivery = OutboxDeliveryStatus.PAUSED
-
-                    decision = await self._evaluate_operator_retry_lookup(session, outbox)
-                    if decision.action is _OperatorRetryAction.RECONCILE_TERMINAL:
-                        assert decision.target_status is not None
-                        assert decision.receipt is not None
-                        validate_outbox_delivery_transition(
-                            OutboxDeliveryStatus.PAUSED,
-                            OutboxDeliveryStatus.DELIVERED,
-                            lookup_confirmed_submission=True,
-                        )
-                        await self._append_receipt(session, outbox, receipt=decision.receipt)
-                        outbox.latest_writeback_status = decision.target_status.value
-                        outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
-                        outbox.delivered_at = outbox.delivered_at or datetime.now(UTC)
-                        outbox.updated_at = datetime.now(UTC)
-                        action = await session.get(
-                            orm.Action, outbox.action_id, with_for_update=True
-                        )
-                        _mirror_writeback_status_to_action(action, decision.target_status.value)
-                        await self._record_operator_retry_audit(
-                            session,
-                            outbox,
-                            operator=operator,
-                            operation_id=operation_id,
-                            reason=reason,
-                            audit_reason=(
-                                f"operator_retry:reconcile:{decision.target_status.value}"
-                            ),
-                            from_delivery=OutboxDeliveryStatus.PAUSED.value,
-                            to_delivery=OutboxDeliveryStatus.DELIVERED.value,
-                            result_status=decision.target_status,
-                        )
-                        record_writeback(
-                            status=decision.target_status.value,
-                            adapter=self._adapter_label(outbox),
-                        )
-                        result = decision.target_status
-                        sync_event_id = outbox.event_id
-                    elif decision.action is _OperatorRetryAction.BLOCKED:
-                        # Commit PAUSED gate + audit, then raise 409 outside the txn.
-                        # Do not attach operation_id — a blocked attempt must not replay
-                        # as a successful WritebackStatus response.
-                        await self._record_operator_retry_audit(
-                            session,
-                            outbox,
-                            operator=operator,
-                            operation_id=None,
-                            reason=reason,
-                            audit_reason=(f"operator_retry:blocked:{decision.reason or 'lookup'}"),
-                            from_delivery=OutboxDeliveryStatus.PAUSED.value,
-                            to_delivery=OutboxDeliveryStatus.PAUSED.value,
-                            result_status=latest or WritebackStatus.FAILED,
-                        )
-                        blocked_error = WritebackConflictError(
-                            decision.reason or "operator retry blocked after lookup",
-                            details={
-                                "writeback_id": writeback_id,
-                                "delivery_status": OutboxDeliveryStatus.PAUSED.value,
-                            },
-                        )
-                        result = latest or WritebackStatus.FAILED
-                    else:
-                        current_writeback = latest or WritebackStatus.FAILED
-                        target_writeback = WritebackStatus.PENDING
-                        validate_writeback_status_transition(
-                            current_writeback,
-                            target_writeback,
-                            lookup_never_accepted=decision.lookup_never_accepted,
-                            adapter_allows_safe_retry=decision.adapter_allows_safe_retry,
-                        )
-                        validate_outbox_delivery_transition(
-                            OutboxDeliveryStatus.PAUSED,
-                            OutboxDeliveryStatus.READY,
-                        )
-                        outbox.delivery_status = OutboxDeliveryStatus.READY.value
-                        outbox.latest_writeback_status = target_writeback.value
-                        outbox.attempt = 0
-                        outbox.locked_by = None
-                        outbox.locked_at = None
-                        outbox.lease_expires_at = None
-                        outbox.next_retry_at = None
-                        outbox.updated_at = datetime.now(UTC)
-                        action = await session.get(
-                            orm.Action, outbox.action_id, with_for_update=True
-                        )
-                        _mirror_writeback_status_to_action(action, target_writeback.value)
-                        await self._record_operator_retry_audit(
-                            session,
-                            outbox,
-                            operator=operator,
-                            operation_id=operation_id,
-                            reason=reason,
-                            audit_reason="operator_retry:re-enqueued",
-                            from_delivery=OutboxDeliveryStatus.PAUSED.value,
-                            to_delivery=OutboxDeliveryStatus.READY.value,
-                            result_status=target_writeback,
-                        )
-                        record_writeback_retry(adapter=self._adapter_label(outbox))
-                        result = target_writeback
-
-        if blocked_error is not None:
-            raise blocked_error
-        if sync_event_id is not None:
-            await self._sync_writeback_summary(sync_event_id)
-            await self._maybe_resume(sync_event_id)
-        return result
-
-    async def lookup_writeback_status(self, writeback_id: str) -> WritebackStatus | None:
-        """Look up writeback status, preferring provider query when declared.
-
-        Used by WritebackRecoveryHandler (ISSUE-062) when a writeback is in
-        UNKNOWN status. When the adapter declares ``supports_status_query`` or
-        ``supports_lookup_by_idempotency``, queries the provider inside a
-        ``disposition.query_status`` span (ISSUE-092); otherwise returns the
-        cached outbox status only (no span).
+        Returns a complete sanitized receipt or a structured outcome. Does not
+        accept a bare WritebackStatus and never downgrades CONFIRMED.
         """
-        async with self._session_factory() as session:
-            outbox = await session.scalar(
-                select(orm.DispositionOutbox).where(
-                    orm.DispositionOutbox.writeback_id == writeback_id
-                )
-            )
-            if outbox is None:
-                return None
-
-            adapter = self._resolve_adapter(outbox)
-            caps = adapter.capabilities()
-            if caps.supports_status_query or caps.supports_lookup_by_idempotency:
-                command = DispositionCommand.model_validate(outbox.command_payload)
-                latest_receipt = await session.scalar(
-                    select(orm.DispositionReceipt)
-                    .where(orm.DispositionReceipt.writeback_id == writeback_id)
-                    .order_by(orm.DispositionReceipt.sequence.desc())
-                    .limit(1)
-                )
-                provider_job_id = (
-                    latest_receipt.provider_job_id if latest_receipt is not None else None
-                )
-                with disposition_span(
-                    "disposition.query_status",
-                    event_id=outbox.event_id,
-                    action_id=outbox.action_id,
-                    disposition_id=outbox.disposition_id,
-                    writeback_id=outbox.writeback_id,
-                ):
-                    receipt: DispositionReceipt | None = None
-                    if caps.supports_lookup_by_idempotency:
-                        receipt = await adapter.lookup_submission(
-                            command.idempotency_key,
-                            command.source_locator,
-                        )
-                    if receipt is None and caps.supports_status_query and provider_job_id:
-                        receipt = await adapter.get_status(provider_job_id)
-                if receipt is not None:
-                    return receipt.status
-
-            if not outbox.latest_writeback_status:
-                return None
-            try:
-                return WritebackStatus(outbox.latest_writeback_status)
-            except ValueError:
-                logger.warning(
-                    "invalid writeback_status in outbox %s: %s",
-                    writeback_id,
-                    outbox.latest_writeback_status,
-                )
-                return WritebackStatus.UNKNOWN
-
-    async def update_writeback_status_from_lookup(
-        self, writeback_id: str, status: WritebackStatus
-    ) -> None:
-        """Update outbox writeback status from a provider-side lookup (ISSUE-062).
-
-        This bypasses the :meth:`resolve_writeback` validation gate because
-        the status comes from a provider-side query, not a human adjudication.
-        Only call this when the provider has confirmed the actual writeback
-        status via :meth:`lookup_writeback_status`.
-
-        Should-Fix #1: the previous implementation called ``resolve_writeback``
-        with ``resolution="status_queried:..."``, which was always rejected by
-        the validation gate (only ``manual_confirmed`` / ``mark_failed`` /
-        ``abandon`` are accepted).  This method writes the resolved status
-        directly without the adjudication gate.
-        """
-        async with self._session_factory() as session:
-            async with session.begin():
-                outbox = await session.scalar(
-                    select(orm.DispositionOutbox)
-                    .where(orm.DispositionOutbox.writeback_id == writeback_id)
-                    .with_for_update()
-                )
-                if outbox is None:
-                    logger.warning(
-                        "update_writeback_status_from_lookup: outbox not found for writeback_id=%s",
-                        writeback_id,
-                    )
-                    return
-                # ISSUE-062 Blocker #1 fix: validate the state transition
-                # before writing the provider-resolved status.  The lookup
-                # result is accepted as evidence_adjudication because it comes
-                # from a provider-side query (not a fallible local guess).
-                current_status = (
-                    WritebackStatus(outbox.latest_writeback_status)
-                    if outbox.latest_writeback_status
-                    else WritebackStatus.PENDING
-                )
-                validate_writeback_status_transition(
-                    current_status,
-                    status,
-                    evidence_adjudication=True,
-                )
-                outbox.latest_writeback_status = status.value
-                outbox.updated_at = datetime.now(UTC)
-                # Fence undelivered outboxes when provider lookup proves terminal success
-                # so a concurrent operator-retry READY claim cannot re-egress (ISSUE-274).
-                if is_operator_retry_terminal_success(status):
-                    delivery = OutboxDeliveryStatus(outbox.delivery_status)
-                    if delivery in {
-                        OutboxDeliveryStatus.READY,
-                        OutboxDeliveryStatus.PAUSED,
-                        OutboxDeliveryStatus.WAITING_RETRY,
-                    }:
-                        validate_outbox_delivery_transition(
-                            delivery,
-                            OutboxDeliveryStatus.DELIVERED,
-                            lookup_confirmed_submission=True,
-                        )
-                        outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
-                        outbox.delivered_at = outbox.delivered_at or datetime.now(UTC)
-                        outbox.locked_by = None
-                        outbox.locked_at = None
-                        outbox.lease_expires_at = None
-                        outbox.next_retry_at = None
-                    elif delivery is OutboxDeliveryStatus.LEASED:
-                        validate_outbox_delivery_transition(
-                            delivery,
-                            OutboxDeliveryStatus.DELIVERED,
-                        )
-                        outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
-                        outbox.delivered_at = outbox.delivered_at or datetime.now(UTC)
-                        outbox.locked_by = None
-                        outbox.locked_at = None
-                        outbox.lease_expires_at = None
-                        outbox.next_retry_at = None
-                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
-                _mirror_writeback_status_to_action(action, status.value)
-                event_id = outbox.event_id
-                adapter_label = self._adapter_label(outbox)
-        record_writeback(status=status.value, adapter=adapter_label)
-        await self._sync_writeback_summary(event_id)
-        await self._maybe_resume(event_id)
-        if self._bus is not None:
-            await self._bus.publish_event(
-                event_id,
-                "writeback_updated",
-                {"writeback_id": writeback_id, "status": status.value},
-            )
+        claim, early = await self._claim_recovery_lookup(writeback_id)
+        if early is not None:
+            return early
+        assert claim is not None
+        await self._after_recovery_lookup_claim(claim)
+        outcome = await self._lookup_paused_outbox(claim)
+        return await self._finalize_recovery_lookup(claim, outcome)
 
     async def activate_deferred_disposition(
         self,
@@ -1292,64 +979,73 @@ class DispositionSyncService:
         reconcile_entity_effect = False
         receipt_job_projection: ActionExecutionJob | None = None
         authorization_race = False
-        async with self._session_factory() as session:
-            async with session.begin():
-                outbox, action = await self._lock_event_outbox_action(session, claim.outbox_id)
-                if outbox is None or not self._claim_fence_matches(outbox, claim):
-                    logger.info("stale outbox delivery result discarded outbox=%s", claim.outbox_id)
-                    return
-                approval_changed = (
-                    action is None
-                    or action.status != claim.approval_status
-                    or action.updated_at != claim.approval_updated_at
-                    or not _action_still_approved_for_delivery(action)
-                )
-                parsed_receipt: DispositionReceipt | None = None
-                for provider_receipt in receipts:
-                    parsed_receipt = await self._append_receipt(
-                        session, outbox, receipt=provider_receipt
+        parsed_receipt: DispositionReceipt | None = None
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    outbox, action = await self._lock_event_outbox_action(session, claim.outbox_id)
+                    if outbox is None or not self._claim_fence_matches(outbox, claim):
+                        logger.info(
+                            "stale outbox delivery result discarded outbox=%s", claim.outbox_id
+                        )
+                        return
+                    approval_changed = (
+                        action is None
+                        or action.status != claim.approval_status
+                        or action.updated_at != claim.approval_updated_at
+                        or not _action_still_approved_for_delivery(action)
                     )
-                assert parsed_receipt is not None
-                if approval_changed:
-                    authorization_race = True
-                    await self._record_authorization_race_after_egress(
-                        session,
-                        outbox,
-                        action=action,
-                        receipt=parsed_receipt,
-                        claimed_approval_status=claim.approval_status,
-                    )
-                outbox.latest_writeback_status = parsed_receipt.status.value
-                now = datetime.now(UTC)
-                if parsed_receipt.status is WritebackStatus.UNKNOWN:
-                    self._pause_outbox_after_unknown_submission(
-                        outbox,
-                        now=now,
-                        error_code="submission_unknown",
-                        error_detail=(
-                            "provider submission result unknown; lookup required before retry"
-                        ),
-                    )
-                else:
-                    outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
-                    outbox.delivered_at = now
-                    record_writeback(
-                        status=parsed_receipt.status.value, adapter=claim.adapter_label
-                    )
-                if action is not None:
-                    _mirror_writeback_status_to_action(action, parsed_receipt.status.value)
-                    receipt_job_projection = await self._apply_receipt_execution_projection(
-                        session,
-                        action,
-                        outbox,
-                        claim.command,
-                        parsed_receipt,
-                        adapter_label=claim.adapter_label,
-                    )
-                    reconcile_entity_effect = (
-                        claim.command.intent_kind is DispositionIntentKind.ENTITY_ACTION_SUBMIT
-                        and parsed_receipt.status is WritebackStatus.ACCEPTED
-                    )
+                    for provider_receipt in receipts:
+                        parsed_receipt = await self._append_receipt(
+                            session, outbox, receipt=provider_receipt
+                        )
+                    assert parsed_receipt is not None
+                    if approval_changed:
+                        authorization_race = True
+                        await self._record_authorization_race_after_egress(
+                            session,
+                            outbox,
+                            action=action,
+                            receipt=parsed_receipt,
+                            claimed_approval_status=claim.approval_status,
+                        )
+                    outbox.latest_writeback_status = parsed_receipt.status.value
+                    now = datetime.now(UTC)
+                    if parsed_receipt.status is WritebackStatus.UNKNOWN:
+                        self._pause_outbox_after_unknown_submission(
+                            outbox,
+                            now=now,
+                            error_code="submission_unknown",
+                            error_detail=(
+                                "provider submission result unknown; lookup required before retry"
+                            ),
+                        )
+                    else:
+                        outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
+                        outbox.delivered_at = now
+                        record_writeback(
+                            status=parsed_receipt.status.value, adapter=claim.adapter_label
+                        )
+                    if action is not None:
+                        _mirror_writeback_status_to_action(action, parsed_receipt.status.value)
+                        receipt_job_projection = await self._apply_receipt_execution_projection(
+                            session,
+                            action,
+                            outbox,
+                            claim.command,
+                            parsed_receipt,
+                            adapter_label=claim.adapter_label,
+                        )
+                        reconcile_entity_effect = (
+                            claim.command.intent_kind is DispositionIntentKind.ENTITY_ACTION_SUBMIT
+                            and parsed_receipt.status is WritebackStatus.ACCEPTED
+                        )
+        except Exception as exc:
+            await self._finalize_claim_exception(claim, exc)
+            return
+
+        if parsed_receipt is None:
+            return
 
         if readback_error is not None and self._bus is not None:
             await self._bus.publish_event(
@@ -1428,10 +1124,12 @@ class DispositionSyncService:
                     return None
                 now = datetime.now(UTC)
                 status = OutboxDeliveryStatus(outbox.delivery_status)
-                if status is OutboxDeliveryStatus.WAITING_RETRY and (
-                    outbox.next_retry_at is None or outbox.next_retry_at > now
-                ):
-                    return None
+                if status is OutboxDeliveryStatus.WAITING_RETRY:
+                    if outbox.next_retry_at is None:
+                        self._backfill_waiting_retry_deadline(outbox, now=now)
+                        return None
+                    if outbox.next_retry_at > now:
+                        return None
                 if status is OutboxDeliveryStatus.LEASED:
                     if outbox.lease_expires_at is None or outbox.lease_expires_at <= now:
                         self._release_leased_outbox_after_lease_expiry(outbox, now=now)
@@ -1472,14 +1170,32 @@ class DispositionSyncService:
                     self._block_outbox_for_writeback_fence(
                         outbox,
                         now=now,
-                        error_detail="action missing execution_owner for writeback fence",
+                        error_detail=(
+                            f"{outbox.action_id} missing execution_owner for writeback fence"
+                        ),
                     )
                     return None
-                assert_writeback_side_effects_allowed(
-                    action_id=outbox.action_id,
-                    execution_owner=ExecutionOwner(action.execution_owner),
-                )
-                command = DispositionCommand.model_validate(outbox.command_payload)
+                try:
+                    assert_writeback_side_effects_allowed(
+                        action_id=outbox.action_id,
+                        execution_owner=ExecutionOwner(action.execution_owner),
+                    )
+                except ValidationError as exc:
+                    self._block_outbox_for_writeback_fence(
+                        outbox,
+                        now=now,
+                        error_detail=str(exc),
+                    )
+                    return None
+                try:
+                    command = DispositionCommand.model_validate(outbox.command_payload)
+                except PydanticValidationError as exc:
+                    self._block_outbox_for_writeback_fence(
+                        outbox,
+                        now=now,
+                        error_detail=f"invalid disposition command: {exc}",
+                    )
+                    return None
                 if not await self._assert_active_head_for_delivery(session, outbox, command):
                     self._block_superseded_outbox(outbox, now=now)
                     return None
@@ -1495,9 +1211,14 @@ class DispositionSyncService:
                         ),
                     )
                     return None
-                await self._guard.validate(
-                    command, {"event_id": outbox.event_id, "source_locator": command.source_locator}
-                )
+                try:
+                    await self._guard.validate(
+                        command,
+                        {"event_id": outbox.event_id, "source_locator": command.source_locator},
+                    )
+                except GuardrailViolationError as exc:
+                    self._release_to_guardrail_dead_letter(outbox, now=now, detail=str(exc))
+                    return None
                 adapter = self._resolve_adapter(outbox)
                 adapter.validate_command(command)
                 validate_outbox_delivery_transition(status, OutboxDeliveryStatus.LEASED)
@@ -1547,6 +1268,569 @@ class DispositionSyncService:
     async def _after_delivery_claim(self, claim: _DeliveryClaim) -> None:
         """Test seam between claim commit and egress-admission CAS. Production no-op."""
         return None
+
+    async def _after_operator_retry_claim(self, claim: _OperatorRetryClaim) -> None:
+        """Test seam after operator-retry claim commit, before provider lookup."""
+        return None
+
+    async def _after_recovery_lookup_claim(self, claim: _PausedLookupClaim) -> None:
+        """Test seam after recovery lookup claim commit, before provider lookup."""
+        return None
+
+    async def _lock_event_outbox_action_by_writeback(
+        self,
+        session: AsyncSession,
+        writeback_id: str,
+    ) -> tuple[orm.DispositionOutbox | None, orm.Action | None]:
+        event_id = await session.scalar(
+            select(orm.DispositionOutbox.event_id).where(
+                orm.DispositionOutbox.writeback_id == writeback_id
+            )
+        )
+        if event_id is None:
+            return None, None
+        event = await session.get(orm.SecurityEvent, event_id, with_for_update=True)
+        if event is None:
+            return None, None
+        outbox = await session.scalar(
+            select(orm.DispositionOutbox)
+            .where(orm.DispositionOutbox.writeback_id == writeback_id)
+            .with_for_update()
+        )
+        if outbox is None or outbox.event_id != event_id:
+            return None, None
+        action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
+        return outbox, action
+
+    def _paused_claim_from_locked_outbox(
+        self,
+        outbox: orm.DispositionOutbox,
+        *,
+        token: str,
+        adapter: BaseDispositionAdapter,
+        command: DispositionCommand,
+        provider_job_id: str | None,
+        locked_at: datetime,
+        lease_expires_at: datetime,
+    ) -> _PausedLookupClaim:
+        return _PausedLookupClaim(
+            outbox_id=outbox.outbox_id,
+            token=token,
+            event_id=outbox.event_id,
+            action_id=outbox.action_id,
+            disposition_id=outbox.disposition_id,
+            writeback_id=outbox.writeback_id,
+            idempotency_key=outbox.idempotency_key,
+            command_payload_sha256=outbox.command_payload_sha256,
+            command=command,
+            adapter=adapter,
+            provider_job_id=provider_job_id,
+            attempt=int(outbox.attempt),
+            locked_at=locked_at,
+            lease_expires_at=lease_expires_at,
+        )
+
+    @staticmethod
+    def _domain_receipt_from_orm(row: orm.DispositionReceipt) -> DispositionReceipt:
+        evidence = None
+        if row.confirmation_evidence:
+            try:
+                evidence = ConfirmationEvidence(row.confirmation_evidence)
+            except ValueError:
+                evidence = None
+        targets: list[TargetWritebackResult] = []
+        for item in row.target_results or []:
+            if isinstance(item, dict):
+                targets.append(TargetWritebackResult.model_validate(item))
+        return sanitize_disposition_receipt(
+            DispositionReceipt.model_construct(
+                writeback_id=row.writeback_id,
+                sequence=int(row.sequence),
+                disposition_id=row.disposition_id,
+                action_id=row.action_id,
+                source_record_id=row.source_record_id,
+                status=WritebackStatus(row.status),
+                confirmation_evidence=evidence,
+                provider_record_id=row.provider_record_id,
+                provider_job_id=row.provider_job_id,
+                provider_code=row.provider_code,
+                provider_message=row.provider_message,
+                observed_at=row.observed_at,
+                submitted_at=row.submitted_at,
+                confirmed_at=row.confirmed_at,
+                target_results=targets,
+                raw_result=dict(row.raw_result or {}),
+                truncated=bool(row.truncated),
+                simulated=bool(row.simulated),
+            )
+        )
+
+    async def _claim_operator_retry(
+        self,
+        writeback_id: str,
+        *,
+        operator: str,
+        operation_id: str | None,
+        reason: str | None,
+    ) -> tuple[_OperatorRetryClaim | None, WritebackStatus | None]:
+        async with self._session_factory() as session:
+            async with session.begin():
+                outbox, _action = await self._lock_event_outbox_action_by_writeback(
+                    session, writeback_id
+                )
+                if outbox is None:
+                    raise EventNotFoundError(
+                        f"writeback not found: {writeback_id}",
+                        details={"writeback_id": writeback_id},
+                    )
+                delivery = OutboxDeliveryStatus(outbox.delivery_status)
+                latest = (
+                    WritebackStatus(outbox.latest_writeback_status)
+                    if outbox.latest_writeback_status
+                    else None
+                )
+                if operator_retry_writeback_status_blocked(latest):
+                    raise WritebackConflictError(
+                        "CONFIRMED writeback cannot be retried",
+                        details={
+                            "writeback_id": writeback_id,
+                            "status": latest.value if latest else None,
+                        },
+                    )
+                if outbox.superseded_by_disposition_id is not None:
+                    raise WritebackConflictError(
+                        "superseded outbox head cannot be retried",
+                        details={
+                            "writeback_id": writeback_id,
+                            "superseded_by_disposition_id": (outbox.superseded_by_disposition_id),
+                        },
+                    )
+                if operation_id is not None:
+                    replay_status = await self._find_operator_retry_replay(
+                        session,
+                        event_id=outbox.event_id,
+                        writeback_id=writeback_id,
+                        operation_id=operation_id,
+                    )
+                    if replay_status is not None:
+                        return None, replay_status
+                if delivery in {
+                    OutboxDeliveryStatus.LEASED,
+                    OutboxDeliveryStatus.WAITING_RETRY,
+                }:
+                    raise WritebackConflictError(
+                        "outbox delivery in progress; operator retry not allowed",
+                        details={
+                            "writeback_id": writeback_id,
+                            "delivery_status": delivery.value,
+                        },
+                    )
+                if delivery is OutboxDeliveryStatus.READY:
+                    result = WritebackStatus.PENDING
+                    await self._record_operator_retry_audit(
+                        session,
+                        outbox,
+                        operator=operator,
+                        operation_id=operation_id,
+                        reason=reason,
+                        audit_reason="operator_retry:idempotent-ready",
+                        from_delivery=delivery.value,
+                        to_delivery=delivery.value,
+                        result_status=result,
+                    )
+                    record_writeback_retry(adapter=self._adapter_label(outbox))
+                    return None, result
+                if not delivery_status_eligible_for_operator_retry_pause(delivery, latest):
+                    raise WritebackConflictError(
+                        "illegal outbox state for operator retry",
+                        details={
+                            "writeback_id": writeback_id,
+                            "delivery_status": delivery.value,
+                            "writeback_status": latest.value if latest else None,
+                        },
+                    )
+                paused_from = delivery.value
+                now = datetime.now(UTC)
+                if delivery in {
+                    OutboxDeliveryStatus.DEAD_LETTER,
+                    OutboxDeliveryStatus.DELIVERED,
+                }:
+                    validate_outbox_delivery_transition(
+                        delivery,
+                        OutboxDeliveryStatus.PAUSED,
+                        operator_retry_pause=True,
+                    )
+                    outbox.delivery_status = OutboxDeliveryStatus.PAUSED.value
+                    outbox.next_retry_at = None
+                    session.add(
+                        orm.EventAuditLog(
+                            event_id=outbox.event_id,
+                            from_status=paused_from,
+                            to_status=OutboxDeliveryStatus.PAUSED.value,
+                            operator=operator,
+                            reason=self._operator_retry_pause_reason(reason),
+                        )
+                    )
+                try:
+                    command = DispositionCommand.model_validate(outbox.command_payload)
+                except PydanticValidationError as exc:
+                    raise WritebackConflictError(
+                        "illegal outbox command payload for operator retry",
+                        details={"writeback_id": writeback_id},
+                    ) from exc
+                adapter = self._resolve_adapter(outbox)
+                latest_receipt = await session.scalar(
+                    select(orm.DispositionReceipt)
+                    .where(orm.DispositionReceipt.writeback_id == writeback_id)
+                    .order_by(orm.DispositionReceipt.sequence.desc())
+                    .limit(1)
+                )
+                token = f"{self._worker_id}:opretry:{secrets.token_hex(8)}"
+                locked_at = now
+                lease_expires_at = now + timedelta(seconds=_DEFAULT_LEASE_SECONDS)
+                outbox.attempt = int(outbox.attempt or 0) + 1
+                outbox.locked_by = token
+                outbox.locked_at = locked_at
+                outbox.lease_expires_at = lease_expires_at
+                outbox.updated_at = now
+                paused = self._paused_claim_from_locked_outbox(
+                    outbox,
+                    token=token,
+                    adapter=adapter,
+                    command=command,
+                    provider_job_id=(
+                        latest_receipt.provider_job_id if latest_receipt is not None else None
+                    ),
+                    locked_at=locked_at,
+                    lease_expires_at=lease_expires_at,
+                )
+                return (
+                    _OperatorRetryClaim(
+                        paused=paused,
+                        operator=operator,
+                        operation_id=operation_id,
+                        reason=reason,
+                        from_delivery=OutboxDeliveryStatus.PAUSED.value,
+                        latest=latest,
+                        last_error_code=outbox.last_error_code,
+                    ),
+                    None,
+                )
+
+    async def _finalize_operator_retry(
+        self,
+        claim: _OperatorRetryClaim,
+        decision: _OperatorRetryDecision,
+    ) -> WritebackStatus:
+        blocked_error: WritebackConflictError | None = None
+        result: WritebackStatus | None = None
+        sync_event_id: str | None = None
+        async with self._session_factory() as session:
+            async with session.begin():
+                outbox, action = await self._lock_event_outbox_action(
+                    session, claim.paused.outbox_id
+                )
+                if outbox is None or not self._paused_lookup_fence_matches(
+                    outbox, claim.paused
+                ):
+                    raise WritebackConflictError(
+                        "operator retry claim expired or stolen; lookup result discarded",
+                        details={"writeback_id": claim.paused.writeback_id},
+                    )
+                now = datetime.now(UTC)
+                latest = claim.latest
+                if decision.action is _OperatorRetryAction.RECONCILE_TERMINAL:
+                    assert decision.target_status is not None
+                    assert decision.receipt is not None
+                    latest_row = await session.scalar(
+                        select(orm.DispositionReceipt)
+                        .where(
+                            orm.DispositionReceipt.writeback_id == outbox.writeback_id
+                        )
+                        .order_by(orm.DispositionReceipt.sequence.desc())
+                        .limit(1)
+                    )
+                    if (
+                        latest_row is not None
+                        and latest_row.status == WritebackStatus.CONFIRMED.value
+                    ):
+                        outbox.locked_by = None
+                        outbox.locked_at = None
+                        outbox.lease_expires_at = None
+                        outbox.updated_at = now
+                        result = WritebackStatus.CONFIRMED
+                    else:
+                        current_status = (
+                            WritebackStatus(outbox.latest_writeback_status)
+                            if outbox.latest_writeback_status
+                            else WritebackStatus.UNKNOWN
+                        )
+                        validate_writeback_status_transition(
+                            current_status,
+                            decision.target_status,
+                            evidence_adjudication=True,
+                        )
+                        validate_outbox_delivery_transition(
+                            OutboxDeliveryStatus.PAUSED,
+                            OutboxDeliveryStatus.DELIVERED,
+                            lookup_confirmed_submission=True,
+                        )
+                        parsed = await self._append_receipt(
+                            session, outbox, receipt=decision.receipt
+                        )
+                        outbox.latest_writeback_status = parsed.status.value
+                        outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
+                        outbox.delivered_at = outbox.delivered_at or now
+                        outbox.locked_by = None
+                        outbox.locked_at = None
+                        outbox.lease_expires_at = None
+                        outbox.updated_at = now
+                        _mirror_writeback_status_to_action(action, parsed.status.value)
+                        await self._record_operator_retry_audit(
+                            session,
+                            outbox,
+                            operator=claim.operator,
+                            operation_id=claim.operation_id,
+                            reason=claim.reason,
+                            audit_reason=(f"operator_retry:reconcile:{parsed.status.value}"),
+                            from_delivery=OutboxDeliveryStatus.PAUSED.value,
+                            to_delivery=OutboxDeliveryStatus.DELIVERED.value,
+                            result_status=parsed.status,
+                        )
+                        record_writeback(
+                            status=parsed.status.value,
+                            adapter=self._adapter_label(outbox),
+                        )
+                        result = parsed.status
+                        sync_event_id = outbox.event_id
+                elif decision.action is _OperatorRetryAction.BLOCKED:
+                    outbox.locked_by = None
+                    outbox.locked_at = None
+                    outbox.lease_expires_at = None
+                    outbox.updated_at = now
+                    await self._record_operator_retry_audit(
+                        session,
+                        outbox,
+                        operator=claim.operator,
+                        operation_id=None,
+                        reason=claim.reason,
+                        audit_reason=(f"operator_retry:blocked:{decision.reason or 'lookup'}"),
+                        from_delivery=OutboxDeliveryStatus.PAUSED.value,
+                        to_delivery=OutboxDeliveryStatus.PAUSED.value,
+                        result_status=latest or WritebackStatus.FAILED,
+                    )
+                    blocked_error = WritebackConflictError(
+                        decision.reason or "operator retry blocked after lookup",
+                        details={
+                            "writeback_id": claim.paused.writeback_id,
+                            "delivery_status": OutboxDeliveryStatus.PAUSED.value,
+                        },
+                    )
+                    result = latest or WritebackStatus.FAILED
+                else:
+                    current_writeback = latest or WritebackStatus.FAILED
+                    target_writeback = WritebackStatus.PENDING
+                    validate_writeback_status_transition(
+                        current_writeback,
+                        target_writeback,
+                        lookup_never_accepted=decision.lookup_never_accepted,
+                        adapter_allows_safe_retry=decision.adapter_allows_safe_retry,
+                    )
+                    validate_outbox_delivery_transition(
+                        OutboxDeliveryStatus.PAUSED,
+                        OutboxDeliveryStatus.READY,
+                    )
+                    outbox.delivery_status = OutboxDeliveryStatus.READY.value
+                    outbox.latest_writeback_status = target_writeback.value
+                    outbox.attempt = 0
+                    outbox.locked_by = None
+                    outbox.locked_at = None
+                    outbox.lease_expires_at = None
+                    outbox.next_retry_at = None
+                    outbox.updated_at = now
+                    _mirror_writeback_status_to_action(action, target_writeback.value)
+                    await self._record_operator_retry_audit(
+                        session,
+                        outbox,
+                        operator=claim.operator,
+                        operation_id=claim.operation_id,
+                        reason=claim.reason,
+                        audit_reason="operator_retry:re-enqueued",
+                        from_delivery=OutboxDeliveryStatus.PAUSED.value,
+                        to_delivery=OutboxDeliveryStatus.READY.value,
+                        result_status=target_writeback,
+                    )
+                    record_writeback_retry(adapter=self._adapter_label(outbox))
+                    result = target_writeback
+        if blocked_error is not None:
+            raise blocked_error
+        if sync_event_id is not None:
+            await self._sync_writeback_summary(sync_event_id)
+            await self._maybe_resume(sync_event_id)
+        assert result is not None
+        return result
+
+    async def _claim_recovery_lookup(
+        self, writeback_id: str
+    ) -> tuple[_PausedLookupClaim | None, WritebackLookupOutcome | None]:
+        async with self._session_factory() as session:
+            async with session.begin():
+                outbox, _action = await self._lock_event_outbox_action_by_writeback(
+                    session, writeback_id
+                )
+                if outbox is None:
+                    return None, WritebackLookupOutcome(
+                        kind=WritebackLookupKind.DEGRADED,
+                        reason="writeback not found",
+                    )
+                latest_row = await session.scalar(
+                    select(orm.DispositionReceipt)
+                    .where(orm.DispositionReceipt.writeback_id == writeback_id)
+                    .order_by(orm.DispositionReceipt.sequence.desc())
+                    .limit(1)
+                )
+                latest_status = (
+                    WritebackStatus(outbox.latest_writeback_status)
+                    if outbox.latest_writeback_status
+                    else None
+                )
+                if (
+                    latest_status is WritebackStatus.CONFIRMED
+                    or (
+                        latest_row is not None
+                        and latest_row.status == WritebackStatus.CONFIRMED.value
+                    )
+                ):
+                    receipt = (
+                        self._domain_receipt_from_orm(latest_row)
+                        if latest_row is not None
+                        else None
+                    )
+                    return None, WritebackLookupOutcome(
+                        kind=WritebackLookupKind.ALREADY_CONFIRMED,
+                        receipt=receipt,
+                        writeback_status=WritebackStatus.CONFIRMED,
+                        reason="CONFIRMED is terminal",
+                    )
+                now = datetime.now(UTC)
+                if (
+                    outbox.locked_by is not None
+                    and outbox.lease_expires_at is not None
+                    and outbox.lease_expires_at > now
+                ):
+                    return None, WritebackLookupOutcome(
+                        kind=WritebackLookupKind.BUSY,
+                        writeback_status=latest_status,
+                        reason="outbox lease held",
+                    )
+                try:
+                    command = DispositionCommand.model_validate(outbox.command_payload)
+                    adapter = self._resolve_adapter(outbox)
+                except Exception as exc:
+                    return None, WritebackLookupOutcome(
+                        kind=WritebackLookupKind.DEGRADED,
+                        reason=f"{type(exc).__name__}: {exc}",
+                    )
+                token = f"{self._worker_id}:recovery:{secrets.token_hex(8)}"
+                locked_at = now
+                lease_expires_at = now + timedelta(seconds=_DEFAULT_LEASE_SECONDS)
+                delivery = OutboxDeliveryStatus(outbox.delivery_status)
+                if delivery in {
+                    OutboxDeliveryStatus.DEAD_LETTER,
+                    OutboxDeliveryStatus.DELIVERED,
+                }:
+                    validate_outbox_delivery_transition(
+                        delivery,
+                        OutboxDeliveryStatus.PAUSED,
+                        operator_retry_pause=True,
+                    )
+                    outbox.delivery_status = OutboxDeliveryStatus.PAUSED.value
+                elif delivery is not OutboxDeliveryStatus.PAUSED:
+                    return None, WritebackLookupOutcome(
+                        kind=WritebackLookupKind.BUSY,
+                        writeback_status=latest_status,
+                        reason=f"delivery {delivery.value} is not lookup-claimable",
+                    )
+                outbox.attempt = int(outbox.attempt or 0) + 1
+                outbox.locked_by = token
+                outbox.locked_at = locked_at
+                outbox.lease_expires_at = lease_expires_at
+                outbox.updated_at = now
+                claim = self._paused_claim_from_locked_outbox(
+                    outbox,
+                    token=token,
+                    adapter=adapter,
+                    command=command,
+                    provider_job_id=(
+                        latest_row.provider_job_id if latest_row is not None else None
+                    ),
+                    locked_at=locked_at,
+                    lease_expires_at=lease_expires_at,
+                )
+                return claim, None
+
+    async def _finalize_recovery_lookup(
+        self,
+        claim: _PausedLookupClaim,
+        outcome: _PausedLookupOutcome,
+    ) -> WritebackLookupOutcome:
+        applied, event_id, status = await self._apply_paused_lookup_outcome(claim, outcome)
+        if not applied and event_id is None and status is None:
+            return WritebackLookupOutcome(
+                kind=WritebackLookupKind.STALE_CLAIM,
+                reason="recovery lookup claim expired or stolen",
+            )
+        if status is WritebackStatus.CONFIRMED and not applied:
+            async with self._session_factory() as session:
+                latest_row = await session.scalar(
+                    select(orm.DispositionReceipt)
+                    .where(orm.DispositionReceipt.writeback_id == claim.writeback_id)
+                    .order_by(orm.DispositionReceipt.sequence.desc())
+                    .limit(1)
+                )
+            receipt = (
+                self._domain_receipt_from_orm(latest_row) if latest_row is not None else None
+            )
+            return WritebackLookupOutcome(
+                kind=WritebackLookupKind.ALREADY_CONFIRMED,
+                receipt=receipt,
+                writeback_status=WritebackStatus.CONFIRMED,
+                reason="CONFIRMED cannot be overwritten",
+            )
+        if outcome.kind is _PausedLookupKind.FOUND and outcome.receipt is not None:
+            result = WritebackLookupOutcome(
+                kind=WritebackLookupKind.FOUND,
+                receipt=sanitize_disposition_receipt(outcome.receipt),
+                writeback_status=status or outcome.receipt.status,
+            )
+        elif outcome.kind is _PausedLookupKind.NOT_FOUND:
+            result = WritebackLookupOutcome(
+                kind=WritebackLookupKind.NOT_FOUND,
+                writeback_status=status,
+                reason="lookup never-accepted",
+            )
+        else:
+            result = WritebackLookupOutcome(
+                kind=WritebackLookupKind.DEGRADED,
+                writeback_status=status,
+                reason=outcome.detail or outcome.error_code or "lookup degraded",
+            )
+        if event_id is not None and result.kind is WritebackLookupKind.FOUND:
+            await self._sync_writeback_summary(event_id)
+            await self._maybe_resume(event_id)
+            if self._bus is not None and result.writeback_status is not None:
+                await self._bus.publish_event(
+                    event_id,
+                    "writeback_updated",
+                    {
+                        "writeback_id": claim.writeback_id,
+                        "status": result.writeback_status.value,
+                    },
+                )
+        elif event_id is not None and result.kind is WritebackLookupKind.NOT_FOUND:
+            await self._sync_writeback_summary(event_id)
+            await self._maybe_resume(event_id)
+        return result
 
     async def _lock_event_outbox_action(
         self,
@@ -2484,10 +2768,13 @@ class DispositionSyncService:
 
     async def _evaluate_operator_retry_lookup(
         self,
-        session: AsyncSession,
-        outbox: orm.DispositionOutbox,
+        *,
+        adapter: BaseDispositionAdapter,
+        command: DispositionCommand,
+        provider_job_id: str | None,
+        last_error_code: str | None,
+        writeback_id: str,
     ) -> _OperatorRetryDecision:
-        adapter = self._resolve_adapter(outbox)
         caps = adapter.capabilities()
         safe_retry = adapter.allows_safe_retry()
         if not (caps.supports_lookup_by_idempotency or caps.supports_status_query):
@@ -2496,16 +2783,15 @@ class DispositionSyncService:
                 reason="lookup capability unavailable; cannot prove safe retry",
             )
 
-        if is_deterministic_adapter_rejection_code(getattr(outbox, "last_error_code", None)):
+        if is_deterministic_adapter_rejection_code(last_error_code):
             return _OperatorRetryDecision(
                 action=_OperatorRetryAction.BLOCKED,
                 reason=(
                     "deterministic adapter rejection is not safely retryable; "
-                    f"error_code={outbox.last_error_code}"
+                    f"error_code={last_error_code}"
                 ),
             )
 
-        command = DispositionCommand.model_validate(outbox.command_payload)
         receipt: DispositionReceipt | None = None
         lookup_degraded = False
         idempotency_lookup_done = False
@@ -2516,22 +2802,12 @@ class DispositionSyncService:
                     command.source_locator,
                 )
                 idempotency_lookup_done = True
-            if receipt is None and caps.supports_status_query:
-                latest_receipt = await session.scalar(
-                    select(orm.DispositionReceipt)
-                    .where(orm.DispositionReceipt.writeback_id == outbox.writeback_id)
-                    .order_by(orm.DispositionReceipt.sequence.desc())
-                    .limit(1)
-                )
-                provider_job_id = (
-                    latest_receipt.provider_job_id if latest_receipt is not None else None
-                )
-                if provider_job_id:
-                    receipt = await adapter.get_status(provider_job_id)
+            if receipt is None and caps.supports_status_query and provider_job_id:
+                receipt = await adapter.get_status(provider_job_id)
         except Exception as exc:
             logger.warning(
                 "operator retry lookup degraded writeback=%s: %s",
-                outbox.writeback_id,
+                writeback_id,
                 type(exc).__name__,
             )
             lookup_degraded = True
@@ -2569,7 +2845,6 @@ class DispositionSyncService:
                 reason=f"lookup returned non-retryable status {receipt.status.value}",
             )
 
-        # Never-accepted only when idempotency lookup authoritatively returned None.
         if idempotency_lookup_done:
             if safe_retry:
                 return _OperatorRetryDecision(
@@ -3049,6 +3324,22 @@ class DispositionSyncService:
                 ):
                     return False, None, None
 
+                latest_confirmed = await session.scalar(
+                    select(orm.DispositionReceipt)
+                    .where(
+                        orm.DispositionReceipt.writeback_id == outbox.writeback_id,
+                        orm.DispositionReceipt.status == WritebackStatus.CONFIRMED.value,
+                    )
+                    .order_by(orm.DispositionReceipt.sequence.desc())
+                    .limit(1)
+                )
+                if latest_confirmed is not None:
+                    outbox.locked_by = None
+                    outbox.locked_at = None
+                    outbox.lease_expires_at = None
+                    outbox.updated_at = now
+                    return False, outbox.event_id, WritebackStatus.CONFIRMED
+
                 outbox.locked_by = None
                 outbox.locked_at = None
                 outbox.lease_expires_at = None
@@ -3247,6 +3538,114 @@ class DispositionSyncService:
             error_code=WRITEBACK_FENCE_BLOCKED_ERROR_CODE,
         )
         return OutboxDeliveryStatus.DEAD_LETTER
+
+    def _release_to_guardrail_dead_letter(
+        self,
+        outbox: orm.DispositionOutbox,
+        *,
+        now: datetime,
+        detail: str,
+    ) -> OutboxDeliveryStatus:
+        """Persist a guardrail rejection before the row is leased."""
+        current = OutboxDeliveryStatus(outbox.delivery_status)
+        outbox.last_error_code = "guardrail_blocked"
+        outbox.last_error_detail = self._truncate_error_detail(detail)
+        outbox.updated_at = now
+        outbox.next_retry_at = None
+        outbox.locked_by = None
+        outbox.locked_at = None
+        outbox.lease_expires_at = None
+        validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
+        outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
+        record_writeback_dead_letter(
+            adapter=self._adapter_label(outbox),
+            error_code="guardrail_blocked",
+        )
+        return OutboxDeliveryStatus.DEAD_LETTER
+
+    def _backfill_waiting_retry_deadline(
+        self,
+        outbox: orm.DispositionOutbox,
+        *,
+        now: datetime,
+    ) -> None:
+        """Corrupt WAITING_RETRY rows with a null deadline must not be claimed."""
+        attempt = max(int(outbox.attempt or 1), 1)
+        outbox.next_retry_at = now + timedelta(
+            seconds=self._outbox_retry_backoff_seconds(attempt)
+        )
+        outbox.updated_at = now
+
+    async def backfill_waiting_retry_deadlines(self, *, limit: int = 10) -> int:
+        """Repair WAITING_RETRY rows that lost next_retry_at without delivering them."""
+        repaired = 0
+        async with self._session_factory() as session:
+            ids = list(
+                (
+                    await session.scalars(
+                        select(orm.DispositionOutbox.outbox_id).where(
+                            orm.DispositionOutbox.delivery_status
+                            == OutboxDeliveryStatus.WAITING_RETRY.value,
+                            orm.DispositionOutbox.next_retry_at.is_(None),
+                            orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                        )
+                        .order_by(orm.DispositionOutbox.created_at.asc())
+                        .limit(limit)
+                    )
+                ).all()
+            )
+        now = datetime.now(UTC)
+        for outbox_id in ids:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    outbox, _action = await self._lock_event_outbox_action(session, outbox_id)
+                    if (
+                        outbox is None
+                        or outbox.delivery_status != OutboxDeliveryStatus.WAITING_RETRY.value
+                        or outbox.next_retry_at is not None
+                    ):
+                        continue
+                    self._backfill_waiting_retry_deadline(outbox, now=now)
+                    repaired += 1
+        return repaired
+
+    async def pause_expired_leases(self, *, limit: int = 10) -> int:
+        """Convert expired LEASED rows to PAUSED without counting them as deliveries."""
+        paused = 0
+        async with self._session_factory() as session:
+            now = datetime.now(UTC)
+            ids = list(
+                (
+                    await session.scalars(
+                        select(orm.DispositionOutbox.outbox_id)
+                        .where(
+                            orm.DispositionOutbox.delivery_status
+                            == OutboxDeliveryStatus.LEASED.value,
+                            orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                            or_(
+                                orm.DispositionOutbox.lease_expires_at.is_(None),
+                                orm.DispositionOutbox.lease_expires_at <= now,
+                            ),
+                        )
+                        .order_by(orm.DispositionOutbox.created_at.asc())
+                        .limit(limit)
+                    )
+                ).all()
+            )
+        now = datetime.now(UTC)
+        for outbox_id in ids:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    outbox, _action = await self._lock_event_outbox_action(session, outbox_id)
+                    if outbox is None:
+                        continue
+                    if OutboxDeliveryStatus(outbox.delivery_status) is not OutboxDeliveryStatus.LEASED:
+                        continue
+                    if outbox.lease_expires_at is not None and outbox.lease_expires_at > now:
+                        continue
+                    self._release_leased_outbox_after_lease_expiry(outbox, now=now)
+                    paused += 1
+        return paused
 
     @staticmethod
     async def _lock_action_after_execution_job(
@@ -3654,6 +4053,8 @@ class OutboxWorker:
 
     async def run_once(self, *, limit: int = 10) -> int:
         await self._service.reconcile_paused_outboxes(limit=limit)
+        await self._service.pause_expired_leases(limit=limit)
+        await self._service.backfill_waiting_retry_deadlines(limit=limit)
         claimed = await self._claim_batch(limit=limit)
         for outbox_id in claimed:
             try:
@@ -3693,14 +4094,6 @@ class OutboxWorker:
                                 orm.DispositionOutbox.next_retry_at.is_not(None),
                                 orm.DispositionOutbox.next_retry_at <= now,
                             ),
-                            and_(
-                                orm.DispositionOutbox.delivery_status
-                                == OutboxDeliveryStatus.LEASED.value,
-                                or_(
-                                    orm.DispositionOutbox.lease_expires_at.is_(None),
-                                    orm.DispositionOutbox.lease_expires_at <= now,
-                                ),
-                            ),
                         ),
                     )
                     .order_by(orm.DispositionOutbox.created_at.asc())
@@ -3729,4 +4122,10 @@ class OutboxWorker:
         return candidates
 
 
-__all__ = ["DispositionSyncService", "OutboxWorker", "ResumeInvestigationHook"]
+__all__ = [
+    "DispositionSyncService",
+    "OutboxWorker",
+    "ResumeInvestigationHook",
+    "WritebackLookupKind",
+    "WritebackLookupOutcome",
+]

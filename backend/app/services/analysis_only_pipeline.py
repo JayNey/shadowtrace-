@@ -262,6 +262,7 @@ class AnalysisOnlyPipeline:
         context_store: Any | None = None,
         session_factory: Any | None = None,
         working_memory: Any | None = None,
+        fp_adjudicator_memory: Any | None = None,
         degraded_flags: Any | None = None,
         settings: Settings | None = None,
         memory_agent: Any | None = None,
@@ -283,6 +284,7 @@ class AnalysisOnlyPipeline:
         self._context_store = context_store
         self._session_factory = session_factory
         self._working_memory = working_memory
+        self._fp_adjudicator_memory = fp_adjudicator_memory
         self._degraded_flags = degraded_flags
         self._settings = settings
         self._memory_agent = memory_agent
@@ -959,9 +961,7 @@ class AnalysisOnlyPipeline:
             source_snapshot = await self._context_store.get(event_id, "source_snapshot")
         if event is not None:
             occurred_at = getattr(event, "occurred_at", None)
-        fp_wm = None
-        if self._working_memory is not None:
-            fp_wm = self._working_memory.for_writer("PostEvidenceFpAdjudicator")
+        fp_wm = self._fp_adjudicator_memory
         result = await run_post_evidence_fp_adjudication(
             event_id=event_id,
             evidence_output=evidence_output,

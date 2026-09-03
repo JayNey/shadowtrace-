@@ -146,10 +146,7 @@ class StorylineService:
         event_service: Any | None = None,
     ) -> None:
         self._llm_client = llm_client
-        if working_memory is not None:
-            self._bound_wm = working_memory.for_writer("StorylineService")
-        else:
-            self._bound_wm = None
+        self._bound_wm = working_memory
         self._event_service = event_service
         self.last_degraded_reason: str | None = None
 

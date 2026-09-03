@@ -454,6 +454,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         audit_service: Any | None = None,
         event_bus: Any | None = None,
         fp_matcher: Any | None = None,
+        fp_matcher_memory: BoundWorkingMemory | None = None,
         scenario_id: str | None = None,
         degraded_flags: Any | None = None,
         event_service: Any | None = None,
@@ -481,10 +482,9 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         # (and hint-merged) entities in triage_result — fixing the ISSUE-078
         # spec requirement that FP matching uses the final EntitySet.
         # ISSUE-114: pre-evidence vector similarity is advisory only; no rule hook.
-        if working_memory is not None and fp_matcher is not None:
+        if fp_matcher is not None and fp_matcher_memory is not None:
             from app.services.false_positive_matcher import FalsePositiveMatcherHook
 
-            fp_matcher_memory = working_memory.for_writer("FalsePositiveMatcher")
             self.post_triage_hooks.append(
                 FalsePositiveMatcherHook(
                     matcher=fp_matcher,

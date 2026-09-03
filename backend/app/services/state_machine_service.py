@@ -303,14 +303,6 @@ async def _build_terminal_writeback_view(
     if outbox is None:
         return None
 
-    # Parse writeback status.
-    wb_status = WritebackStatus.PENDING
-    if outbox.latest_writeback_status:
-        try:
-            wb_status = WritebackStatus(outbox.latest_writeback_status)
-        except ValueError:
-            pass
-
     # Parse approved disposition from action template.
     approved = SourceDisposition.PENDING
     approved_list = deferred_action.approved_terminal_dispositions or []
@@ -325,9 +317,10 @@ async def _build_terminal_writeback_view(
     actual_parsed = _actual_disposition_from_command_payload(payload)
     actual_enum = actual_parsed if actual_parsed is not None else SourceDisposition.PENDING
 
-    # Read simulated flag from the latest receipt for this writeback (ISSUE-227).
+    # CLOSED uses the latest persisted receipt, never outbox projection.
     simulated: bool | None = None
     confirmation_evidence: ConfirmationEvidence | None = None
+    receipt_status = WritebackStatus.PENDING
     latest_receipt = await session.scalar(
         select(orm.DispositionReceipt)
         .where(orm.DispositionReceipt.writeback_id == outbox.writeback_id)
@@ -336,6 +329,10 @@ async def _build_terminal_writeback_view(
     )
     if latest_receipt is not None:
         simulated = bool(latest_receipt.simulated)
+        try:
+            receipt_status = WritebackStatus(latest_receipt.status)
+        except ValueError:
+            receipt_status = WritebackStatus.UNKNOWN
         if latest_receipt.confirmation_evidence:
             try:
                 confirmation_evidence = ConfirmationEvidence(latest_receipt.confirmation_evidence)
@@ -350,7 +347,7 @@ async def _build_terminal_writeback_view(
         intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE,
         approved_disposition=approved,
         actual_disposition=actual_enum,
-        receipt_status=wb_status,
+        receipt_status=receipt_status,
         plan_revision=current_revision,
         simulated=simulated,
         confirmation_evidence=confirmation_evidence,

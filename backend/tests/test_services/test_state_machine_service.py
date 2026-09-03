@@ -485,6 +485,7 @@ async def _seed_terminal_writeback_fixture(
                     reason="terminal disposition",
                     execution_owner=ExecutionOwner.XDR_MANAGED.value,
                     writeback_required=False,
+                    writeback_applicable=True,
                 )
             )
             await session.flush()
@@ -530,10 +531,14 @@ async def _seed_terminal_writeback_fixture(
 
 @contextmanager
 def _live_disposition_mode(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    from app.core.config import get_settings
+    from app.core.config import Settings, get_settings
 
-    monkeypatch.setenv("DISPOSITION_MODE", "live_xdr")
     get_settings.cache_clear()
+    payload = get_settings().model_dump()
+    payload["disposition_mode"] = "live_xdr"
+    payload["disposition_adapter_kind"] = "http"
+    live = Settings.model_construct(**payload)
+    monkeypatch.setattr("app.core.config.get_settings", lambda: live)
     try:
         yield
     finally:
@@ -561,6 +566,9 @@ async def cleanup(
     async with session_factory() as session:
         async with session.begin():
             for table in (
+                orm.ApprovalPublication,
+                orm.ApprovalRecordORM,
+                orm.MemoryAccessAuditLog,
                 orm.EventAuditLog,
                 orm.EventContextJournal,
                 orm.EventContextFieldVersion,
@@ -568,6 +576,7 @@ async def cleanup(
                 orm.ActionExecutionJob,  # FK → action
                 orm.DispositionReceipt,  # FK → action
                 orm.DispositionOutbox,  # FK → action
+                orm.GraphResumeIntent,
                 orm.Action,
                 orm.Evidence,  # FK → security_event
                 orm.Report,
@@ -1663,7 +1672,7 @@ async def test_build_terminal_writeback_view_reads_nested_target_disposition(
     assert view is not None
     assert view.approved_disposition is SourceDisposition.CONTAINED
     assert view.actual_disposition is SourceDisposition.CONTAINED
-    assert view.receipt_status is WritebackStatus.CONFIRMED
+    assert view.receipt_status is WritebackStatus.PENDING
 
 
 @pytest.mark.asyncio
@@ -1946,7 +1955,41 @@ async def test_close_succeeds_when_mock_xdr_and_simulated_terminal_receipt(
     store: EventContextStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ISSUE-345: SM mock_xdr still CLOSES on simulated ACK after default False."""
+    """Mock CLOSE still requires readback_verified; simulated=true is display-only."""
+    with _mock_disposition_mode(monkeypatch):
+        event_id = await _create_event(
+            session_factory,
+            store,
+            disposition_policy=DispositionPolicy.REQUIRED.value,
+            severity=Severity.LOW.value,
+        )
+        await _walk_to_reporting(state_machine, event_id)
+        await _add_report(session_factory, event_id)
+        await _seed_applicable_confirmed_writeback_action(session_factory, event_id)
+        await _seed_terminal_writeback_fixture(
+            session_factory,
+            event_id,
+            approved=SourceDisposition.CONTAINED,
+            target_disposition=SourceDisposition.CONTAINED,
+            receipt_simulated=True,
+            receipt_confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED,
+        )
+        result = await state_machine.transition(
+            event_id,
+            EventStatus.CLOSED,
+            operator="SuperAgent",
+            reason="simulated terminal in mock mode",
+        )
+        assert result.status is EventStatus.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_required_mock_close_rejects_weak_or_missing_terminal_receipt(
+    state_machine: StateMachineService,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with _mock_disposition_mode(monkeypatch):
         event_id = await _create_event(
             session_factory,
@@ -1965,13 +2008,70 @@ async def test_close_succeeds_when_mock_xdr_and_simulated_terminal_receipt(
             receipt_simulated=True,
             receipt_confirmation_evidence=ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
         )
-        result = await state_machine.transition(
-            event_id,
-            EventStatus.CLOSED,
-            operator="SuperAgent",
-            reason="simulated terminal in mock mode",
+        with pytest.raises(
+            InvalidStateTransitionError, match="strong confirmation_evidence"
+        ) as exc:
+            await state_machine.transition(
+                event_id,
+                EventStatus.CLOSED,
+                operator="SuperAgent",
+                reason="weak mock evidence",
+            )
+        assert exc.value.error_code == "closed_weak_confirmation_evidence"
+
+
+@pytest.mark.asyncio
+async def test_required_close_uses_latest_persisted_receipt_not_outbox_projection(
+    state_machine: StateMachineService,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outbox CONFIRMED without a strong receipt cannot close."""
+    with _mock_disposition_mode(monkeypatch):
+        event_id = await _create_event(
+            session_factory,
+            store,
+            disposition_policy=DispositionPolicy.REQUIRED.value,
+            severity=Severity.LOW.value,
         )
-        assert result.status is EventStatus.CLOSED
+        await _walk_to_reporting(state_machine, event_id)
+        await _add_report(session_factory, event_id)
+        await _seed_applicable_confirmed_writeback_action(session_factory, event_id)
+        action_id = await _seed_terminal_writeback_fixture(
+            session_factory,
+            event_id,
+            approved=SourceDisposition.CONTAINED,
+            target_disposition=SourceDisposition.CONTAINED,
+            receipt_simulated=True,
+            receipt_confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED,
+        )
+        async with session_factory() as session:
+            async with session.begin():
+                action = await session.get(orm.Action, action_id)
+                assert action is not None
+                outbox = await session.scalar(
+                    select(orm.DispositionOutbox).where(
+                        orm.DispositionOutbox.action_id == action.action_id
+                    )
+                )
+                assert outbox is not None
+                outbox.latest_writeback_status = WritebackStatus.CONFIRMED.value
+                receipt = await session.scalar(
+                    select(orm.DispositionReceipt).where(
+                        orm.DispositionReceipt.writeback_id == outbox.writeback_id
+                    )
+                )
+                assert receipt is not None
+                receipt.status = WritebackStatus.ACCEPTED.value
+                receipt.confirmation_evidence = ConfirmationEvidence.ADAPTER_ACKNOWLEDGED.value
+        with pytest.raises(InvalidStateTransitionError):
+            await state_machine.transition(
+                event_id,
+                EventStatus.CLOSED,
+                operator="SuperAgent",
+                reason="outbox projection must not close",
+            )
 
 
 @pytest.mark.asyncio

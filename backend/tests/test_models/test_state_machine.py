@@ -509,14 +509,67 @@ def test_closed_gate_non_mock_accepts_manual_confirmed_terminal() -> None:
     )
 
 
-def test_closed_gate_mock_accepts_adapter_acknowledged_simulated_terminal() -> None:
-    """Mock P0 demo: simulated CONFIRMED with weak evidence may still close."""
+def test_required_mock_close_rejects_weak_or_missing_terminal_receipt() -> None:
+    """Mock cannot CLOSE on weak or missing confirmation_evidence."""
+    for evidence in (
+        ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
+        ConfirmationEvidence.STATUS_QUERIED,
+        None,
+    ):
+        with pytest.raises(
+            InvalidStateTransitionError, match="strong confirmation_evidence"
+        ) as exc_info:
+            validate_closed_gate(
+                _closed_ctx(
+                    disposition_is_mock=True,
+                    terminal_event_writeback=_terminal_ok(
+                        simulated=True,
+                        confirmation_evidence=evidence,
+                    ),
+                )
+            )
+        assert exc_info.value.error_code == "closed_weak_confirmation_evidence"
+
+
+def test_required_close_uses_latest_persisted_receipt_not_outbox_projection() -> None:
+    """CLOSED inspects TerminalEventWritebackView receipt fields, not outbox status."""
+    with pytest.raises(
+        InvalidStateTransitionError, match="terminal receipt must be CONFIRMED"
+    ):
+        validate_closed_gate(
+            _closed_ctx(
+                disposition_is_mock=True,
+                terminal_event_writeback=_terminal_ok(
+                    receipt_status=WritebackStatus.ACCEPTED,
+                    simulated=True,
+                    confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED,
+                ),
+            )
+        )
+    with pytest.raises(
+        InvalidStateTransitionError, match="strong confirmation_evidence"
+    ) as exc_info:
+        validate_closed_gate(
+            _closed_ctx(
+                disposition_is_mock=True,
+                terminal_event_writeback=_terminal_ok(
+                    receipt_status=WritebackStatus.CONFIRMED,
+                    simulated=True,
+                    confirmation_evidence=ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
+                ),
+            )
+        )
+    assert exc_info.value.error_code == "closed_weak_confirmation_evidence"
+
+
+def test_required_mock_close_accepts_readback_verified_simulated_receipt() -> None:
+    """Mock P0 CLOSE: simulated=true is allowed when evidence is strong."""
     validate_closed_gate(
         _closed_ctx(
             disposition_is_mock=True,
             terminal_event_writeback=_terminal_ok(
                 simulated=True,
-                confirmation_evidence=ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
+                confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED,
             ),
         )
     )

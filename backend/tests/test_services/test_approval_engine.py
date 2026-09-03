@@ -49,6 +49,7 @@ from app.models.enums import (
     WritebackReadiness,
 )
 from app.models.source import SourceReference
+from app.models.ids import new_approval_id
 from app.services.approval_engine import (
     SYSTEM_TIMEOUT_OPERATOR,
     ApprovalEngine,
@@ -317,6 +318,35 @@ async def _insert_action(
     return action.model_copy(update={"event_id": event_id})
 
 
+async def _prepare_waiting_approval(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    action: Action,
+    *,
+    cycles: tuple[int, ...] = (0,),
+) -> None:
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action.action_id)
+            assert row is not None
+            row.status = ActionStatus.WAITING_APPROVAL.value
+            for cycle in cycles:
+                session.add(
+                    ApprovalRecordORM(
+                        approval_id=new_approval_id(),
+                        action_id=action.action_id,
+                        event_id=event_id,
+                        plan_revision=action.plan_revision,
+                        approval_cycle=cycle,
+                        required_level=action.action_level.value,
+                        decision=ApprovalDecisionKind.REQUIRE_APPROVAL.value,
+                        timeout_at=now + timedelta(minutes=30),
+                        detail={"rule_applied": "test", "reason": "test"},
+                    )
+                )
+
+
 @pytest.mark.asyncio
 async def test_approval_required_publication_is_singleton_across_workers(
     session_factory: async_sessionmaker[AsyncSession],
@@ -325,6 +355,7 @@ async def test_approval_required_publication_is_singleton_across_workers(
 ) -> None:
     event_id = await _create_event(session_factory, store)
     action = await _insert_action(session_factory, event_id, _action_model())
+    await _prepare_waiting_approval(session_factory, event_id, action)
     bus = FakeEventBus()
     worker_a = ApprovalEngine(session_factory, event_bus=bus)  # type: ignore[arg-type]
     worker_b = ApprovalEngine(session_factory, event_bus=bus)  # type: ignore[arg-type]
@@ -343,6 +374,7 @@ async def test_approval_required_publish_failure_is_retriable(
 ) -> None:
     event_id = await _create_event(session_factory, store)
     action = await _insert_action(session_factory, event_id, _action_model())
+    await _prepare_waiting_approval(session_factory, event_id, action)
     bus = AsyncMock()
     bus.publish_event.side_effect = [False, True]
     worker_a = ApprovalEngine(session_factory, event_bus=bus)
@@ -363,6 +395,7 @@ async def test_new_approval_cycle_publishes_new_event(
 ) -> None:
     event_id = await _create_event(session_factory, store)
     action = await _insert_action(session_factory, event_id, _action_model())
+    await _prepare_waiting_approval(session_factory, event_id, action, cycles=(0, 1))
     bus = FakeEventBus()
     engine = ApprovalEngine(session_factory, event_bus=bus)  # type: ignore[arg-type]
     await engine._publish_approval_required(action, 0)
@@ -380,6 +413,8 @@ async def test_approval_publication_is_tenant_isolated(
     second_event = await _create_event(session_factory, store)
     first = await _insert_action(session_factory, first_event, _action_model())
     second = await _insert_action(session_factory, second_event, _action_model())
+    await _prepare_waiting_approval(session_factory, first_event, first)
+    await _prepare_waiting_approval(session_factory, second_event, second)
     bus = FakeEventBus()
     engine = ApprovalEngine(session_factory, event_bus=bus)  # type: ignore[arg-type]
     await engine._publish_approval_required(first, 0)
@@ -1894,6 +1929,7 @@ async def test_new_approval_cycle_has_new_publication_id(
 ) -> None:
     event_id = await _create_event(session_factory, store)
     action = await _insert_action(session_factory, event_id, _action_model())
+    await _prepare_waiting_approval(session_factory, event_id, action, cycles=(0, 1))
     await engine._publish_approval_required(action, 0)
     await engine._publish_approval_required(action, 1)
     required = [event for event in fake_bus.published if event[1] == "approval_required"]
@@ -1901,3 +1937,286 @@ async def test_new_approval_cycle_has_new_publication_id(
     assert required[0][2]["publication_id"] != required[1][2]["publication_id"]
     assert required[0][2]["approval_cycle"] == 0
     assert required[1][2]["approval_cycle"] == 1
+
+
+async def _independent_approval_session_factory() -> tuple[
+    Any, async_sessionmaker[AsyncSession]
+]:
+    engine = create_async_engine(DATABASE_URL, poolclass=NullPool)
+    factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+    return engine, factory
+
+
+def _count_approval_required(bus: FakeEventBus) -> int:
+    return len([event for event in bus.published if event[1] == "approval_required"])
+
+
+@pytest.mark.asyncio
+async def test_waiting_approval_and_publication_marker_commit_atomically(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    fake_bus: FakeEventBus,
+    engine: ApprovalEngine,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L4),
+    )
+
+    async def _boom(_session: AsyncSession) -> None:
+        raise RuntimeError("inject crash before commit")
+
+    engine._after_waiting_approval_persist = _boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="inject crash"):
+        await engine.evaluate(action, _risk(), approval_cycle=0)
+    async with session_factory() as session:
+        action_row = await session.get(orm.Action, action.action_id)
+        record = await session.scalar(
+            select(ApprovalRecordORM).where(ApprovalRecordORM.action_id == action.action_id)
+        )
+        marker = await session.scalar(
+            select(orm.ApprovalPublication).where(
+                orm.ApprovalPublication.action_id == action.action_id
+            )
+        )
+        assert action_row is not None
+        assert action_row.status == ActionStatus.PENDING.value
+        assert record is None
+        assert marker is None
+    assert _count_approval_required(fake_bus) == 0
+
+
+@pytest.mark.asyncio
+async def test_scanner_recovers_waiting_approval_without_publication_marker(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    fake_bus: FakeEventBus,
+    engine: ApprovalEngine,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L4),
+    )
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+    first = [event for event in fake_bus.published if event[1] == "approval_required"]
+    assert len(first) == 1
+    publication_id = first[0][2]["publication_id"]
+    deadline = first[0][2]["deadline"]
+    async with session_factory() as session:
+        async with session.begin():
+            marker = await session.scalar(select(orm.ApprovalPublication))
+            assert marker is not None
+            await session.delete(marker)
+    fake_bus.published.clear()
+    recovered = await engine.scan_unpublished_approvals()
+    assert recovered == 1
+    required = [event for event in fake_bus.published if event[1] == "approval_required"]
+    assert len(required) == 1
+    assert required[0][2]["publication_id"] == publication_id
+    assert required[0][2]["deadline"] == deadline
+
+
+@pytest.mark.asyncio
+async def test_event_bus_false_releases_claim_for_public_recovery(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    cleanup: None,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L4),
+    )
+    toggle = FakeEventBus()
+    original = toggle.publish_event
+
+    async def _false_then_true(
+        event_id: str, message_type: str, payload: dict | None = None
+    ) -> bool:
+        if not getattr(toggle, "allow", False):
+            return False
+        return await original(event_id, message_type, payload)
+
+    toggle.publish_event = _false_then_true  # type: ignore[method-assign]
+    toggle.allow = False
+    engine = ApprovalEngine(session_factory, event_bus=toggle)  # type: ignore[arg-type]
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+    async with session_factory() as session:
+        marker = await session.scalar(select(orm.ApprovalPublication))
+        assert marker is not None
+        assert marker.status == "pending"
+        assert marker.claim_token is None
+    assert _count_approval_required(toggle) == 0
+    toggle.allow = True
+    recovered = await engine.scan_unpublished_approvals()
+    assert recovered == 1
+    assert _count_approval_required(toggle) == 1
+
+
+@pytest.mark.asyncio
+async def test_publication_redelivery_reuses_id_and_persisted_deadline(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    fake_bus: FakeEventBus,
+    engine: ApprovalEngine,
+) -> None:
+    await test_redelivery_reuses_approval_publication_id_and_deadline(
+        session_factory, store, fake_bus, engine
+    )
+
+
+async def _race_decision_against_publication(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    engine: ApprovalEngine,
+    fake_bus: FakeEventBus,
+    decide,
+) -> tuple[int, BaseException | None, bool]:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L4),
+    )
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+    fake_bus.published.clear()
+    async with session_factory() as session:
+        async with session.begin():
+            marker = await session.scalar(select(orm.ApprovalPublication))
+            assert marker is not None
+            marker.status = "pending"
+            marker.published_at = None
+            marker.claim_token = None
+            marker.claim_expires_at = None
+    claimed = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def _gate(_admission: object) -> None:
+        claimed.set()
+        await proceed.wait()
+
+    engine_b_engine, factory_b = await _independent_approval_session_factory()
+    engine_b = ApprovalEngine(
+        factory_b,
+        event_bus=fake_bus,  # type: ignore[arg-type]
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    engine._after_publication_admission = _gate  # type: ignore[method-assign]
+    publish_task = asyncio.create_task(engine.ensure_published(action.action_id, 0))
+    await asyncio.wait_for(claimed.wait(), timeout=5)
+    decide_error: BaseException | None = None
+    decided = False
+    try:
+        await decide(engine_b, action.action_id)
+        decided = True
+    except BaseException as exc:  # noqa: BLE001 — race winner is the assertion
+        decide_error = exc
+    proceed.set()
+    published = await publish_task
+    await engine_b_engine.dispose()
+    return _count_approval_required(fake_bus), decide_error, decided and published is not None
+
+
+@pytest.mark.asyncio
+async def test_approve_racing_publication_claim_has_single_winner(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    fake_bus: FakeEventBus,
+    engine: ApprovalEngine,
+) -> None:
+    principal = Principal(subject="approver-1", roles=["approver"])
+
+    async def _approve(other: ApprovalEngine, action_id: str) -> None:
+        await other.approve(action_id, principal, "ok", "dec-race-approve")
+
+    count, error, _ = await _race_decision_against_publication(
+        session_factory=session_factory,
+        store=store,
+        engine=engine,
+        fake_bus=fake_bus,
+        decide=_approve,
+    )
+    assert count == 1
+    assert isinstance(error, ApprovalDecisionConflictError)
+
+
+@pytest.mark.asyncio
+async def test_reject_racing_publication_claim_has_single_winner(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    fake_bus: FakeEventBus,
+    engine: ApprovalEngine,
+) -> None:
+    principal = Principal(subject="approver-1", roles=["approver"])
+
+    async def _reject(other: ApprovalEngine, action_id: str) -> None:
+        await other.reject(action_id, principal, "no", "dec-race-reject")
+
+    count, error, _ = await _race_decision_against_publication(
+        session_factory=session_factory,
+        store=store,
+        engine=engine,
+        fake_bus=fake_bus,
+        decide=_reject,
+    )
+    assert count == 1
+    assert isinstance(error, ApprovalDecisionConflictError)
+
+
+@pytest.mark.asyncio
+async def test_timeout_racing_publication_claim_has_single_winner(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    fake_bus: FakeEventBus,
+    engine: ApprovalEngine,
+) -> None:
+    async def _timeout(other: ApprovalEngine, action_id: str) -> None:
+        await other.handle_timeout(action_id, 0)
+
+    count, error, _ = await _race_decision_against_publication(
+        session_factory=session_factory,
+        store=store,
+        engine=engine,
+        fake_bus=fake_bus,
+        decide=_timeout,
+    )
+    assert count == 1
+    assert isinstance(error, ApprovalDecisionConflictError)
+
+
+@pytest.mark.asyncio
+async def test_superseded_action_never_republishes_pending_marker(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    fake_bus: FakeEventBus,
+    engine: ApprovalEngine,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L4),
+    )
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+    assert _count_approval_required(fake_bus) == 1
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action.action_id)
+            assert row is not None
+            row.status = ActionStatus.SUPERSEDED.value
+            marker = await session.scalar(select(orm.ApprovalPublication))
+            assert marker is not None
+            marker.status = "pending"
+            marker.published_at = None
+            marker.claim_token = None
+            marker.claim_expires_at = None
+    fake_bus.published.clear()
+    assert await engine.ensure_published(action.action_id, 0) is False
+    assert await engine.scan_unpublished_approvals() == 0
+    assert _count_approval_required(fake_bus) == 0
