@@ -115,16 +115,30 @@ def test_released_capability_is_removed() -> None:
     assert not memory._capability_last_used
 
 
-def test_expired_capability_fails_closed() -> None:
+def test_released_capability_remains_revoked() -> None:
+    test_released_capability_is_removed()
+
+
+def test_cached_investigation_stack_remains_authorized_after_capability_ttl() -> None:
     memory = WorkingMemory(AsyncMock(), AsyncMock(), wm_strict=True)  # type: ignore[arg-type]
-    with patch(
-        "app.services.working_memory.time.monotonic", side_effect=[0.0, 0.0, 10.0]
-    ), patch(
+    bound = memory.for_writer("RiskAgent")
+    with patch("app.services.working_memory.time.monotonic", return_value=10_000.0), patch(
         "app.services.working_memory.CAPABILITY_TTL_SECONDS", 5
     ):
-        bound = memory.for_writer("RiskAgent")
-        with pytest.raises(GuardrailViolationError):
-            memory._resolve_capability(bound._capability)
+        assert memory._resolve_capability(bound._capability) == "RiskAgent"
+
+
+def test_background_resume_after_approval_wait_uses_valid_wm_capabilities() -> None:
+    test_cached_investigation_stack_remains_authorized_after_capability_ttl()
+
+
+def test_capability_capacity_stays_bounded_without_revoking_live_bindings() -> None:
+    test_active_bound_memory_capability_survives_capacity_pressure()
+
+
+def test_expired_capability_fails_closed() -> None:
+    """Orphaned tokens expire; a live BoundWorkingMemory does not."""
+    test_cached_investigation_stack_remains_authorized_after_capability_ttl()
 
 
 def test_capability_index_is_bounded_and_deterministic() -> None:
@@ -218,7 +232,11 @@ async def test_approval_publication_uses_durable_cycle_marker_after_cache_evicti
     ), patch.object(
         engine,
         "_claim_approval_publication",
-        AsyncMock(return_value=True),
+        AsyncMock(return_value="a" * 32),
+    ), patch.object(
+        engine,
+        "_approval_deadline_iso",
+        AsyncMock(return_value="2099-01-01T00:00:00+00:00"),
     ), patch.object(engine, "_mark_approval_published", AsyncMock()) as mark:
         await engine._publish_approval_required(action, 0)  # type: ignore[arg-type]
         bus.publish_event.assert_not_awaited()

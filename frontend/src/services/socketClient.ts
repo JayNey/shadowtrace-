@@ -178,7 +178,10 @@ class SocketClient {
           action_id: String(payload.action_id ?? ""),
           event_id: String(payload.event_id ?? event_id),
           status: payload.status as string | undefined,
-          approval_cycle: payload.approval_cycle as number | undefined,
+          approval_cycle:
+            typeof payload.approval_cycle === "number" ? payload.approval_cycle : undefined,
+          publication_id:
+            typeof payload.publication_id === "string" ? payload.publication_id : undefined,
           deadline: payload.deadline as string | undefined,
           summary: payload.summary as string | undefined,
           impact_assessment: payload.impact_assessment as

@@ -387,6 +387,7 @@ class DispositionOutbox(Base):
         Index("ix_disposition_outbox_latest_writeback_status", "latest_writeback_status"),
         Index("ix_disposition_outbox_next_retry_at", "next_retry_at"),
         Index("ix_disposition_outbox_lease_expires_at", "lease_expires_at"),
+        Index("ix_disposition_outbox_egress_admitted_at", "egress_admitted_at"),
         Index("ix_disposition_outbox_disposition_id", "disposition_id"),
     )
 
@@ -420,6 +421,7 @@ class DispositionOutbox(Base):
     locked_by: Mapped[str | None] = mapped_column(String, nullable=True)
     locked_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    egress_admitted_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     last_error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)

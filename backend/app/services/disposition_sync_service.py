@@ -8,7 +8,7 @@ import logging
 import re
 import secrets
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
@@ -105,6 +105,17 @@ ResumeInvestigationHook = Callable[[str], Awaitable[ResumeStatus | None]]
 _DEFAULT_LEASE_SECONDS = 30
 _ERROR_DETAIL_MAX_LEN = 500
 OUTBOX_SUPERSEDED_ERROR_CODE = "superseded_by_new_head"
+AUTHORIZATION_RACE_AFTER_EGRESS_ERROR_CODE = "authorization_changed_after_egress"
+_PROVIDER_FACT_WRITEBACK_STATUSES = frozenset(
+    {
+        WritebackStatus.ACCEPTED,
+        WritebackStatus.CONFIRMED,
+        WritebackStatus.PARTIAL,
+        WritebackStatus.FAILED,
+        WritebackStatus.CONFLICT,
+        WritebackStatus.UNKNOWN,
+    }
+)
 _OPERATOR_RETRY_REPLAY_PREFIX = "operator_retry:replay"
 _OPERATOR_RETRY_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
@@ -161,6 +172,7 @@ class _DeliveryClaim:
     attempt: int
     locked_at: datetime
     lease_expires_at: datetime
+    egress_admitted_at: datetime | None = None
 
 
 class _OperatorRetryAction(StrEnum):
@@ -214,6 +226,11 @@ _DELIVERY_APPROVAL_RECHECK_INTENTS: frozenset[DispositionIntentKind] = frozenset
         DispositionIntentKind.COMPENSATION_RECORD,
     }
 )
+
+
+def _outbox_is_egress_admitted(outbox: orm.DispositionOutbox) -> bool:
+    """True after the durable point-of-no-return CAS; submit may proceed or already has."""
+    return outbox.egress_admitted_at is not None
 
 
 def _action_still_approved_for_delivery(action: orm.Action) -> bool:
@@ -367,6 +384,25 @@ class DispositionSyncService:
                             "command_payload_sha256": prior_head.command_payload_sha256,
                             "delivery_status": prior_head.delivery_status,
                         }
+                    )
+                await session.get(
+                    orm.Action,
+                    prior_head.action_id,
+                    with_for_update=True,
+                )
+                if _outbox_is_egress_admitted(prior_head):
+                    raise WritebackConflictError(
+                        "active head has irrevocable egress admission; "
+                        "supersede waits until delivery completes",
+                        details={
+                            "event_id": event_id,
+                            "prior_disposition_id": prior_head.disposition_id,
+                            "egress_admitted_at": (
+                                prior_head.egress_admitted_at.isoformat()
+                                if prior_head.egress_admitted_at is not None
+                                else None
+                            ),
+                        },
                     )
                 # Propagate lineage onto the wire payload so the adapter / Mock
                 # XDR can honor its supersede contract (old head deactivated).
@@ -1192,18 +1228,33 @@ class DispositionSyncService:
         await self._deliver_outbox(outbox_id)
 
     async def _deliver_outbox(self, outbox_id: str) -> None:
-        """Claim, perform provider I/O, then fence the final database update."""
+        """Claim, admit under row locks, perform provider I/O, then fence finalize.
+
+        Egress-admission protocol:
+        1. ``_claim_outbox`` takes Event → Outbox → Action locks, sets LEASED +
+           fence, and commits. This is exclusive right to *attempt* admission,
+           not yet the point of no return. Concurrent supersede/revoke may still
+           steal the fence so this worker never submits.
+        2. ``_after_delivery_claim`` is a test seam between claim commit and
+           admission. Production is a no-op.
+        3. ``_confirm_egress_admission`` re-locks Event → Outbox → Action. If
+           the fence, active-head, and approval still hold, it stamps
+           ``egress_admitted_at`` and commits. That stamp is the durable
+           point of no return: concurrent code must not mark the command as
+           un-egressed SUPERSEDED. If the CAS fails, this worker must not
+           submit and must not write receipts/Action/outbox/resume/events.
+        4. Provider ``submit`` / ``readback`` stay outside any database
+           transaction. After I/O, finalize re-locks and applies only when
+           the fence still matches and the lease has not expired.
+        """
         claim = await self._claim_outbox(outbox_id)
         if claim is None:
             return
-        if not await self._approval_snapshot_matches(claim):
-            await self._mark_delivery_dead_letter(
-                claim.outbox_id,
-                claim=claim,
-                error_code="approval_revoked_before_submit",
-                error_detail="approval changed after claim and before provider submit",
-            )
+        await self._after_delivery_claim(claim)
+        admitted = await self._confirm_egress_admission(claim)
+        if admitted is None:
             return
+        claim = admitted
 
         try:
             with disposition_span(
@@ -1240,17 +1291,13 @@ class DispositionSyncService:
 
         reconcile_entity_effect = False
         receipt_job_projection: ActionExecutionJob | None = None
+        authorization_race = False
         async with self._session_factory() as session:
             async with session.begin():
-                outbox = await session.scalar(
-                    select(orm.DispositionOutbox)
-                    .where(orm.DispositionOutbox.outbox_id == claim.outbox_id)
-                    .with_for_update()
-                )
+                outbox, action = await self._lock_event_outbox_action(session, claim.outbox_id)
                 if outbox is None or not self._claim_fence_matches(outbox, claim):
                     logger.info("stale outbox delivery result discarded outbox=%s", claim.outbox_id)
                     return
-                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
                 approval_changed = (
                     action is None
                     or action.status != claim.approval_status
@@ -1264,11 +1311,13 @@ class DispositionSyncService:
                     )
                 assert parsed_receipt is not None
                 if approval_changed:
-                    parsed_receipt = await self._append_receipt(
+                    authorization_race = True
+                    await self._record_authorization_race_after_egress(
                         session,
                         outbox,
-                        status=WritebackStatus.UNKNOWN,
-                        provider_message="approval changed while provider submission was in flight",
+                        action=action,
+                        receipt=parsed_receipt,
+                        claimed_approval_status=claim.approval_status,
                     )
                 outbox.latest_writeback_status = parsed_receipt.status.value
                 now = datetime.now(UTC)
@@ -1334,10 +1383,16 @@ class DispositionSyncService:
                     "intent_kind": claim.command.intent_kind.value,
                 },
             )
+            payload: dict[str, Any] = {
+                "writeback_id": claim.writeback_id,
+                "status": final_receipt.status.value,
+            }
+            if authorization_race:
+                payload["authorization_race"] = AUTHORIZATION_RACE_AFTER_EGRESS_ERROR_CODE
             await self._bus.publish_event(
                 claim.event_id,
                 "writeback_updated",
-                {"writeback_id": claim.writeback_id, "status": final_receipt.status.value},
+                payload,
             )
 
     async def _claim_outbox(self, outbox_id: str) -> _DeliveryClaim | None:
@@ -1474,6 +1529,7 @@ class DispositionSyncService:
                     attempt=int(outbox.attempt),
                     locked_at=locked_at,
                     lease_expires_at=lease_expires_at,
+                    egress_admitted_at=None,
                 )
 
     @staticmethod
@@ -1484,19 +1540,108 @@ class DispositionSyncService:
             and int(outbox.attempt) == claim.attempt
             and outbox.locked_at == claim.locked_at
             and outbox.lease_expires_at == claim.lease_expires_at
+            and outbox.lease_expires_at is not None
             and outbox.lease_expires_at > datetime.now(UTC)
         )
 
-    async def _approval_snapshot_matches(self, claim: _DeliveryClaim) -> bool:
-        """Fail closed when approval changes between claim commit and submit."""
-        async with self._session_factory() as session:
-            action = await session.get(orm.Action, claim.action_id)
-            return (
-                action is not None
-                and action.status == claim.approval_status
-                and action.updated_at == claim.approval_updated_at
-                and _action_still_approved_for_delivery(action)
+    async def _after_delivery_claim(self, claim: _DeliveryClaim) -> None:
+        """Test seam between claim commit and egress-admission CAS. Production no-op."""
+        return None
+
+    async def _lock_event_outbox_action(
+        self,
+        session: AsyncSession,
+        outbox_id: str,
+        *,
+        skip_locked: bool = False,
+    ) -> tuple[orm.DispositionOutbox | None, orm.Action | None]:
+        """Lock SecurityEvent → Outbox → Action. Never invert this order."""
+        event_id = await session.scalar(
+            select(orm.DispositionOutbox.event_id).where(
+                orm.DispositionOutbox.outbox_id == outbox_id
             )
+        )
+        if event_id is None:
+            return None, None
+        event = await session.get(
+            orm.SecurityEvent,
+            event_id,
+            with_for_update=True,
+        )
+        if event is None:
+            return None, None
+        stmt = select(orm.DispositionOutbox).where(orm.DispositionOutbox.outbox_id == outbox_id)
+        stmt = stmt.with_for_update(skip_locked=skip_locked)
+        outbox = await session.scalar(stmt)
+        if outbox is None or outbox.event_id != event_id:
+            return None, None
+        action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
+        return outbox, action
+
+    async def _confirm_egress_admission(self, claim: _DeliveryClaim) -> _DeliveryClaim | None:
+        """Durable point-of-no-return CAS. Provider I/O must not run if this returns None."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                outbox, action = await self._lock_event_outbox_action(session, claim.outbox_id)
+                if outbox is None or not self._claim_fence_matches(outbox, claim):
+                    return None
+                now = datetime.now(UTC)
+                if outbox.superseded_by_disposition_id is not None:
+                    self._block_superseded_outbox(outbox, now=now)
+                    return None
+                command = claim.command
+                if not await self._assert_active_head_for_delivery(session, outbox, command):
+                    self._block_superseded_outbox(outbox, now=now)
+                    return None
+                if (
+                    command.intent_kind in _DELIVERY_APPROVAL_RECHECK_INTENTS
+                    and (
+                        action is None
+                        or action.status != claim.approval_status
+                        or action.updated_at != claim.approval_updated_at
+                        or not _action_still_approved_for_delivery(action)
+                    )
+                ):
+                    self._release_leased_outbox_to_dead_letter(
+                        outbox,
+                        now=now,
+                        error_code="approval_revoked_before_submit",
+                        error_detail=(
+                            "approval changed after claim and before egress admission"
+                        ),
+                    )
+                    return None
+                outbox.egress_admitted_at = now
+                outbox.updated_at = now
+                return replace(claim, egress_admitted_at=now)
+
+    async def _record_authorization_race_after_egress(
+        self,
+        session: AsyncSession,
+        outbox: orm.DispositionOutbox,
+        *,
+        action: orm.Action | None,
+        receipt: DispositionReceipt,
+        claimed_approval_status: str,
+    ) -> None:
+        """Provider receipt is external fact; record the auth race separately."""
+        if receipt.status not in _PROVIDER_FACT_WRITEBACK_STATUSES:
+            return
+        outbox.last_error_code = AUTHORIZATION_RACE_AFTER_EGRESS_ERROR_CODE
+        outbox.last_error_detail = self._truncate_error_detail(
+            "authorization changed after irrevocable egress admission; "
+            f"provider_status={receipt.status.value} claimed_approval={claimed_approval_status} "
+            f"action_status={action.status if action is not None else None}"
+        )
+        session.add(
+            orm.EventAuditLog(
+                event_id=outbox.event_id,
+                from_status=claimed_approval_status,
+                to_status=action.status if action is not None else None,
+                operator="DispositionSyncService",
+                reason=AUTHORIZATION_RACE_AFTER_EGRESS_ERROR_CODE,
+            )
+        )
 
     async def _finalize_claim_exception(self, claim: _DeliveryClaim, exc: Exception) -> None:
         kind, code = classify_disposition_delivery_error(exc)
@@ -1576,6 +1721,22 @@ class DispositionSyncService:
                 confirmed_at=now if status is WritebackStatus.CONFIRMED else None,
             )
         parsed = sanitize_disposition_receipt(parsed)
+        previous_status: WritebackStatus | None = None
+        if seq_row is not None:
+            previous_raw = await session.scalar(
+                select(orm.DispositionReceipt.status).where(
+                    orm.DispositionReceipt.writeback_id == outbox.writeback_id,
+                    orm.DispositionReceipt.sequence == int(seq_row),
+                )
+            )
+            if previous_raw is not None:
+                previous_status = WritebackStatus(previous_raw)
+        if previous_status is not None and previous_status is not parsed.status:
+            validate_writeback_status_transition(
+                previous_status,
+                parsed.status,
+                evidence_adjudication=True,
+            )
         session.add(
             orm.DispositionReceipt(
                 writeback_id=parsed.writeback_id,
@@ -2651,6 +2812,8 @@ class DispositionSyncService:
         reconciled = 0
         claims = await self._claim_paused_outboxes(limit=limit)
         for claim in claims:
+            if not await self._revalidate_paused_lookup_claim(claim):
+                continue
             outcome = await self._lookup_paused_outbox(claim)
             try:
                 applied, event_id, status = await self._apply_paused_lookup_outcome(
@@ -2700,9 +2863,12 @@ class DispositionSyncService:
         claims: list[_PausedLookupClaim] = []
         async with self._session_factory() as session:
             async with session.begin():
-                rows = (
-                    await session.scalars(
-                        select(orm.DispositionOutbox)
+                candidate_rows = (
+                    await session.execute(
+                        select(
+                            orm.DispositionOutbox.outbox_id,
+                            orm.DispositionOutbox.event_id,
+                        )
                         .where(
                             orm.DispositionOutbox.delivery_status
                             == OutboxDeliveryStatus.PAUSED.value,
@@ -2713,12 +2879,30 @@ class DispositionSyncService:
                                 orm.DispositionOutbox.lease_expires_at <= now,
                             ),
                         )
-                        .order_by(orm.DispositionOutbox.updated_at.asc())
+                        .order_by(
+                            orm.DispositionOutbox.event_id.asc(),
+                            orm.DispositionOutbox.updated_at.asc(),
+                        )
                         .limit(limit)
-                        .with_for_update(skip_locked=True)
                     )
                 ).all()
-                for row in rows:
+                for outbox_id, _event_id in candidate_rows:
+                    row, action = await self._lock_event_outbox_action(
+                        session, str(outbox_id), skip_locked=True
+                    )
+                    if row is None:
+                        continue
+                    if (
+                        OutboxDeliveryStatus(row.delivery_status) is not OutboxDeliveryStatus.PAUSED
+                        or row.superseded_by_disposition_id is not None
+                    ):
+                        continue
+                    if not (
+                        row.locked_by is None
+                        or row.lease_expires_at is None
+                        or row.lease_expires_at <= now
+                    ):
+                        continue
                     try:
                         command = DispositionCommand.model_validate(row.command_payload)
                         adapter = self._resolve_adapter(row)
@@ -2743,7 +2927,6 @@ class DispositionSyncService:
                     row.locked_at = locked_at
                     row.lease_expires_at = lease_expires_at
                     row.updated_at = now
-                    action = await session.get(orm.Action, row.action_id, with_for_update=True)
                     _mirror_writeback_status_to_action(action, WritebackStatus.UNKNOWN.value)
                     claims.append(
                         _PausedLookupClaim(
@@ -2768,6 +2951,36 @@ class DispositionSyncService:
                         )
                     )
         return claims
+
+    @staticmethod
+    def _paused_lookup_fence_matches(
+        outbox: orm.DispositionOutbox,
+        claim: _PausedLookupClaim,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        now = now or datetime.now(UTC)
+        return (
+            OutboxDeliveryStatus(outbox.delivery_status) is OutboxDeliveryStatus.PAUSED
+            and outbox.locked_by == claim.token
+            and int(outbox.attempt) == claim.attempt
+            and outbox.locked_at == claim.locked_at
+            and outbox.lease_expires_at == claim.lease_expires_at
+            and outbox.lease_expires_at is not None
+            and outbox.lease_expires_at > now
+            and outbox.superseded_by_disposition_id is None
+            and outbox.idempotency_key == claim.idempotency_key
+            and outbox.command_payload_sha256 == claim.command_payload_sha256
+        )
+
+    async def _revalidate_paused_lookup_claim(self, claim: _PausedLookupClaim) -> bool:
+        """Drop expired pre-claimed rows before provider lookup (batch later claims)."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                outbox, _action = await self._lock_event_outbox_action(session, claim.outbox_id)
+                if outbox is None or not self._paused_lookup_fence_matches(outbox, claim):
+                    return False
+                return True
 
     async def _lookup_paused_outbox(
         self,
@@ -2830,22 +3043,9 @@ class DispositionSyncService:
         now = datetime.now(UTC)
         async with self._session_factory() as session:
             async with session.begin():
-                outbox = await session.scalar(
-                    select(orm.DispositionOutbox)
-                    .where(orm.DispositionOutbox.outbox_id == claim.outbox_id)
-                    .with_for_update()
-                )
-                if outbox is None:
-                    return False, None, None
-                if (
-                    OutboxDeliveryStatus(outbox.delivery_status) is not OutboxDeliveryStatus.PAUSED
-                    or outbox.locked_by != claim.token
-                    or int(outbox.attempt) != claim.attempt
-                    or outbox.locked_at != claim.locked_at
-                    or outbox.lease_expires_at != claim.lease_expires_at
-                    or outbox.superseded_by_disposition_id is not None
-                    or outbox.idempotency_key != claim.idempotency_key
-                    or outbox.command_payload_sha256 != claim.command_payload_sha256
+                outbox, action = await self._lock_event_outbox_action(session, claim.outbox_id)
+                if outbox is None or not self._paused_lookup_fence_matches(
+                    outbox, claim, now=now
                 ):
                     return False, None, None
 
@@ -2854,7 +3054,6 @@ class DispositionSyncService:
                 outbox.lease_expires_at = None
                 outbox.next_retry_at = None
                 outbox.updated_at = now
-                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
 
                 if outcome.kind is _PausedLookupKind.DEGRADED:
                     outbox.latest_writeback_status = WritebackStatus.UNKNOWN.value
@@ -2976,21 +3175,12 @@ class DispositionSyncService:
         detail: str,
     ) -> None:
         """Release a failed reconciliation token without exposing the row to delivery."""
+        now = datetime.now(UTC)
         async with self._session_factory() as session:
             async with session.begin():
-                outbox = await session.scalar(
-                    select(orm.DispositionOutbox)
-                    .where(orm.DispositionOutbox.outbox_id == claim.outbox_id)
-                    .with_for_update()
-                )
-                if (
-                    outbox is None
-                    or OutboxDeliveryStatus(outbox.delivery_status)
-                    is not OutboxDeliveryStatus.PAUSED
-                    or outbox.locked_by != claim.token
-                    or int(outbox.attempt) != claim.attempt
-                    or outbox.locked_at != claim.locked_at
-                    or outbox.lease_expires_at != claim.lease_expires_at
+                outbox, _action = await self._lock_event_outbox_action(session, claim.outbox_id)
+                if outbox is None or not self._paused_lookup_fence_matches(
+                    outbox, claim, now=now
                 ):
                     return
                 outbox.locked_by = None
@@ -2998,7 +3188,7 @@ class DispositionSyncService:
                 outbox.lease_expires_at = None
                 outbox.last_error_code = error_code
                 outbox.last_error_detail = self._truncate_error_detail(detail)
-                outbox.updated_at = datetime.now(UTC)
+                outbox.updated_at = now
 
     def _release_leased_outbox_to_dead_letter(
         self,
@@ -3140,11 +3330,7 @@ class DispositionSyncService:
         detail = self._truncate_error_detail(error_detail)
         async with self._session_factory() as session:
             async with session.begin():
-                outbox = await session.scalar(
-                    select(orm.DispositionOutbox)
-                    .where(orm.DispositionOutbox.outbox_id == outbox_id)
-                    .with_for_update()
-                )
+                outbox, _locked_action = await self._lock_event_outbox_action(session, outbox_id)
                 if outbox is None or (
                     claim is not None and not self._claim_fence_matches(outbox, claim)
                 ):
@@ -3197,11 +3383,7 @@ class DispositionSyncService:
         detail = self._truncate_error_detail(error_detail)
         async with self._session_factory() as session:
             async with session.begin():
-                outbox = await session.scalar(
-                    select(orm.DispositionOutbox)
-                    .where(orm.DispositionOutbox.outbox_id == outbox_id)
-                    .with_for_update()
-                )
+                outbox, _locked_action = await self._lock_event_outbox_action(session, outbox_id)
                 if outbox is None or (
                     claim is not None and not self._claim_fence_matches(outbox, claim)
                 ):
@@ -3281,11 +3463,7 @@ class DispositionSyncService:
         detail = self._truncate_error_detail(error_detail)
         async with self._session_factory() as session:
             async with session.begin():
-                outbox = await session.scalar(
-                    select(orm.DispositionOutbox)
-                    .where(orm.DispositionOutbox.outbox_id == outbox_id)
-                    .with_for_update()
-                )
+                outbox, _locked_action = await self._lock_event_outbox_action(session, outbox_id)
                 if outbox is None or (
                     claim is not None and not self._claim_fence_matches(outbox, claim)
                 ):
@@ -3331,7 +3509,21 @@ class DispositionSyncService:
         superseded_by_disposition_id: str,
         now: datetime,
     ) -> None:
-        """Write lineage and terminate undelivered delivery for a superseded head (ISSUE-273)."""
+        """Write lineage and terminate undelivered delivery for a superseded head (ISSUE-273).
+
+        An egress-admitted row is past the point of no return: it must not be
+        labelled as an un-egressed SUPERSEDED command. Enqueue refuses that
+        case before calling this helper.
+        """
+        if _outbox_is_egress_admitted(prior_head):
+            raise WritebackConflictError(
+                "egress-admitted outbox cannot be marked un-egressed SUPERSEDED",
+                details={
+                    "outbox_id": prior_head.outbox_id,
+                    "disposition_id": prior_head.disposition_id,
+                    "superseded_by_disposition_id": superseded_by_disposition_id,
+                },
+            )
         prior_head.superseded_by_disposition_id = superseded_by_disposition_id
         raw_status = prior_head.delivery_status or OutboxDeliveryStatus.READY.value
         current = OutboxDeliveryStatus(raw_status)
@@ -3419,11 +3611,7 @@ class DispositionSyncService:
         now = datetime.now(UTC)
         async with self._session_factory() as session:
             async with session.begin():
-                outbox = await session.scalar(
-                    select(orm.DispositionOutbox)
-                    .where(orm.DispositionOutbox.outbox_id == outbox_id)
-                    .with_for_update()
-                )
+                outbox, _locked_action = await self._lock_event_outbox_action(session, outbox_id)
                 if outbox is None or (
                     claim is not None and not self._claim_fence_matches(outbox, claim)
                 ):
@@ -3447,11 +3635,7 @@ class DispositionSyncService:
         now = datetime.now(UTC)
         async with self._session_factory() as session:
             async with session.begin():
-                outbox = await session.scalar(
-                    select(orm.DispositionOutbox)
-                    .where(orm.DispositionOutbox.outbox_id == outbox_id)
-                    .with_for_update()
-                )
+                outbox, _locked_action = await self._lock_event_outbox_action(session, outbox_id)
                 if outbox is None or (
                     claim is not None and not self._claim_fence_matches(outbox, claim)
                 ):

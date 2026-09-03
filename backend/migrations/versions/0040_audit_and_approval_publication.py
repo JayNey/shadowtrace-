@@ -64,9 +64,22 @@ def upgrade() -> None:
     op.create_index(
         "ix_approval_publication_claim_expires", "approval_publication", ["claim_expires_at"]
     )
+    op.add_column(
+        "disposition_outbox",
+        sa.Column("egress_admitted_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    op.create_index(
+        "ix_disposition_outbox_egress_admitted_at",
+        "disposition_outbox",
+        ["egress_admitted_at"],
+    )
 
 
 def downgrade() -> None:
+    op.drop_index(
+        "ix_disposition_outbox_egress_admitted_at", table_name="disposition_outbox"
+    )
+    op.drop_column("disposition_outbox", "egress_admitted_at")
     op.drop_index("ix_approval_publication_claim_expires", table_name="approval_publication")
     op.drop_table("approval_publication")
     op.drop_index("ix_memory_access_audit_event_created", table_name="memory_access_audit_log")

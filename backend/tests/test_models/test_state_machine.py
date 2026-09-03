@@ -906,6 +906,21 @@ def test_job_and_outbox_and_writeback_edges() -> None:
     )
     with pytest.raises(InvalidStateTransitionError):
         validate_writeback_status_transition(WritebackStatus.CONFIRMED, WritebackStatus.PENDING)
+    with pytest.raises(InvalidStateTransitionError):
+        validate_writeback_status_transition(
+            WritebackStatus.CONFIRMED,
+            WritebackStatus.UNKNOWN,
+            evidence_adjudication=True,
+        )
+
+
+def test_confirmed_receipt_never_transitions_to_unknown() -> None:
+    with pytest.raises(InvalidStateTransitionError):
+        validate_writeback_status_transition(
+            WritebackStatus.CONFIRMED,
+            WritebackStatus.UNKNOWN,
+            evidence_adjudication=True,
+        )
     validate_writeback_status_transition(
         WritebackStatus.UNKNOWN,
         WritebackStatus.CONFIRMED,

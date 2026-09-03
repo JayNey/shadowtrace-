@@ -243,7 +243,9 @@
       "type": "object",
       "required": [
         "action_id",
-        "action_name"
+        "action_name",
+        "publication_id",
+        "approval_cycle"
       ],
       "properties": {
         "action_id": {
@@ -252,6 +254,16 @@
         },
         "action_name": {
           "type": "string"
+        },
+        "publication_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "Stable id for one action+approval_cycle publication; redelivery reuses it."
+        },
+        "approval_cycle": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Approval cycle for this action; a new cycle is a new publication."
         },
         "summary": {
           "type": "string"

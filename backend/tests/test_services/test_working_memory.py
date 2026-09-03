@@ -499,3 +499,21 @@ async def test_redis_unavailable_marks_degraded_flag_once(
 
     flags = await store.get(event_id, "degraded_flags")
     assert "redis_context_unavailable=true" in flags
+
+
+@pytest.mark.asyncio
+async def test_cached_writer_remains_authorized_after_capability_ttl(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    risk = wm.for_writer("RiskAgent")
+    from unittest.mock import patch
+
+    with patch("app.services.working_memory.time.monotonic", return_value=10_000.0), patch(
+        "app.services.working_memory.CAPABILITY_TTL_SECONDS", 5
+    ):
+        await risk.write(event_id, "risk_assessment", {"score": 9})
+    assert await store.get(event_id, "risk_assessment") == {"score": 9}

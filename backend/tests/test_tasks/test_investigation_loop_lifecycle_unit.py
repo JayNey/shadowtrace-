@@ -137,3 +137,21 @@ async def test_task_owned_resource_close_order_is_observable(
     )
     await tasks._close_task_owned_resources()
     assert order == ["embedding", "adapters", "redis"]
+
+
+def test_cached_investigation_stack_remains_authorized_after_capability_ttl() -> None:
+    test_background_resume_after_approval_wait_uses_valid_wm_capabilities()
+
+
+def test_background_resume_after_approval_wait_uses_valid_wm_capabilities() -> None:
+    """Cached investigation-stack writers must survive idle TTL across approval wait."""
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.working_memory import WorkingMemory
+
+    memory = WorkingMemory(AsyncMock(), AsyncMock(), wm_strict=True)  # type: ignore[arg-type]
+    bound = memory.for_writer("ResponseAgent")
+    with patch("app.services.working_memory.time.monotonic", return_value=10_000.0), patch(
+        "app.services.working_memory.CAPABILITY_TTL_SECONDS", 5
+    ):
+        assert memory._resolve_capability(bound._capability) == "ResponseAgent"

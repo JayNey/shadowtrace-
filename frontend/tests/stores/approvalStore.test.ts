@@ -32,6 +32,7 @@ describe("approvalStore", () => {
       error: null,
       unreadCount: 0,
       approvalDeadlines: {},
+      seenPublicationIds: [],
       eventPendingApprovals: [],
       eventLoading: false,
       eventError: null,
@@ -558,6 +559,8 @@ describe("approvalStore", () => {
       event_id: "evt-1",
       payload: {
         action_id: "act-new",
+        publication_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        approval_cycle: 0,
         deadline: "2099-01-01T00:00:00.000Z",
         summary: "isolate host",
       },
@@ -793,5 +796,60 @@ describe("approvalStore", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("approvalStore_deduplicates_same_publication_id", () => {
+    vi.mocked(listEvents).mockResolvedValue({
+      data: { total: 0, page: 1, page_size: 200, items: [] },
+    } as never);
+    vi.mocked(listActions).mockResolvedValue({
+      data: { total: 0, page: 1, page_size: 200, items: [] },
+    } as never);
+    const event: SocketEvent = {
+      type: "approval_required",
+      event_id: "evt-1",
+      payload: {
+        action_id: "act-dup",
+        publication_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        approval_cycle: 0,
+        deadline: "2099-01-01T00:00:00.000Z",
+        summary: "isolate host",
+      },
+    };
+    useApprovalStore.getState()._applySocketEvent(event);
+    useApprovalStore.getState()._applySocketEvent(event);
+    expect(useApprovalStore.getState().unreadCount).toBe(1);
+    expect(notification.info).toHaveBeenCalledTimes(1);
+  });
+
+  it("approvalStore_accepts_next_approval_cycle", () => {
+    vi.mocked(listEvents).mockResolvedValue({
+      data: { total: 0, page: 1, page_size: 200, items: [] },
+    } as never);
+    vi.mocked(listActions).mockResolvedValue({
+      data: { total: 0, page: 1, page_size: 200, items: [] },
+    } as never);
+    useApprovalStore.getState()._applySocketEvent({
+      type: "approval_required",
+      event_id: "evt-1",
+      payload: {
+        action_id: "act-cycle",
+        publication_id: "cccccccccccccccccccccccccccccccc",
+        approval_cycle: 0,
+        summary: "isolate host",
+      },
+    });
+    useApprovalStore.getState()._applySocketEvent({
+      type: "approval_required",
+      event_id: "evt-1",
+      payload: {
+        action_id: "act-cycle",
+        publication_id: "dddddddddddddddddddddddddddddddd",
+        approval_cycle: 1,
+        summary: "isolate host",
+      },
+    });
+    expect(useApprovalStore.getState().unreadCount).toBe(2);
+    expect(notification.info).toHaveBeenCalledTimes(2);
   });
 });

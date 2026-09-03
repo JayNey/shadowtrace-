@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -126,7 +127,7 @@ class WriterCapability:
     _nonce: object
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class BoundWorkingMemory:
     """Agent-facing memory view bound to one non-self-reported writer identity."""
 
@@ -183,6 +184,7 @@ class WorkingMemory:
         self._redis_degrade_lock = RLock()
         self._issued_capabilities: OrderedDict[WriterCapability, str] = OrderedDict()
         self._capability_last_used: OrderedDict[WriterCapability, float] = OrderedDict()
+        self._live_bindings: dict[WriterCapability, weakref.ReferenceType[BoundWorkingMemory]] = {}
         self._capability_lock = RLock()
 
     def bind_degraded_flag_service(self, service: DegradedFlagService) -> None:
@@ -204,7 +206,7 @@ class WorkingMemory:
             )
         capability = WriterCapability(owner=canonical, _nonce=object())
         with self._capability_lock:
-            self._purge_expired_capabilities()
+            self._reclaim_unbound_capabilities()
             if len(self._issued_capabilities) >= CAPABILITY_LIMIT:
                 raise GuardrailViolationError(
                     "working-memory capability capacity exhausted; release an active capability",
@@ -213,13 +215,14 @@ class WorkingMemory:
                 )
             self._issued_capabilities[capability] = canonical
             self._capability_last_used[capability] = time.monotonic()
-        return BoundWorkingMemory(self, capability)
+            bound = BoundWorkingMemory(self, capability)
+            self._live_bindings[capability] = weakref.ref(bound)
+            return bound
 
     def release(self, capability: WriterCapability) -> None:
         """Revoke a capability; subsequent access fails closed."""
         with self._capability_lock:
-            self._issued_capabilities.pop(capability, None)
-            self._capability_last_used.pop(capability, None)
+            self._drop_capability_locked(capability)
 
     revoke = release
 
@@ -409,7 +412,7 @@ class WorkingMemory:
     def _resolve_capability(self, capability: WriterCapability) -> str:
         try:
             with self._capability_lock:
-                self._purge_expired_capabilities()
+                self._reclaim_unbound_capabilities()
                 owner = self._issued_capabilities[capability]
                 self._capability_last_used[capability] = time.monotonic()
                 self._capability_last_used.move_to_end(capability)
@@ -471,11 +474,28 @@ class WorkingMemory:
                     )
                 )
 
-    def _purge_expired_capabilities(self) -> None:
+    def _binding_is_live(self, capability: WriterCapability) -> bool:
+        ref = self._live_bindings.get(capability)
+        return ref is not None and ref() is not None
+
+    def _drop_capability_locked(self, capability: WriterCapability) -> None:
+        self._issued_capabilities.pop(capability, None)
+        self._capability_last_used.pop(capability, None)
+        self._live_bindings.pop(capability, None)
+
+    def _reclaim_unbound_capabilities(self) -> None:
+        """Drop capabilities whose BoundWorkingMemory is gone; never revoke live ones.
+
+        Idle TTL only applies to orphaned tokens that have no live binding.
+        Capacity stays bounded by reclaiming dead bindings first, then refusing
+        new issues rather than evicting a still-held capability.
+        """
         cutoff = time.monotonic() - CAPABILITY_TTL_SECONDS
         for capability, last_used in list(self._capability_last_used.items()):
-            if last_used <= cutoff:
-                self.release(capability)
+            if self._binding_is_live(capability):
+                continue
+            if last_used <= cutoff or capability not in self._live_bindings:
+                self._drop_capability_locked(capability)
 
     async def _write_with_version_retry(
         self,

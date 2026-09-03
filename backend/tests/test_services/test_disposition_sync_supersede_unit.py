@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.core.errors import WritebackConflictError
 from app.db import models as orm
 from app.models.disposition import (
     DispositionCommand,
@@ -326,6 +327,24 @@ async def test_finalize_superseded_head_records_dead_letter_metric(
     assert prior.last_error_code == OUTBOX_SUPERSEDED_ERROR_CODE
     assert prior.locked_by is None
     assert recorded == [("mock_xdr", OUTBOX_SUPERSEDED_ERROR_CODE)]
+
+
+@pytest.mark.asyncio
+async def test_finalize_superseded_head_refuses_egress_admitted_row() -> None:
+    from datetime import UTC, datetime
+
+    prior = _prior_head()
+    prior.delivery_status = OutboxDeliveryStatus.LEASED.value
+    prior.egress_admitted_at = datetime.now(UTC)
+    service = _service()
+    with pytest.raises(WritebackConflictError, match="egress-admitted"):
+        service._finalize_superseded_head(
+            prior,
+            superseded_by_disposition_id="disp-new",
+            now=datetime.now(UTC),
+        )
+    assert prior.superseded_by_disposition_id is None
+    assert prior.delivery_status == OutboxDeliveryStatus.LEASED.value
 
 
 @pytest.mark.asyncio
