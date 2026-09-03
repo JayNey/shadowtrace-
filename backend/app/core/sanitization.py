@@ -47,10 +47,18 @@ _URL_CREDENTIAL_RE = re.compile(
 )
 
 
+# Frozen Socket fields that substring-match secret key patterns but are
+# enum-constrained markers, not credentials (writeback_updated.authorization_race).
+_NON_SECRET_SCHEMA_KEYS = frozenset({"authorization_race"})
+
+
 def is_sensitive_key(key: object) -> bool:
     """Return whether a mapping key is secret-bearing by policy."""
 
-    return bool(_SENSITIVE_KEY_RE.search(str(key)))
+    key_str = str(key)
+    if key_str in _NON_SECRET_SCHEMA_KEYS:
+        return False
+    return bool(_SENSITIVE_KEY_RE.search(key_str))
 
 
 def redact_sensitive_text(value: str, *, replacement: str = REDACTED) -> str:

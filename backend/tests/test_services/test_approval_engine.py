@@ -8,7 +8,9 @@ Requires Compose PostgreSQL (+ Redis for bus/state tests). Run from ``backend/``
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -16,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import jsonschema
 import pytest
 import pytest_asyncio
 from alembic import command
@@ -53,6 +56,7 @@ from app.models.ids import new_approval_id
 from app.services.approval_engine import (
     SYSTEM_TIMEOUT_OPERATOR,
     ApprovalEngine,
+    _stable_publication_id,
     evaluate_hard_gates,
     evaluate_level_rules,
 )
@@ -2220,3 +2224,137 @@ async def test_superseded_action_never_republishes_pending_marker(
     assert await engine.ensure_published(action.action_id, 0) is False
     assert await engine.scan_unpublished_approvals() == 0
     assert _count_approval_required(fake_bus) == 0
+
+
+def _approval_payload_schemas() -> tuple[dict[str, Any], dict[str, Any]]:
+    backend = json.loads(
+        (BACKEND_DIR / "app" / "contracts" / "socketio" / "events.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    shared = json.loads(
+        (BACKEND_DIR.parent / "contracts" / "socketio" / "events.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return backend, shared
+
+
+def _envelope_for_payload(event_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "approval_required",
+        "event_id": event_id,
+        "sequence": 1,
+        "timestamp": "2026-07-12T10:00:00Z",
+        "payload": payload,
+    }
+
+
+@pytest.mark.asyncio
+async def test_approval_required_production_payload_validates_backend_socket_schema(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    fake_bus: FakeEventBus,
+    engine: ApprovalEngine,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L4),
+    )
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+    required = [item for item in fake_bus.published if item[1] == "approval_required"]
+    assert len(required) == 1
+    payload = required[0][2]
+    from app.core.socketio_manager import _events_schema_registry
+
+    backend, _shared = _approval_payload_schemas()
+    jsonschema.validate(
+        instance=_envelope_for_payload(event_id, payload),
+        schema=backend,
+        registry=_events_schema_registry(),
+    )
+    assert re.fullmatch(r"[0-9a-f]{32}", payload["publication_id"])
+    assert payload["approval_cycle"] == 0
+    assert payload["action_id"] == action.action_id
+    assert payload["action_name"] == action.action_name
+
+
+@pytest.mark.asyncio
+async def test_approval_required_production_payload_validates_shared_socket_schema(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    fake_bus: FakeEventBus,
+    engine: ApprovalEngine,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L4),
+    )
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+    required = [item for item in fake_bus.published if item[1] == "approval_required"]
+    assert len(required) == 1
+    payload = required[0][2]
+    from app.core.socketio_manager import _events_schema, _events_schema_registry
+
+    _backend, shared = _approval_payload_schemas()
+    jsonschema.validate(
+        instance=_envelope_for_payload(event_id, payload),
+        schema=shared,
+        registry=_events_schema_registry(),
+    )
+    jsonschema.validate(
+        instance=_envelope_for_payload(event_id, payload),
+        schema=_events_schema(),
+        registry=_events_schema_registry(),
+    )
+    assert re.fullmatch(r"[0-9a-f]{32}", payload["publication_id"])
+
+
+@pytest.mark.asyncio
+async def test_redelivery_reuses_same_32_hex_publication_id(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    fake_bus: FakeEventBus,
+    engine: ApprovalEngine,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L4),
+    )
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+    first = [item for item in fake_bus.published if item[1] == "approval_required"]
+    assert len(first) == 1
+    publication_id = first[0][2]["publication_id"]
+    assert re.fullmatch(r"[0-9a-f]{32}", publication_id)
+    assert publication_id == _stable_publication_id(action.action_id, 0)
+    engine._approval_required_published.clear()
+    async with session_factory() as session:
+        async with session.begin():
+            marker = await session.scalar(select(orm.ApprovalPublication))
+            assert marker is not None
+            marker.status = "pending"
+            marker.published_at = None
+            marker.claim_token = None
+            marker.claim_expires_at = None
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+    required = [item for item in fake_bus.published if item[1] == "approval_required"]
+    assert len(required) == 2
+    assert required[1][2]["publication_id"] == publication_id
+    assert required[1][2]["approval_cycle"] == 0
+
+
+def test_approval_required_schema_samples_are_updated_with_required_fields() -> None:
+    backend, shared = _approval_payload_schemas()
+    for schema in (backend, shared):
+        required = schema["definitions"]["ApprovalRequiredPayload"]["required"]
+        assert set(required) >= {"action_id", "action_name", "publication_id", "approval_cycle"}
+        pattern = schema["definitions"]["ApprovalRequiredPayload"]["properties"]["publication_id"][
+            "pattern"
+        ]
+        assert pattern == "^[0-9a-f]{32}$"

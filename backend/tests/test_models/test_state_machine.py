@@ -52,6 +52,7 @@ from app.models.workflow import (
     resolved_workflow_constants,
     validate_action_status_transition,
     validate_closed_gate,
+    validate_confirmed_evidence_append,
     validate_execution_substate,
     validate_job_status_transition,
     validate_outbox_delivery_transition,
@@ -989,6 +990,36 @@ def test_confirmed_receipt_never_transitions_to_unknown() -> None:
         WritebackStatus.ACCEPTED,
         evidence_adjudication=True,
     )
+
+
+def test_confirmed_status_never_downgrades_during_evidence_upgrade() -> None:
+    from app.models.workflow import CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE
+
+    validate_confirmed_evidence_append(
+        ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
+        ConfirmationEvidence.MANUAL_CONFIRMED,
+    )
+    validate_confirmed_evidence_append(
+        ConfirmationEvidence.STATUS_QUERIED,
+        ConfirmationEvidence.READBACK_VERIFIED,
+    )
+    with pytest.raises(InvalidStateTransitionError):
+        validate_confirmed_evidence_append(
+            ConfirmationEvidence.READBACK_VERIFIED,
+            ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
+        )
+    with pytest.raises(InvalidStateTransitionError):
+        validate_confirmed_evidence_append(
+            ConfirmationEvidence.MANUAL_CONFIRMED,
+            ConfirmationEvidence.STATUS_QUERIED,
+        )
+    with pytest.raises(InvalidStateTransitionError):
+        validate_writeback_status_transition(
+            WritebackStatus.CONFIRMED,
+            WritebackStatus.FAILED,
+            evidence_adjudication=True,
+        )
+    assert ConfirmationEvidence.MANUAL_CONFIRMED in CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE
 
 
 # --------------------------------------------------------------------------- #

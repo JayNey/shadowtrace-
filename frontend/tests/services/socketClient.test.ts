@@ -176,6 +176,37 @@ describe("socketClient", () => {
     });
   });
 
+  it("preserves authorization_race on writeback_updated envelopes", async () => {
+    const { socketClient } = await import("../../src/services/socketClient");
+    const handler = vi.fn();
+    socketClient.connect();
+    socketClient.onEvent(handler);
+
+    eventHandler?.({
+      type: "writeback_updated",
+      event_id: "evt-2",
+      sequence: 4,
+      timestamp: "2026-01-01T00:00:00Z",
+      payload: {
+        disposition_id: "disp-0a1b2c3d",
+        writeback_id: "wbk-0a1b2c3d",
+        status: "CONFIRMED",
+        authorization_race: "authorization_changed_after_egress",
+      },
+    });
+
+    expect(handler).toHaveBeenCalledWith({
+      type: "writeback_updated",
+      event_id: "evt-2",
+      payload: expect.objectContaining({
+        disposition_id: "disp-0a1b2c3d",
+        writeback_id: "wbk-0a1b2c3d",
+        status: "CONFIRMED",
+        authorization_race: "authorization_changed_after_egress",
+      }),
+    });
+  });
+
   it("maps event_type_rewritten envelope to typed payload", async () => {
     const { socketClient } = await import("../../src/services/socketClient");
     const handler = vi.fn();

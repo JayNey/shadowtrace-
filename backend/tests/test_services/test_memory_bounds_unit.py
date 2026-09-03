@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import inspect
+import weakref
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -9,7 +12,7 @@ import pytest
 from app.core.errors import GuardrailViolationError
 from app.services.approval_engine import ApprovalEngine
 from app.services.state_machine_service import StateMachineService
-from app.services.working_memory import WorkingMemory
+from app.services.working_memory import BoundWorkingMemory, WorkingMemory
 
 
 def test_projection_lock_is_stable_and_collision_only_shares_serialization() -> None:
@@ -254,3 +257,102 @@ async def test_approval_publication_uses_durable_cycle_marker_after_cache_evicti
         bus.publish_event.assert_awaited_once()
         mark.assert_awaited_once()
         assert mark.await_args.args == ("action-old", 1)
+
+
+def _iter_reachable(root: object, *, max_depth: int = 6) -> list[object]:
+    seen: set[int] = set()
+    found: list[object] = []
+    stack: list[tuple[object, int]] = [(root, 0)]
+    while stack:
+        current, depth = stack.pop()
+        ident = id(current)
+        if ident in seen or depth > max_depth:
+            continue
+        seen.add(ident)
+        found.append(current)
+        if current is None or isinstance(current, (str, bytes, int, float, bool, type)):
+            continue
+        children: list[object] = []
+        if inspect.isfunction(current) or inspect.ismethod(current):
+            closure = getattr(current, "__closure__", None)
+            if closure:
+                children.extend(cell.cell_contents for cell in closure)
+            self_obj = getattr(current, "__self__", None)
+            if self_obj is not None:
+                children.append(self_obj)
+        slots = getattr(current, "__slots__", ())
+        if isinstance(slots, str):
+            slots = (slots,)
+        for slot in slots:
+            if slot.startswith("__"):
+                continue
+            try:
+                children.append(getattr(current, slot))
+            except Exception:
+                continue
+        mapping = getattr(current, "__dict__", None)
+        if isinstance(mapping, dict):
+            children.extend(mapping.values())
+        if isinstance(current, dict):
+            children.extend(current.values())
+        elif isinstance(current, (list, tuple, set, frozenset)):
+            children.extend(current)
+        if isinstance(current, weakref.ref):
+            referent = current()
+            if referent is not None:
+                children.append(referent)
+        for child in children:
+            stack.append((child, depth + 1))
+    return found
+
+
+def test_bound_working_memory_has_no_reachable_factory() -> None:
+    memory = WorkingMemory(AsyncMock(), AsyncMock(), wm_strict=True)  # type: ignore[arg-type]
+    bound = memory.for_writer("RiskAgent")
+    reachable = _iter_reachable(bound)
+    assert not any(isinstance(obj, WorkingMemory) for obj in reachable)
+    assert not any(
+        getattr(obj, "for_writer", None) is not None and callable(getattr(obj, "for_writer", None))
+        for obj in reachable
+    )
+    assert not hasattr(BoundWorkingMemory, "for_writer")
+    assert not hasattr(bound, "for_writer")
+    for name in ("_memory", "_root", "_factory"):
+        assert getattr(bound, name, None) is None
+
+
+def test_agent_bound_view_only_operates_with_its_own_capability() -> None:
+    memory = WorkingMemory(AsyncMock(), AsyncMock(), wm_strict=True)  # type: ignore[arg-type]
+    triage = memory.for_writer("TriageAgent")
+    risk = memory.for_writer("RiskAgent")
+    assert triage.writer_name == "TriageAgent"
+    assert risk.writer_name == "RiskAgent"
+    assert triage._capability is not risk._capability
+    assert not hasattr(triage, "for_writer")
+    reachable = _iter_reachable(triage)
+    assert not any(isinstance(obj, WorkingMemory) for obj in reachable)
+
+
+def test_bound_working_memory_cannot_reach_root_or_mint_cross_owner() -> None:
+    memory = WorkingMemory(AsyncMock(), AsyncMock(), wm_strict=True)  # type: ignore[arg-type]
+    bound = memory.for_writer("TriageAgent")
+    reachable = _iter_reachable(bound)
+    assert not any(isinstance(obj, WorkingMemory) for obj in reachable)
+    with pytest.raises(AttributeError):
+        bound.for_writer("RiskAgent")  # type: ignore[attr-defined]
+
+
+def test_released_capability_remains_invalid_after_gc_and_rebind() -> None:
+    memory = WorkingMemory(AsyncMock(), AsyncMock(), wm_strict=True)  # type: ignore[arg-type]
+    bound = memory.for_writer("RiskAgent")
+    stale = bound._capability
+    bound.release()
+    del bound
+    gc.collect()
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        memory._resolve_capability(stale)
+    assert exc_info.value.error_code == "working_memory_unauthorized_write"
+    rebound = memory.for_writer("RiskAgent")
+    assert memory._resolve_capability(rebound._capability) == "RiskAgent"
+    with pytest.raises(GuardrailViolationError):
+        memory._resolve_capability(stale)

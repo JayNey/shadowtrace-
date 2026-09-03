@@ -544,6 +544,13 @@
         "updated_at": {
           "type": "string",
           "format": "date-time"
+        },
+        "authorization_race": {
+          "type": "string",
+          "enum": [
+            "authorization_changed_after_egress"
+          ],
+          "description": "Set when approval changed after irrevocable egress; provider fact is unchanged. Never carries raw_result, secrets, or vendor blobs."
         }
       },
       "additionalProperties": false,

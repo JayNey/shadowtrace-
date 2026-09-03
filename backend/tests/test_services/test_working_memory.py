@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import inspect
 import os
 import uuid
-from collections.abc import AsyncIterator
+import weakref
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -581,3 +584,115 @@ async def test_cached_writer_remains_authorized_after_capability_ttl(
     ):
         await risk.write(event_id, "risk_assessment", {"score": 9})
     assert await store.get(event_id, "risk_assessment") == {"score": 9}
+
+
+def _iter_reachable(root: object, *, max_depth: int = 6) -> Iterator[object]:
+    seen: set[int] = set()
+    stack: list[tuple[object, int]] = [(root, 0)]
+    while stack:
+        current, depth = stack.pop()
+        ident = id(current)
+        if ident in seen or depth > max_depth:
+            continue
+        seen.add(ident)
+        yield current
+        if current is None or isinstance(current, (str, bytes, int, float, bool, type)):
+            continue
+        children: list[object] = []
+        if inspect.isfunction(current) or inspect.ismethod(current):
+            closure = getattr(current, "__closure__", None)
+            if closure:
+                children.extend(cell.cell_contents for cell in closure)
+            self_obj = getattr(current, "__self__", None)
+            if self_obj is not None:
+                children.append(self_obj)
+        slots = getattr(current, "__slots__", ())
+        if isinstance(slots, str):
+            slots = (slots,)
+        for slot in slots:
+            if slot.startswith("__"):
+                continue
+            try:
+                children.append(getattr(current, slot))
+            except Exception:
+                continue
+        mapping = getattr(current, "__dict__", None)
+        if isinstance(mapping, dict):
+            children.extend(mapping.values())
+        if isinstance(current, dict):
+            children.extend(current.values())
+        elif isinstance(current, (list, tuple, set, frozenset)):
+            children.extend(current)
+        try:
+            referent = weakref.ref(current)() if isinstance(current, weakref.ref) else None
+        except TypeError:
+            referent = None
+        if referent is not None:
+            children.append(referent)
+        for child in children:
+            stack.append((child, depth + 1))
+
+
+@pytest.mark.asyncio
+async def test_bound_working_memory_cannot_reach_root_or_mint_cross_owner(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    bound = wm.for_writer("TriageAgent")
+    reachable = list(_iter_reachable(bound))
+    assert not any(isinstance(obj, WorkingMemory) for obj in reachable)
+    assert not any(getattr(obj, "for_writer", None) is not None and callable(getattr(obj, "for_writer")) for obj in reachable)
+    for name in ("_memory", "_root", "_factory"):
+        assert not hasattr(bound, name) or not isinstance(getattr(bound, name), WorkingMemory)
+    with pytest.raises(AttributeError):
+        bound.for_writer("RiskAgent")  # type: ignore[attr-defined]
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        await bound.write(event_id, "risk_assessment", {"score": 1})
+    assert exc_info.value.error_code == "working_memory_unauthorized_write"
+
+
+@pytest.mark.asyncio
+async def test_agent_bound_view_only_operates_with_its_own_capability(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    triage = wm.for_writer("TriageAgent")
+    await triage.write(event_id, "triage_result", {"ok": True})
+    assert await triage.read(event_id, "triage_result") == {"ok": True}
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        await triage.write(event_id, "risk_assessment", {"score": 9})
+    assert exc_info.value.error_code == "working_memory_unauthorized_write"
+    await triage.append_scratchpad(event_id, "note")
+    notes = await triage.read_scratchpad(event_id)
+    assert notes[-1].note == "note"
+
+
+@pytest.mark.asyncio
+async def test_released_capability_remains_invalid_after_gc_and_rebind(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    bound = wm.for_writer("TriageAgent")
+    stale = bound._capability
+    bound.release()
+    del bound
+    gc.collect()
+    with pytest.raises(GuardrailViolationError) as stale_exc:
+        await wm.write(event_id, "triage_result", {"stale": True}, writer=stale)
+    assert stale_exc.value.error_code == "working_memory_unauthorized_write"
+    rebound = wm.for_writer("TriageAgent")
+    await rebound.write(event_id, "triage_result", {"ok": True})
+    with pytest.raises(GuardrailViolationError):
+        await wm.write(event_id, "triage_result", {"stale": True}, writer=stale)
+    rebound.release()
+    with pytest.raises(GuardrailViolationError):
+        await rebound.write(event_id, "triage_result", {"after-release": True})

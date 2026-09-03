@@ -549,6 +549,12 @@ CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE: frozenset[ConfirmationEvidence] = 
         ConfirmationEvidence.MANUAL_CONFIRMED,
     }
 )
+CLOSED_TERMINAL_WEAK_CONFIRMATION_EVIDENCE: frozenset[ConfirmationEvidence] = frozenset(
+    {
+        ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
+        ConfirmationEvidence.STATUS_QUERIED,
+    }
+)
 
 
 class TerminalEventWritebackView(BaseModel):
@@ -1436,6 +1442,45 @@ def validate_writeback_status_transition(
                 current=current,
                 target=target,
             )
+
+
+def validate_confirmed_evidence_append(
+    current_evidence: ConfirmationEvidence | None,
+    new_evidence: ConfirmationEvidence | None,
+) -> None:
+    """Allow append-only CONFIRMED evidence strengthening; never downgrade."""
+    if new_evidence is None:
+        raise InvalidStateTransitionError(
+            "CONFIRMED evidence append requires confirmation_evidence",
+            current=WritebackStatus.CONFIRMED,
+            target=WritebackStatus.CONFIRMED,
+        )
+    if current_evidence in CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE:
+        if new_evidence not in CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE:
+            raise InvalidStateTransitionError(
+                "CONFIRMED strong evidence cannot be downgraded",
+                current=WritebackStatus.CONFIRMED,
+                target=WritebackStatus.CONFIRMED,
+                details={
+                    "current_evidence": (
+                        current_evidence.value if current_evidence is not None else None
+                    ),
+                    "new_evidence": new_evidence.value,
+                },
+            )
+        return
+    if new_evidence not in CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE:
+        raise InvalidStateTransitionError(
+            "CONFIRMED evidence append must strengthen to readback_verified or manual_confirmed",
+            current=WritebackStatus.CONFIRMED,
+            target=WritebackStatus.CONFIRMED,
+            details={
+                "current_evidence": (
+                    current_evidence.value if current_evidence is not None else None
+                ),
+                "new_evidence": new_evidence.value,
+            },
+        )
 
 
 def derive_case_label(verdict: FinalVerdict) -> CaseLabel:

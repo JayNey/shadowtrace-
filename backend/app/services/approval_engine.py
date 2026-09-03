@@ -173,8 +173,7 @@ def _idempotency_binding_from_record(
 
 
 def _stable_publication_id(action_id: str, approval_cycle: int) -> str:
-    digest = hashlib.sha256(f"{action_id}:{approval_cycle}".encode()).hexdigest()[:16]
-    return f"apb-{digest}"
+    return hashlib.sha256(f"{action_id}:{approval_cycle}".encode()).hexdigest()[:32]
 
 
 def _publication_claim_active(row: orm.ApprovalPublication, *, now: datetime) -> bool:

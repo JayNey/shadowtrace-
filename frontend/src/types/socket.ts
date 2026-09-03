@@ -36,6 +36,8 @@ export type SocketWritebackStatusCode =
   | "CONFLICT"
   | "UNKNOWN";
 
+export type SocketAuthorizationRaceCode = "authorization_changed_after_egress";
+
 export interface SocketWritebackUpdatedPayload {
   disposition_id: string;
   writeback_id: string;
@@ -43,6 +45,7 @@ export interface SocketWritebackUpdatedPayload {
   provider_code?: string;
   created_at?: string;
   updated_at?: string;
+  authorization_race?: SocketAuthorizationRaceCode;
 }
 
 export interface SocketToolCallPayload {

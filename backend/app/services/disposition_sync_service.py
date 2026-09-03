@@ -67,9 +67,12 @@ from app.models.enums import (
 from app.models.execution import ActionExecutionJob, TargetExecutionResult
 from app.models.ids import new_writeback_id
 from app.models.workflow import (
+    CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE,
+    CLOSED_TERMINAL_WEAK_CONFIRMATION_EVIDENCE,
     delivery_status_eligible_for_operator_retry_pause,
     is_operator_retry_terminal_success,
     operator_retry_writeback_status_blocked,
+    validate_confirmed_evidence_append,
     validate_job_status_transition,
     validate_outbox_delivery_transition,
     validate_writeback_status_transition,
@@ -190,6 +193,7 @@ class WritebackLookupKind(StrEnum):
     DEGRADED = "degraded"
     STALE_CLAIM = "stale_claim"
     ALREADY_CONFIRMED = "already_confirmed"
+    NEEDS_EVIDENCE_UPGRADE = "needs_evidence_upgrade"
     BUSY = "busy"
 
 
@@ -264,6 +268,68 @@ _DELIVERY_APPROVAL_RECHECK_INTENTS: frozenset[DispositionIntentKind] = frozenset
 def _outbox_is_egress_admitted(outbox: orm.DispositionOutbox) -> bool:
     """True after the durable point-of-no-return CAS; submit may proceed or already has."""
     return outbox.egress_admitted_at is not None
+
+
+_SOCKET_WRITEBACK_STATUS: dict[WritebackStatus, str] = {
+    WritebackStatus.PENDING: "PENDING",
+    WritebackStatus.ACCEPTED: "ACCEPTED",
+    WritebackStatus.CONFIRMED: "CONFIRMED",
+    WritebackStatus.FAILED: "FAILED",
+    WritebackStatus.CONFLICT: "CONFLICT",
+    WritebackStatus.UNKNOWN: "UNKNOWN",
+}
+
+
+def _socket_writeback_status(status: WritebackStatus) -> str:
+    return _SOCKET_WRITEBACK_STATUS.get(status, status.name)
+
+
+def _writeback_updated_payload(
+    *,
+    disposition_id: str,
+    writeback_id: str,
+    status: WritebackStatus,
+    authorization_race: bool = False,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "disposition_id": disposition_id,
+        "writeback_id": writeback_id,
+        "status": _socket_writeback_status(status),
+    }
+    if authorization_race:
+        payload["authorization_race"] = AUTHORIZATION_RACE_AFTER_EGRESS_ERROR_CODE
+    return payload
+
+
+def _outbox_has_unexpired_lease(outbox: orm.DispositionOutbox, *, now: datetime) -> bool:
+    return (
+        outbox.locked_by is not None
+        and outbox.lease_expires_at is not None
+        and outbox.lease_expires_at > now
+    )
+
+
+def _confirmation_evidence_from_row(
+    row: orm.DispositionReceipt | None,
+) -> ConfirmationEvidence | None:
+    if row is None or not row.confirmation_evidence:
+        return None
+    try:
+        return ConfirmationEvidence(row.confirmation_evidence)
+    except ValueError:
+        return None
+
+
+def _receipt_is_weak_confirmed(row: orm.DispositionReceipt | None) -> bool:
+    if row is None or row.status != WritebackStatus.CONFIRMED.value:
+        return False
+    return _confirmation_evidence_from_row(row) in CLOSED_TERMINAL_WEAK_CONFIRMATION_EVIDENCE
+
+
+def _receipt_is_strong_confirmed(row: orm.DispositionReceipt | None) -> bool:
+    if row is None or row.status != WritebackStatus.CONFIRMED.value:
+        return False
+    return _confirmation_evidence_from_row(row) in CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE
 
 
 def _action_still_approved_for_delivery(action: orm.Action) -> bool:
@@ -641,32 +707,163 @@ class DispositionSyncService:
         resume_intent_id: str | None = None
         event_id = ""
         adapter_label = "unknown"
+        disposition_id = ""
         async with self._session_factory() as session:
             async with session.begin():
-                outbox = await session.scalar(
-                    select(orm.DispositionOutbox)
-                    .where(orm.DispositionOutbox.writeback_id == writeback_id)
-                    .with_for_update()
+                outbox, action = await self._lock_event_outbox_action_by_writeback(
+                    session, writeback_id
                 )
                 if outbox is None:
                     raise EventNotFoundError(
                         f"writeback not found: {writeback_id}",
                         details={"writeback_id": writeback_id},
                     )
+                now = datetime.now(UTC)
+                observed_delivery = outbox.delivery_status
+                observed_locked_by = outbox.locked_by
+                observed_attempt = outbox.attempt
+                observed_locked_at = outbox.locked_at
+                observed_lease = outbox.lease_expires_at
+                observed_admitted = outbox.egress_admitted_at
+                observed_latest = outbox.latest_writeback_status
+                observed_action_status = action.status if action is not None else None
+                observed_action_updated = action.updated_at if action is not None else None
                 current_status = WritebackStatus(
                     outbox.latest_writeback_status or WritebackStatus.UNKNOWN.value
                 )
                 event_id = outbox.event_id
+                disposition_id = outbox.disposition_id
                 adapter_label = self._adapter_label(outbox)
-                # Idempotency guard (ISSUE-064): If the outbox already
-                # reached the target terminal status (e.g. CONFIRMED from
-                # synchronous delivery in activate_and_submit), the
-                # transition is a no-op.  CONFIRMED → CONFIRMED is NOT
-                # in the transition matrix because CONFIRMED is terminal;
-                # we short-circuit here to keep the resolve call safe.
-                # ISSUE-277: still re-dispatch durable resume intents that
-                # were committed before a process kill.
-                if current_status is target:
+                delivery = OutboxDeliveryStatus(outbox.delivery_status)
+                latest_row = await session.scalar(
+                    select(orm.DispositionReceipt)
+                    .where(orm.DispositionReceipt.writeback_id == writeback_id)
+                    .order_by(orm.DispositionReceipt.sequence.desc())
+                    .limit(1)
+                )
+                if (
+                    outbox.delivery_status != observed_delivery
+                    or outbox.locked_by != observed_locked_by
+                    or outbox.attempt != observed_attempt
+                    or outbox.locked_at != observed_locked_at
+                    or outbox.lease_expires_at != observed_lease
+                    or outbox.egress_admitted_at != observed_admitted
+                    or outbox.latest_writeback_status != observed_latest
+                    or (action is not None and action.status != observed_action_status)
+                    or (action is not None and action.updated_at != observed_action_updated)
+                ):
+                    raise WritebackConflictError(
+                        "writeback state changed during resolve",
+                        details={"writeback_id": writeback_id},
+                    )
+                if outbox.superseded_by_disposition_id is not None:
+                    raise WritebackConflictError(
+                        "superseded outbox cannot be resolved",
+                        details={
+                            "writeback_id": writeback_id,
+                            "superseded_by_disposition_id": outbox.superseded_by_disposition_id,
+                        },
+                    )
+                if _outbox_has_unexpired_lease(outbox, now=now):
+                    raise WritebackConflictError(
+                        "writeback has an active delivery lease; resolve is not allowed",
+                        details={
+                            "writeback_id": writeback_id,
+                            "delivery_status": delivery.value,
+                            "locked_by": outbox.locked_by,
+                        },
+                    )
+                if (
+                    outbox.egress_admitted_at is not None
+                    and delivery
+                    not in {
+                        OutboxDeliveryStatus.DELIVERED,
+                        OutboxDeliveryStatus.DEAD_LETTER,
+                    }
+                ):
+                    raise WritebackConflictError(
+                        "egress-admitted delivery is in flight; resolve cannot overwrite provider facts",
+                        details={
+                            "writeback_id": writeback_id,
+                            "delivery_status": delivery.value,
+                            "egress_admitted_at": outbox.egress_admitted_at.isoformat(),
+                        },
+                    )
+                if latest_row is not None and outbox.latest_writeback_status:
+                    if latest_row.status != outbox.latest_writeback_status:
+                        raise WritebackConflictError(
+                            "writeback projection is inconsistent with latest receipt",
+                            details={
+                                "writeback_id": writeback_id,
+                                "receipt_status": latest_row.status,
+                                "latest_writeback_status": outbox.latest_writeback_status,
+                            },
+                        )
+                if current_status is WritebackStatus.CONFIRMED and latest_row is None:
+                    raise WritebackConflictError(
+                        "CONFIRMED projection has no persisted receipt",
+                        details={"writeback_id": writeback_id},
+                    )
+
+                async def _enqueue_resume() -> None:
+                    nonlocal should_dispatch, resume_intent_id, fallthrough_resume
+                    if self._manual_resolution is None:
+                        fallthrough_resume = True
+                        return
+                    from app.core.errors import IdempotencyKeyReuseError
+                    from app.services.manual_resolution_service import (
+                        RESOLUTION_SOURCE_WRITEBACK_MANUAL,
+                        SUBJECT_KIND_WRITEBACK,
+                    )
+
+                    try:
+                        create_resume = (
+                            self._manual_resolution.create_or_replay_resume_intent_in_session
+                        )
+                        resume_intent = await create_resume(
+                            session,
+                            event_id,
+                            resolution_source=RESOLUTION_SOURCE_WRITEBACK_MANUAL,
+                            subject_kind=SUBJECT_KIND_WRITEBACK,
+                            subject_id=writeback_id,
+                            resolution=resolution,
+                            principal=principal,
+                            comment=comment,
+                            evidence_ref=evidence_ref,
+                            operation_id=operation_id,
+                        )
+                        should_dispatch = True
+                        resume_intent_id = resume_intent.intent_id
+                    except IdempotencyKeyReuseError:
+                        raise
+                    except ValidationError:
+                        fallthrough_resume = True
+                        logger.info(
+                            "resolve_writeback did not enqueue manual resume "
+                            "intent writeback=%s",
+                            writeback_id,
+                            exc_info=True,
+                        )
+
+                if (
+                    resolution == "manual_confirmed"
+                    and current_status is WritebackStatus.CONFIRMED
+                    and _receipt_is_weak_confirmed(latest_row)
+                ):
+                    validate_confirmed_evidence_append(
+                        _confirmation_evidence_from_row(latest_row),
+                        ConfirmationEvidence.MANUAL_CONFIRMED,
+                    )
+                    await self._append_receipt(
+                        session,
+                        outbox,
+                        status=WritebackStatus.CONFIRMED,
+                        confirmation_evidence=ConfirmationEvidence.MANUAL_CONFIRMED,
+                        provider_message=comment,
+                    )
+                    _mirror_writeback_status_to_action(action, WritebackStatus.CONFIRMED.value)
+                    await _enqueue_resume()
+                elif current_status is target:
                     already_terminal = True
                 else:
                     validate_writeback_status_transition(
@@ -686,47 +883,37 @@ class DispositionSyncService:
                         provider_message=comment,
                     )
                     outbox.latest_writeback_status = target.value
-                    outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
-                    action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
-                    _mirror_writeback_status_to_action(action, target.value)
-                    if self._manual_resolution is not None:
-                        from app.core.errors import IdempotencyKeyReuseError
-                        from app.services.manual_resolution_service import (
-                            RESOLUTION_SOURCE_WRITEBACK_MANUAL,
-                            SUBJECT_KIND_WRITEBACK,
+                    if delivery is OutboxDeliveryStatus.LEASED:
+                        outbox.locked_by = None
+                        outbox.locked_at = None
+                        outbox.lease_expires_at = None
+                    if delivery is OutboxDeliveryStatus.DELIVERED:
+                        pass
+                    elif outbox.egress_admitted_at is None:
+                        # Never submitted: abort the outbox without pretending a
+                        # provider lookup confirmed delivery (READY→DELIVERED is
+                        # lookup-only). DEAD_LETTER is the legal pre-egress abort.
+                        validate_outbox_delivery_transition(
+                            delivery,
+                            OutboxDeliveryStatus.DEAD_LETTER,
                         )
-
-                        try:
-                            create_resume = (
-                                self._manual_resolution.create_or_replay_resume_intent_in_session
-                            )
-                            resume_intent = await create_resume(
-                                session,
-                                event_id,
-                                resolution_source=RESOLUTION_SOURCE_WRITEBACK_MANUAL,
-                                subject_kind=SUBJECT_KIND_WRITEBACK,
-                                subject_id=writeback_id,
-                                resolution=resolution,
-                                principal=principal,
-                                comment=comment,
-                                evidence_ref=evidence_ref,
-                                operation_id=operation_id,
-                            )
-                            should_dispatch = True
-                            resume_intent_id = resume_intent.intent_id
-                        except IdempotencyKeyReuseError:
-                            raise
-                        except ValidationError:
-                            # Non-manual holds fall through to classic _maybe_resume.
-                            fallthrough_resume = True
-                            logger.info(
-                                "resolve_writeback did not enqueue manual resume "
-                                "intent writeback=%s",
-                                writeback_id,
-                                exc_info=True,
-                            )
+                        outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
+                        outbox.next_retry_at = None
                     else:
-                        fallthrough_resume = True
+                        validate_outbox_delivery_transition(
+                            delivery,
+                            OutboxDeliveryStatus.DELIVERED,
+                        )
+                        outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
+                        outbox.delivered_at = now
+                    outbox.updated_at = now
+                    _mirror_writeback_status_to_action(action, target.value)
+                    await _enqueue_resume()
+        updated_payload = _writeback_updated_payload(
+            disposition_id=disposition_id,
+            writeback_id=writeback_id,
+            status=target,
+        )
         if already_terminal:
             if self._manual_resolution is not None:
                 from app.core.errors import IdempotencyKeyReuseError
@@ -761,11 +948,7 @@ class DispositionSyncService:
                             trigger="resolve_writeback_validation",
                         )
             if self._bus is not None:
-                await self._bus.publish_event(
-                    event_id,
-                    "writeback_updated",
-                    {"writeback_id": writeback_id, "status": target.value},
-                )
+                await self._bus.publish_event(event_id, "writeback_updated", updated_payload)
             return target
         record_writeback(status=target.value, adapter=adapter_label)
         await self._sync_writeback_summary(event_id)
@@ -778,11 +961,7 @@ class DispositionSyncService:
         elif fallthrough_resume:
             await self._maybe_resume(event_id)
         if self._bus is not None:
-            await self._bus.publish_event(
-                event_id,
-                "writeback_updated",
-                {"writeback_id": writeback_id, "status": target.value},
-            )
+            await self._bus.publish_event(event_id, "writeback_updated", updated_payload)
         return target
 
     async def get_writeback(
@@ -1079,16 +1258,15 @@ class DispositionSyncService:
                     "intent_kind": claim.command.intent_kind.value,
                 },
             )
-            payload: dict[str, Any] = {
-                "writeback_id": claim.writeback_id,
-                "status": final_receipt.status.value,
-            }
-            if authorization_race:
-                payload["authorization_race"] = AUTHORIZATION_RACE_AFTER_EGRESS_ERROR_CODE
             await self._bus.publish_event(
                 claim.event_id,
                 "writeback_updated",
-                payload,
+                _writeback_updated_payload(
+                    disposition_id=claim.disposition_id,
+                    writeback_id=claim.writeback_id,
+                    status=final_receipt.status,
+                    authorization_race=authorization_race,
+                ),
             )
 
     async def _claim_outbox(self, outbox_id: str) -> _DeliveryClaim | None:
@@ -1706,11 +1884,21 @@ class DispositionSyncService:
                         if latest_row is not None
                         else None
                     )
+                    if _receipt_is_strong_confirmed(latest_row):
+                        return None, WritebackLookupOutcome(
+                            kind=WritebackLookupKind.ALREADY_CONFIRMED,
+                            receipt=receipt,
+                            writeback_status=WritebackStatus.CONFIRMED,
+                            reason="CONFIRMED is terminal",
+                        )
                     return None, WritebackLookupOutcome(
-                        kind=WritebackLookupKind.ALREADY_CONFIRMED,
+                        kind=WritebackLookupKind.NEEDS_EVIDENCE_UPGRADE,
                         receipt=receipt,
                         writeback_status=WritebackStatus.CONFIRMED,
-                        reason="CONFIRMED is terminal",
+                        reason=(
+                            "CONFIRMED lacks strong confirmation_evidence; "
+                            "manual evidence upgrade required"
+                        ),
                     )
                 now = datetime.now(UTC)
                 if (
@@ -1791,11 +1979,21 @@ class DispositionSyncService:
             receipt = (
                 self._domain_receipt_from_orm(latest_row) if latest_row is not None else None
             )
+            if _receipt_is_strong_confirmed(latest_row):
+                return WritebackLookupOutcome(
+                    kind=WritebackLookupKind.ALREADY_CONFIRMED,
+                    receipt=receipt,
+                    writeback_status=WritebackStatus.CONFIRMED,
+                    reason="CONFIRMED cannot be overwritten",
+                )
             return WritebackLookupOutcome(
-                kind=WritebackLookupKind.ALREADY_CONFIRMED,
+                kind=WritebackLookupKind.NEEDS_EVIDENCE_UPGRADE,
                 receipt=receipt,
                 writeback_status=WritebackStatus.CONFIRMED,
-                reason="CONFIRMED cannot be overwritten",
+                reason=(
+                    "CONFIRMED lacks strong confirmation_evidence; "
+                    "manual evidence upgrade required"
+                ),
             )
         if outcome.kind is _PausedLookupKind.FOUND and outcome.receipt is not None:
             result = WritebackLookupOutcome(
@@ -1822,10 +2020,11 @@ class DispositionSyncService:
                 await self._bus.publish_event(
                     event_id,
                     "writeback_updated",
-                    {
-                        "writeback_id": claim.writeback_id,
-                        "status": result.writeback_status.value,
-                    },
+                    _writeback_updated_payload(
+                        disposition_id=claim.disposition_id,
+                        writeback_id=claim.writeback_id,
+                        status=result.writeback_status,
+                    ),
                 )
         elif event_id is not None and result.kind is WritebackLookupKind.NOT_FOUND:
             await self._sync_writeback_summary(event_id)
@@ -2006,20 +2205,30 @@ class DispositionSyncService:
             )
         parsed = sanitize_disposition_receipt(parsed)
         previous_status: WritebackStatus | None = None
+        previous_evidence: ConfirmationEvidence | None = None
         if seq_row is not None:
-            previous_raw = await session.scalar(
-                select(orm.DispositionReceipt.status).where(
+            previous_row = await session.scalar(
+                select(orm.DispositionReceipt).where(
                     orm.DispositionReceipt.writeback_id == outbox.writeback_id,
                     orm.DispositionReceipt.sequence == int(seq_row),
                 )
             )
-            if previous_raw is not None:
-                previous_status = WritebackStatus(previous_raw)
+            if previous_row is not None:
+                previous_status = WritebackStatus(previous_row.status)
+                previous_evidence = _confirmation_evidence_from_row(previous_row)
         if previous_status is not None and previous_status is not parsed.status:
             validate_writeback_status_transition(
                 previous_status,
                 parsed.status,
                 evidence_adjudication=True,
+            )
+        elif (
+            previous_status is WritebackStatus.CONFIRMED
+            and parsed.status is WritebackStatus.CONFIRMED
+        ):
+            validate_confirmed_evidence_append(
+                previous_evidence,
+                parsed.confirmation_evidence,
             )
         session.add(
             orm.DispositionReceipt(
@@ -3113,10 +3322,11 @@ class DispositionSyncService:
                     await self._bus.publish_event(
                         claim.event_id,
                         "writeback_updated",
-                        {
-                            "writeback_id": claim.writeback_id,
-                            "status": WritebackStatus.UNKNOWN.value,
-                        },
+                        _writeback_updated_payload(
+                            disposition_id=claim.disposition_id,
+                            writeback_id=claim.writeback_id,
+                            status=WritebackStatus.UNKNOWN,
+                        ),
                     )
                 continue
             if event_id is not None:
@@ -3126,7 +3336,11 @@ class DispositionSyncService:
                     await self._bus.publish_event(
                         event_id,
                         "writeback_updated",
-                        {"writeback_id": claim.writeback_id, "status": status.value},
+                        _writeback_updated_payload(
+                            disposition_id=claim.disposition_id,
+                            writeback_id=claim.writeback_id,
+                            status=status,
+                        ),
                     )
             if applied:
                 reconciled += 1
@@ -3725,6 +3939,7 @@ class DispositionSyncService:
         now = datetime.now(UTC)
         event_id: str | None = None
         writeback_id: str | None = None
+        disposition_id: str | None = None
         adapter_label = "unknown"
         detail = self._truncate_error_detail(error_detail)
         async with self._session_factory() as session:
@@ -3754,8 +3969,9 @@ class DispositionSyncService:
                 )
                 event_id = outbox.event_id
                 writeback_id = outbox.writeback_id
+                disposition_id = outbox.disposition_id
 
-        if event_id is None or writeback_id is None:
+        if event_id is None or writeback_id is None or disposition_id is None:
             return
         await self._sync_writeback_summary(event_id)
         await self._maybe_resume(event_id)
@@ -3763,7 +3979,11 @@ class DispositionSyncService:
             await self._bus.publish_event(
                 event_id,
                 "writeback_updated",
-                {"writeback_id": writeback_id, "status": WritebackStatus.FAILED.value},
+                _writeback_updated_payload(
+                    disposition_id=disposition_id,
+                    writeback_id=writeback_id,
+                    status=WritebackStatus.FAILED,
+                ),
             )
 
     async def _mark_delivery_conflict(
@@ -3778,6 +3998,7 @@ class DispositionSyncService:
         now = datetime.now(UTC)
         event_id: str | None = None
         writeback_id: str | None = None
+        disposition_id: str | None = None
         adapter_label = "unknown"
         detail = self._truncate_error_detail(error_detail)
         async with self._session_factory() as session:
@@ -3832,9 +4053,10 @@ class DispositionSyncService:
                     )
                 event_id = outbox.event_id
                 writeback_id = outbox.writeback_id
+                disposition_id = outbox.disposition_id
                 adapter_label = self._adapter_label(outbox)
 
-        if event_id is None or writeback_id is None:
+        if event_id is None or writeback_id is None or disposition_id is None:
             return
         record_writeback(status=WritebackStatus.CONFLICT.value, adapter=adapter_label)
         await self._sync_writeback_summary(event_id)
@@ -3843,7 +4065,11 @@ class DispositionSyncService:
             await self._bus.publish_event(
                 event_id,
                 "writeback_updated",
-                {"writeback_id": writeback_id, "status": WritebackStatus.CONFLICT.value},
+                _writeback_updated_payload(
+                    disposition_id=disposition_id,
+                    writeback_id=writeback_id,
+                    status=WritebackStatus.CONFLICT,
+                ),
             )
 
     async def _mark_delivery_paused_unknown(
@@ -3858,6 +4084,7 @@ class DispositionSyncService:
         now = datetime.now(UTC)
         event_id: str | None = None
         writeback_id: str | None = None
+        disposition_id: str | None = None
         adapter_label = "unknown"
         detail = self._truncate_error_detail(error_detail)
         async with self._session_factory() as session:
@@ -3887,9 +4114,10 @@ class DispositionSyncService:
                 _mirror_writeback_status_to_action(action, WritebackStatus.UNKNOWN.value)
                 event_id = outbox.event_id
                 writeback_id = outbox.writeback_id
+                disposition_id = outbox.disposition_id
                 adapter_label = self._adapter_label(outbox)
 
-        if event_id is None or writeback_id is None:
+        if event_id is None or writeback_id is None or disposition_id is None:
             return
         record_writeback(status=WritebackStatus.UNKNOWN.value, adapter=adapter_label)
         await self._sync_writeback_summary(event_id)
@@ -3898,7 +4126,11 @@ class DispositionSyncService:
             await self._bus.publish_event(
                 event_id,
                 "writeback_updated",
-                {"writeback_id": writeback_id, "status": WritebackStatus.UNKNOWN.value},
+                _writeback_updated_payload(
+                    disposition_id=disposition_id,
+                    writeback_id=writeback_id,
+                    status=WritebackStatus.UNKNOWN,
+                ),
             )
 
     def _finalize_superseded_head(

@@ -2165,3 +2165,75 @@ async def test_close_rejected_when_only_superseded_outboxes_remain(
             operator="SuperAgent",
             reason="vacuum outbox must not close",
         )
+
+
+@pytest.mark.asyncio
+async def test_closed_gate_uses_newest_manual_confirmed_receipt(
+    state_machine: StateMachineService,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _mock_disposition_mode(monkeypatch):
+        event_id = await _create_event(
+            session_factory,
+            store,
+            disposition_policy=DispositionPolicy.REQUIRED.value,
+            severity=Severity.LOW.value,
+        )
+        await _walk_to_reporting(state_machine, event_id)
+        await _add_report(session_factory, event_id)
+        await _seed_applicable_confirmed_writeback_action(session_factory, event_id)
+        await _seed_terminal_writeback_fixture(
+            session_factory,
+            event_id,
+            approved=SourceDisposition.CONTAINED,
+            target_disposition=SourceDisposition.CONTAINED,
+            receipt_simulated=True,
+            receipt_confirmation_evidence=ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
+        )
+        with pytest.raises(
+            InvalidStateTransitionError, match="strong confirmation_evidence"
+        ):
+            await state_machine.transition(
+                event_id,
+                EventStatus.CLOSED,
+                operator="SuperAgent",
+                reason="weak evidence still blocks close",
+            )
+        now = datetime.now(UTC)
+        async with session_factory() as session:
+            async with session.begin():
+                outbox = await session.scalar(
+                    select(orm.DispositionOutbox).where(
+                        orm.DispositionOutbox.event_id == event_id,
+                        orm.DispositionOutbox.intent_kind
+                        == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                    )
+                )
+                assert outbox is not None
+                session.add(
+                    orm.DispositionReceipt(
+                        writeback_id=outbox.writeback_id,
+                        sequence=2,
+                        disposition_id=outbox.disposition_id,
+                        action_id=outbox.action_id,
+                        source_record_id=outbox.source_record_id,
+                        status=WritebackStatus.CONFIRMED.value,
+                        confirmation_evidence=ConfirmationEvidence.MANUAL_CONFIRMED.value,
+                        observed_at=now,
+                        submitted_at=now,
+                        confirmed_at=now,
+                        simulated=True,
+                        target_results=[],
+                        raw_result={},
+                        truncated=False,
+                    )
+                )
+        result = await state_machine.transition(
+            event_id,
+            EventStatus.CLOSED,
+            operator="SuperAgent",
+            reason="newest receipt is manual_confirmed",
+        )
+        assert result.status is EventStatus.CLOSED

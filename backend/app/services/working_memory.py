@@ -119,7 +119,7 @@ def normalize_writer(writer: str) -> str:
     return WRITER_ALIASES.get(writer, writer)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class WriterCapability:
     """Opaque writer identity issued and tracked by one WorkingMemory instance."""
 
@@ -127,11 +127,33 @@ class WriterCapability:
     _nonce: object
 
 
+# Capability → engine leases live only at module scope so BoundWorkingMemory's
+# object graph cannot reverse-resolve WorkingMemory or sibling capabilities.
+_ENGINE_LEASES: weakref.WeakKeyDictionary[WriterCapability, _MemoryEngine] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _require_engine(capability: WriterCapability) -> _MemoryEngine:
+    engine = _ENGINE_LEASES.get(capability)
+    if engine is None:
+        raise GuardrailViolationError(
+            "unrecognized working-memory writer capability",
+            error_code="working_memory_unauthorized_write",
+            details={"writer": capability.owner},
+        )
+    return engine
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class BoundWorkingMemory:
-    """Agent-facing memory view bound to one non-self-reported writer identity."""
+    """Agent-facing memory view bound to one non-self-reported writer identity.
 
-    _memory: WorkingMemory
+    Holds only the issued capability. Engine lookup is a module-level lease
+    that is not attached to this object, so agents cannot reach the
+    composition-root ``WorkingMemory`` or mint another owner's capability.
+    """
+
     _capability: WriterCapability
 
     @property
@@ -139,24 +161,34 @@ class BoundWorkingMemory:
         return self._capability.owner
 
     async def read(self, event_id: str, key: str) -> Any:
-        return await self._memory.read(event_id, key, reader=self._capability)
+        return await _require_engine(self._capability).read(
+            event_id, key, reader=self._capability
+        )
 
     async def write(self, event_id: str, key: str, value: Any) -> None:
-        await self._memory.write(event_id, key, value, writer=self._capability)
+        await _require_engine(self._capability).write(
+            event_id, key, value, writer=self._capability
+        )
 
     async def append_scratchpad(self, event_id: str, note: str) -> None:
-        await self._memory.append_scratchpad(event_id, note, writer=self._capability)
+        await _require_engine(self._capability).append_scratchpad(
+            event_id, note, writer=self._capability
+        )
 
     async def read_scratchpad(self, event_id: str) -> list[ScratchpadEntry]:
-        return await self._memory.read_scratchpad(event_id, reader=self._capability)
+        return await _require_engine(self._capability).read_scratchpad(
+            event_id, reader=self._capability
+        )
 
     def release(self) -> None:
-        self._memory.release(self._capability)
+        engine = _ENGINE_LEASES.get(self._capability)
+        if engine is not None:
+            engine.release(self._capability)
 
     revoke = release
 
 
-class WorkingMemory:
+class _MemoryEngine:
     """Owner-gated EventContext access with scratchpad + access audit."""
 
     def __init__(
@@ -188,30 +220,6 @@ class WorkingMemory:
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
-
-    def for_writer(self, writer: str) -> BoundWorkingMemory:
-        """Bind a trusted composition-root identity to an agent-safe memory view."""
-        canonical = normalize_writer(writer)
-        if canonical not in set(FIELD_OWNERSHIP.values()):
-            raise GuardrailViolationError(
-                f"unknown working-memory writer identity: {writer!r}",
-                error_code="working_memory_unauthorized_write",
-                details={"writer": writer},
-            )
-        capability = WriterCapability(owner=canonical, _nonce=object())
-        with self._capability_lock:
-            self._reclaim_unbound_capabilities()
-            if len(self._issued_capabilities) >= CAPABILITY_LIMIT:
-                raise GuardrailViolationError(
-                    "working-memory capability capacity exhausted; release an active capability",
-                    error_code="working_memory_capability_capacity_exhausted",
-                    details={"limit": CAPABILITY_LIMIT},
-                )
-            self._issued_capabilities[capability] = canonical
-            self._capability_last_used[capability] = time.monotonic()
-            bound = BoundWorkingMemory(self, capability)
-            self._live_bindings[capability] = weakref.ref(bound)
-            return bound
 
     def release(self, capability: WriterCapability) -> None:
         """Revoke a capability; subsequent access fails closed."""
@@ -476,6 +484,7 @@ class WorkingMemory:
         self._issued_capabilities.pop(capability, None)
         self._capability_last_used.pop(capability, None)
         self._live_bindings.pop(capability, None)
+        _ENGINE_LEASES.pop(capability, None)
 
     def _reclaim_unbound_capabilities(self) -> None:
         """Drop capabilities whose BoundWorkingMemory is gone; never revoke live ones.
@@ -589,3 +598,51 @@ class WorkingMemory:
                 event_id,
                 exc_info=True,
             )
+
+
+class WorkingMemory:
+    """Composition-root factory. Agent-facing views never hold this object."""
+
+    def __init__(
+        self,
+        store: EventContextStore,
+        redis: RedisClient,
+        *,
+        degraded_flags: DegradedFlagService | None = None,
+        wm_strict: bool | None = None,
+    ) -> None:
+        self._engine = _MemoryEngine(
+            store,
+            redis,
+            degraded_flags=degraded_flags,
+            wm_strict=wm_strict,
+        )
+
+    def for_writer(self, writer: str) -> BoundWorkingMemory:
+        """Bind a trusted composition-root identity to an agent-safe memory view."""
+        engine = self._engine
+        canonical = normalize_writer(writer)
+        if canonical not in set(FIELD_OWNERSHIP.values()):
+            raise GuardrailViolationError(
+                f"unknown working-memory writer identity: {writer!r}",
+                error_code="working_memory_unauthorized_write",
+                details={"writer": writer},
+            )
+        capability = WriterCapability(owner=canonical, _nonce=object())
+        with engine._capability_lock:
+            engine._reclaim_unbound_capabilities()
+            if len(engine._issued_capabilities) >= CAPABILITY_LIMIT:
+                raise GuardrailViolationError(
+                    "working-memory capability capacity exhausted; release an active capability",
+                    error_code="working_memory_capability_capacity_exhausted",
+                    details={"limit": CAPABILITY_LIMIT},
+                )
+            engine._issued_capabilities[capability] = canonical
+            engine._capability_last_used[capability] = time.monotonic()
+            _ENGINE_LEASES[capability] = engine
+            bound = BoundWorkingMemory(_capability=capability)
+            engine._live_bindings[capability] = weakref.ref(bound)
+            return bound
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)

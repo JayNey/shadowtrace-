@@ -166,6 +166,10 @@ class SocketClient {
           provider_code: payload.provider_code as string | undefined,
           created_at: payload.created_at as string | undefined,
           updated_at: payload.updated_at as string | undefined,
+          authorization_race:
+            payload.authorization_race === "authorization_changed_after_egress"
+              ? "authorization_changed_after_egress"
+              : undefined,
         },
       });
       return;
