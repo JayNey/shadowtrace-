@@ -13,7 +13,7 @@ from typing import Any
 
 from celery.exceptions import SoftTimeLimitExceeded
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import BaseAgent
@@ -1748,6 +1748,7 @@ async def _supersede_undeployed_deferred(
     new_revision: int,
 ) -> int:
     """Mark undeployed deferred actions SUPERSEDED when replanning."""
+    await session.get(orm.SecurityEvent, event_id, with_for_update=True)
     result = await session.execute(
         update(orm.Action)
         .where(
@@ -1759,6 +1760,12 @@ async def _supersede_undeployed_deferred(
                     ActionStatus.PENDING.value,
                     ActionStatus.WAITING_APPROVAL.value,
                     ActionStatus.APPROVED.value,
+                )
+            ),
+            ~exists(
+                select(orm.DispositionOutbox.outbox_id).where(
+                    orm.DispositionOutbox.action_id == orm.Action.action_id,
+                    orm.DispositionOutbox.egress_admitted_at.is_not(None),
                 )
             ),
         )

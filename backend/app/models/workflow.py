@@ -504,6 +504,7 @@ WRITEBACK_STATUS_TRANSITIONS: dict[WritebackStatus, set[WritebackStatus]] = {
     },
     WritebackStatus.FAILED: {
         WritebackStatus.CONFIRMED,
+        WritebackStatus.ACCEPTED,  # lookup proved the provider accepted after local failure
         WritebackStatus.FAILED,
         WritebackStatus.PENDING,
     },
@@ -539,13 +540,19 @@ class ClosedGateActionView(BaseModel):
     has_job_or_outbox: bool = False
 
 
-# ISSUE-333 / ISSUE-362: non-mock CLOSED requires strong confirmation_evidence
-# {readback_verified, manual_confirmed}. VerifyAgent demotes the same non-mock
-# weak tiers (status_queried / missing / invalid / adapter_acknowledged).
+# ISSUE-333 / ISSUE-362: required CLOSED needs strong confirmation_evidence
+# {readback_verified, manual_confirmed} on the latest actual receipt.
+# Mock does not waive this; simulated=true is display/environment only.
 CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE: frozenset[ConfirmationEvidence] = frozenset(
     {
         ConfirmationEvidence.READBACK_VERIFIED,
         ConfirmationEvidence.MANUAL_CONFIRMED,
+    }
+)
+CLOSED_TERMINAL_WEAK_CONFIRMATION_EVIDENCE: frozenset[ConfirmationEvidence] = frozenset(
+    {
+        ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
+        ConfirmationEvidence.STATUS_QUERIED,
     }
 )
 
@@ -564,13 +571,11 @@ class TerminalEventWritebackView(BaseModel):
     actual_disposition: SourceDisposition
     receipt_status: WritebackStatus
     plan_revision: int
-    # Projected from the latest DispositionReceipt for this writeback (ISSUE-227).
-    # Only meaningful when disposition_is_mock=False; mock receipts are always
-    # simulated=True and the CLOSED gate accepts them unconditionally.
+    # Projected from the latest persisted DispositionReceipt (ISSUE-227).
+    # Must not be inferred from disposition_outbox.latest_writeback_status.
     simulated: bool | None = None
-    # Projected from the latest DispositionReceipt (ISSUE-333 / ISSUE-362).
-    # Non-mock CLOSED and Verify both require readback_verified or
-    # manual_confirmed; mock P0 still only demotes adapter_acknowledged.
+    # Projected from the latest persisted DispositionReceipt (ISSUE-333 / ISSUE-362).
+    # Required CLOSED always needs readback_verified or manual_confirmed.
     confirmation_evidence: ConfirmationEvidence | None = None
 
 
@@ -1049,11 +1054,9 @@ def validate_closed_gate(ctx: TransitionContext) -> None:
             details={"receipt_status": terminal.receipt_status.value},
         )
 
-    # ISSUE-227: When disposition is NOT mock, a CONFIRMED terminal receipt must
-    # be explicitly non-simulated.  Mock receipts are always simulated=True and
-    # the gate accepts them unconditionally (P0 demo).  In staging / hybrid
-    # deployments where disposition_is_mock=False, simulated=True or an unknown
-    # simulated flag (None — no receipt row) must not pass as real writeback.
+    # ISSUE-227: live/non-mock CONFIRMED receipts must be explicitly
+    # non-simulated. Mock P0 receipts are simulated=true for display and
+    # environment distinction only; that flag never waives evidence strength.
     if not ctx.disposition_is_mock and terminal.simulated is not False:
         raise InvalidStateTransitionError(
             "required CLOSED gate: non-mock disposition requires a verified "
@@ -1066,15 +1069,12 @@ def validate_closed_gate(ctx: TransitionContext) -> None:
             error_code="closed_simulated_receipt_rejected",
         )
 
-    # ISSUE-333: non-mock CLOSED rejects adapter_acknowledged / status_queried /
-    # missing evidence.  Mock P0 keeps ISSUE-227 simulated path and does not
-    # enforce evidence tiers.
-    if not ctx.disposition_is_mock and (
-        terminal.confirmation_evidence not in CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE
-    ):
+    # ISSUE-333 / ISSUE-362: required CLOSED always needs strong evidence on
+    # the latest actual receipt. Mock adapter_acknowledged cannot close.
+    if terminal.confirmation_evidence not in CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE:
         raise InvalidStateTransitionError(
-            "required CLOSED gate: non-mock disposition requires strong "
-            "confirmation_evidence on terminal receipt",
+            "required CLOSED gate: terminal receipt requires strong "
+            "confirmation_evidence",
             target=EventStatus.CLOSED,
             details={
                 "confirmation_evidence": (
@@ -1082,7 +1082,8 @@ def validate_closed_gate(ctx: TransitionContext) -> None:
                     if terminal.confirmation_evidence is not None
                     else None
                 ),
-                "disposition_is_mock": False,
+                "disposition_is_mock": ctx.disposition_is_mock,
+                "simulated": terminal.simulated,
             },
             error_code="closed_weak_confirmation_evidence",
         )
@@ -1382,6 +1383,7 @@ def validate_writeback_status_transition(
     lookup_never_accepted: bool = False,
     adapter_allows_safe_retry: bool = False,
     evidence_adjudication: bool = False,
+    lookup_proved_accepted: bool = False,
 ) -> None:
     if not _edge_allowed(WRITEBACK_STATUS_TRANSITIONS, current, target):
         raise InvalidStateTransitionError(
@@ -1389,6 +1391,13 @@ def validate_writeback_status_transition(
             current=current,
             target=target,
         )
+    if current is WritebackStatus.FAILED and target is WritebackStatus.ACCEPTED:
+        if not lookup_proved_accepted:
+            raise InvalidStateTransitionError(
+                "FAILED→ACCEPTED requires authoritative provider lookup evidence",
+                current=current,
+                target=target,
+            )
     if current is WritebackStatus.UNKNOWN and target is WritebackStatus.PENDING:
         if not lookup_never_accepted:
             raise InvalidStateTransitionError(
@@ -1405,6 +1414,7 @@ def validate_writeback_status_transition(
             WritebackStatus.CONFLICT,
         }
         and not evidence_adjudication
+        and not lookup_proved_accepted
     ):
         raise InvalidStateTransitionError(
             "UNKNOWN→provider status requires lookup or admin adjudication",
@@ -1441,6 +1451,45 @@ def validate_writeback_status_transition(
                 current=current,
                 target=target,
             )
+
+
+def validate_confirmed_evidence_append(
+    current_evidence: ConfirmationEvidence | None,
+    new_evidence: ConfirmationEvidence | None,
+) -> None:
+    """Allow append-only CONFIRMED evidence strengthening; never downgrade."""
+    if new_evidence is None:
+        raise InvalidStateTransitionError(
+            "CONFIRMED evidence append requires confirmation_evidence",
+            current=WritebackStatus.CONFIRMED,
+            target=WritebackStatus.CONFIRMED,
+        )
+    if current_evidence in CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE:
+        if new_evidence not in CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE:
+            raise InvalidStateTransitionError(
+                "CONFIRMED strong evidence cannot be downgraded",
+                current=WritebackStatus.CONFIRMED,
+                target=WritebackStatus.CONFIRMED,
+                details={
+                    "current_evidence": (
+                        current_evidence.value if current_evidence is not None else None
+                    ),
+                    "new_evidence": new_evidence.value,
+                },
+            )
+        return
+    if new_evidence not in CLOSED_TERMINAL_STRONG_CONFIRMATION_EVIDENCE:
+        raise InvalidStateTransitionError(
+            "CONFIRMED evidence append must strengthen to readback_verified or manual_confirmed",
+            current=WritebackStatus.CONFIRMED,
+            target=WritebackStatus.CONFIRMED,
+            details={
+                "current_evidence": (
+                    current_evidence.value if current_evidence is not None else None
+                ),
+                "new_evidence": new_evidence.value,
+            },
+        )
 
 
 def derive_case_label(verdict: FinalVerdict) -> CaseLabel:

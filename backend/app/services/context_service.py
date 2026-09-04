@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from threading import RLock
 from typing import Any
 
 from pydantic import BaseModel
@@ -40,6 +42,7 @@ CTX_LOG_PREFIX = "shadowtrace:ctx_log:"
 CLOSED_TTL_SECONDS = 24 * 60 * 60
 DEGRADED_CACHE_TTL_SECONDS = 30.0
 REDIS_WRITE_BACKOFFS = (0.1, 0.5, 2.0)
+DEGRADED_CACHE_MAX_ENTRIES = 2048
 
 
 # EventContext Hash field names (excludes companion ``{key}__version`` keys).
@@ -286,8 +289,9 @@ class EventContextStore:
     ) -> None:
         self._redis = redis
         self._session_factory = session_factory
-        self._degraded_cache: dict[str, EventContext] = {}
-        self._degraded_cache_ts: dict[str, float] = {}
+        self._degraded_cache: OrderedDict[str, EventContext] = OrderedDict()
+        self._degraded_cache_ts: OrderedDict[str, float] = OrderedDict()
+        self._degraded_cache_lock = RLock()
         self._on_redis_recovery = on_redis_recovery
 
     def set_on_redis_recovery(
@@ -362,9 +366,11 @@ class EventContextStore:
     async def get(self, event_id: str, key: str) -> Any:
         if key not in CONTEXT_FIELD_NAMES:
             raise KeyError(f"unknown EventContext field: {key!r}")
-
-        if await self._redis.ping():
-            self._clear_degraded_cache(event_id)
+        redis_error = False
+        redis_value: Any = None
+        redis_hit = False
+        redis_version: int | None = None
+        try:
             client = self._redis.get_client()
             raw = await client.hget(ctx_key(event_id), key)
             if raw is not None:
@@ -372,14 +378,27 @@ class EventContextStore:
                 redis_version = (
                     int(RedisClient.loads(raw_version)) if raw_version is not None else None
                 )
-                db_version = await self.get_field_version(event_id, key)
-                if db_version is None or redis_version != db_version:
-                    ctx = await self.rebuild_context(event_id)
-                    return getattr(ctx, key)
-                return RedisClient.loads(raw)
+                redis_value = RedisClient.loads(raw)
+                redis_hit = True
+        except Exception:  # noqa: BLE001 - Redis is an optional cache path
+            logger.debug(
+                "Redis context read failed event_id=%s key=%s",
+                event_id,
+                key,
+                exc_info=True,
+            )
+            redis_error = True
+
+        # PostgreSQL/version checks are deliberately outside the Redis exception
+        # boundary so SQLAlchemy, missing rows, and Pydantic errors propagate.
+        if redis_hit and not redis_error:
+            db_version = await self.get_field_version(event_id, key)
+            if db_version is not None and redis_version == db_version:
+                self._clear_degraded_cache(event_id)
+                return redis_value
+        if not redis_error:
             ctx = await self.rebuild_context(event_id)
             return getattr(ctx, key)
-
         cached = self._get_degraded_if_fresh(event_id)
         if cached is not None:
             return getattr(cached, key)
@@ -418,11 +437,13 @@ class EventContextStore:
             },
         )
         # Keep degraded memory view coherent when Redis is down.
-        if not redis_ok and event_id in self._degraded_cache:
-            current = self._degraded_cache[event_id]
+        if not redis_ok:
+            current = self._get_degraded_if_fresh(event_id)
+        else:
+            current = None
+        if current is not None:
             updated = EventContext.model_validate({**_context_as_dict(current), key: value})
-            self._degraded_cache[event_id] = updated
-            self._degraded_cache_ts[event_id] = time.monotonic()
+            self._cache_degraded(event_id, updated)
 
         return SetResult(redis_ok=redis_ok, version=new_version)
 
@@ -531,35 +552,50 @@ class EventContextStore:
                 "timestamp": datetime.now(UTC).isoformat(),
             },
         )
-        if not redis_ok and event_id in self._degraded_cache:
-            current = self._degraded_cache[event_id]
-            self._degraded_cache[event_id] = EventContext.model_validate(
-                {
-                    **_context_as_dict(current),
-                    "analysis_only_complete": effective,
-                }
+        if not redis_ok:
+            current = self._get_degraded_if_fresh(event_id)
+        else:
+            current = None
+        if current is not None:
+            self._cache_degraded(
+                event_id,
+                EventContext.model_validate(
+                    {
+                        **_context_as_dict(current),
+                        "analysis_only_complete": effective,
+                    }
+                ),
             )
-            self._degraded_cache_ts[event_id] = time.monotonic()
 
         return SetResult(redis_ok=redis_ok, version=current_version)
 
     async def get_full_context(self, event_id: str) -> EventContext:
-        if await self._redis.ping():
-            self._clear_degraded_cache(event_id)
+        redis_error = False
+        redis_decoded: dict[str, Any] | None = None
+        try:
             client = self._redis.get_client()
             raw_hash = await client.hgetall(ctx_key(event_id))
             if raw_hash:
-                decoded = self._decode_hash(raw_hash)
-                if any(k in CONTEXT_FIELD_NAMES for k in decoded):
-                    db_versions = await self._load_current_field_versions(event_id)
-                    if any(
-                        decoded.get(version_field(field_name)) != db_version
-                        for field_name, db_version in db_versions.items()
-                    ):
-                        return await self.rebuild_context(event_id)
-                    return _assemble_event_context(decoded)
-            return await self.rebuild_context(event_id)
+                redis_decoded = self._decode_hash(raw_hash)
+        except Exception:  # noqa: BLE001 - fall back to authoritative journal
+            logger.debug("Redis context hash read failed event_id=%s", event_id, exc_info=True)
+            redis_error = True
 
+        if (
+            redis_decoded is not None
+            and not redis_error
+            and any(k in CONTEXT_FIELD_NAMES for k in redis_decoded)
+        ):
+            db_versions = await self._load_current_field_versions(event_id)
+            if not any(
+                redis_decoded.get(version_field(field_name)) != db_version
+                for field_name, db_version in db_versions.items()
+            ):
+                context = _assemble_event_context(redis_decoded)
+                self._clear_degraded_cache(event_id)
+                return context
+        if not redis_error:
+            return await self.rebuild_context(event_id)
         cached = self._get_degraded_if_fresh(event_id)
         if cached is not None:
             return cached
@@ -671,33 +707,29 @@ class EventContextStore:
 
             versions = await self._load_field_versions(session, event_id)
 
-        redis_ok = await self._redis.ping()
-        if redis_ok:
-            self._clear_degraded_cache(event_id)
-            mapping = self._context_to_redis_mapping(ctx, versions)
-            write_ok = await self._redis_set_fields(event_id, mapping, log_entry=None, expire=False)
-            if write_ok and self._on_redis_recovery is not None:
-                try:
-                    await self._on_redis_recovery(event_id)
-                except Exception:  # noqa: BLE001 — best-effort side effect
-                    logger.warning(
-                        "on_redis_recovery callback failed event_id=%s",
-                        event_id,
-                        exc_info=True,
-                    )
-        else:
-            self._degraded_cache[event_id] = ctx
-            self._degraded_cache_ts[event_id] = time.monotonic()
+        self._clear_degraded_cache(event_id)
+        mapping = self._context_to_redis_mapping(ctx, versions)
+        redis_ok = await self._redis_set_fields(event_id, mapping, log_entry=None, expire=False)
+        if redis_ok and self._on_redis_recovery is not None:
+            try:
+                await self._on_redis_recovery(event_id)
+            except Exception:  # noqa: BLE001 — best-effort side effect
+                logger.warning(
+                    "on_redis_recovery callback failed event_id=%s",
+                    event_id,
+                    exc_info=True,
+                )
+        if not redis_ok:
+            self._cache_degraded(event_id, ctx)
 
         return ctx
 
     async def delete_cached_context(self, event_id: str) -> bool:
         """Delete Redis/in-process cache for an event merged into another event."""
         self._clear_degraded_cache(event_id)
-        if not await self._redis.ping():
-            return False
         try:
-            await self._redis.get_client().delete(
+            client = self._redis.get_client()
+            await client.delete(
                 ctx_key(event_id),
                 ctx_log_key(event_id),
             )
@@ -712,10 +744,8 @@ class EventContextStore:
 
     async def set_closed_ttl(self, event_id: str) -> bool:
         """Apply 24h TTL to the context Hash (and change log). Returns redis_ok."""
-        if not await self._redis.ping():
-            return False
-        client = self._redis.get_client()
         try:
+            client = self._redis.get_client()
             await client.expire(ctx_key(event_id), CLOSED_TTL_SECONDS)
             await client.expire(ctx_log_key(event_id), CLOSED_TTL_SECONDS)
             return True
@@ -804,20 +834,17 @@ class EventContextStore:
                 versions = await self._load_field_versions(session, event_id)
                 await session.flush()
 
-        redis_ok = await self._redis.ping()
-        if redis_ok:
-            mapping = self._context_to_redis_mapping(ctx, versions)
-            redis_ok = await self._redis_set_fields(
-                event_id,
-                mapping,
-                log_entry=None,
-                expire=False,
-            )
+        mapping = self._context_to_redis_mapping(ctx, versions)
+        redis_ok = await self._redis_set_fields(
+            event_id,
+            mapping,
+            log_entry=None,
+            expire=False,
+        )
         if redis_ok:
             self._clear_degraded_cache(event_id)
         else:
-            self._degraded_cache[event_id] = ctx
-            self._degraded_cache_ts[event_id] = time.monotonic()
+            self._cache_degraded(event_id, ctx)
 
         return ctx
 
@@ -826,18 +853,35 @@ class EventContextStore:
     # ------------------------------------------------------------------ #
 
     def _clear_degraded_cache(self, event_id: str) -> None:
-        self._degraded_cache.pop(event_id, None)
-        self._degraded_cache_ts.pop(event_id, None)
+        with self._degraded_cache_lock:
+            self._degraded_cache.pop(event_id, None)
+            self._degraded_cache_ts.pop(event_id, None)
+
+    def _cache_degraded(self, event_id: str, context: EventContext) -> None:
+        """Store a bounded degraded-mode snapshot, evicting the oldest entry."""
+        with self._degraded_cache_lock:
+            if event_id in self._degraded_cache:
+                self._degraded_cache.pop(event_id, None)
+                self._degraded_cache_ts.pop(event_id, None)
+            elif len(self._degraded_cache) >= DEGRADED_CACHE_MAX_ENTRIES:
+                oldest, _ = self._degraded_cache_ts.popitem(last=False)
+                self._degraded_cache.pop(oldest, None)
+            self._degraded_cache[event_id] = context
+            self._degraded_cache_ts[event_id] = time.monotonic()
 
     def _get_degraded_if_fresh(self, event_id: str) -> EventContext | None:
-        ts = self._degraded_cache_ts.get(event_id)
-        cached = self._degraded_cache.get(event_id)
-        if ts is None or cached is None:
-            return None
-        if time.monotonic() - ts > DEGRADED_CACHE_TTL_SECONDS:
-            self._clear_degraded_cache(event_id)
-            return None
-        return cached
+        with self._degraded_cache_lock:
+            ts = self._degraded_cache_ts.get(event_id)
+            cached = self._degraded_cache.get(event_id)
+            if ts is None or cached is None:
+                return None
+            if time.monotonic() - ts > DEGRADED_CACHE_TTL_SECONDS:
+                self._degraded_cache.pop(event_id, None)
+                self._degraded_cache_ts.pop(event_id, None)
+                return None
+            self._degraded_cache.move_to_end(event_id)
+            self._degraded_cache_ts.move_to_end(event_id)
+            return cached
 
     @staticmethod
     async def _upsert_version(session: AsyncSession, event_id: str, field_name: str) -> int:
@@ -982,20 +1026,18 @@ class EventContextStore:
         # One initial attempt plus up to len(backoffs) retries (0.1/0.5/2.0s).
         max_attempts = 1 + len(REDIS_WRITE_BACKOFFS)
         for attempt in range(max_attempts):
-            if not await self._redis.ping():
-                last_exc = RuntimeError("redis ping failed")
-            else:
-                try:
-                    client = self._redis.get_client()
-                    if encoded:
-                        await client.hset(key, mapping=encoded)  # type: ignore[arg-type]
-                    if log_entry is not None:
-                        await client.rpush(ctx_log_key(event_id), RedisClient.dumps(log_entry))
-                    if expire:
-                        await client.expire(key, CLOSED_TTL_SECONDS)
-                    return True
-                except Exception as exc:  # noqa: BLE001
-                    last_exc = exc
+            try:
+                client = self._redis.get_client()
+                if encoded:
+                    await client.hset(key, mapping=encoded)  # type: ignore[arg-type]
+                if log_entry is not None:
+                    await client.rpush(ctx_log_key(event_id), RedisClient.dumps(log_entry))
+                if expire:
+                    await client.expire(key, CLOSED_TTL_SECONDS)
+                self._clear_degraded_cache(event_id)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
             if attempt + 1 < max_attempts:
                 await asyncio.sleep(REDIS_WRITE_BACKOFFS[attempt])
 

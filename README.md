@@ -246,7 +246,7 @@ ShadowTrace 与深信服 XDR、安全 GPT 均保持解耦：
 1. `EventContext` 每个产物字段有唯一 writer Agent，记录于 `FIELD_OWNERSHIP`（位于 `backend/app/services/working_memory.py`）；非 owner 写入被拒并抛 `GuardrailViolationError(error_code="working_memory_unauthorized_write")`。
 2. `disposition_commands`、`disposition_receipts`、`writeback_summary` 仅由受信的 DispositionSyncService writer identity 写入，不接受调用方自报 `system`；Agent 只能提出候选处置，不能自行构造或发送 XDR 写回请求。`EventDispositionService`（ISSUE-059A）负责在效果验证后激活已有 deferred `update_source_event_disposition` Action、推导终态处置值，并委托 DispositionSyncService 提交 `EVENT_STATUS_UPDATE`；它不另建 Action，也不直接写 outbox。
 3. 草稿区 `scratchpad`（追加型，上限 200 条 FIFO）镜像到 `EventContext.scratchpad`，工作记忆键为 `shadowtrace:wm:{event_id}`。
-4. 所有产物字段读写统一经 `WorkingMemory`（建立在 `EventContextStore` 乐观锁之上），读写均留 `MemoryAccessLog`。
+4. 所有产物字段读写统一经 `WorkingMemory`（建立在 `EventContextStore` 乐观锁之上），每次读写尝试均追加到 PostgreSQL `memory_access_audit_log`；内存中的有界 `MemoryAccessLog` 仅为查询投影，不删除持久化历史。
 
 ### 4.12 收敛与护栏常量
 

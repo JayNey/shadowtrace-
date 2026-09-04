@@ -143,10 +143,20 @@
 
     "ApprovalRequiredPayload": {
       "type": "object",
-      "required": ["action_id", "action_name"],
+      "required": ["action_id", "action_name", "publication_id", "approval_cycle"],
       "properties": {
         "action_id": { "type": "string", "pattern": "^act-[0-9a-f]{8}$" },
         "action_name": { "type": "string" },
+        "publication_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "Stable id for one action+approval_cycle publication; redelivery reuses it."
+        },
+        "approval_cycle": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Approval cycle for this action; a new cycle is a new publication."
+        },
         "summary": { "type": "string" },
         "target_count": { "type": "integer", "minimum": 0 },
         "deadline": { "type": "string", "format": "date-time" },
@@ -275,7 +285,12 @@
         },
         "provider_code": { "type": "string" },
         "created_at": { "type": "string", "format": "date-time" },
-        "updated_at": { "type": "string", "format": "date-time" }
+        "updated_at": { "type": "string", "format": "date-time" },
+        "authorization_race": {
+          "type": "string",
+          "enum": ["authorization_changed_after_egress"],
+          "description": "Set when approval changed after irrevocable egress; provider fact is unchanged. Never carries raw_result, secrets, or vendor blobs."
+        }
       },
       "additionalProperties": false,
       "not": {

@@ -387,6 +387,7 @@ class DispositionOutbox(Base):
         Index("ix_disposition_outbox_latest_writeback_status", "latest_writeback_status"),
         Index("ix_disposition_outbox_next_retry_at", "next_retry_at"),
         Index("ix_disposition_outbox_lease_expires_at", "lease_expires_at"),
+        Index("ix_disposition_outbox_egress_admitted_at", "egress_admitted_at"),
         Index("ix_disposition_outbox_disposition_id", "disposition_id"),
     )
 
@@ -420,6 +421,7 @@ class DispositionOutbox(Base):
     locked_by: Mapped[str | None] = mapped_column(String, nullable=True)
     locked_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    egress_admitted_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     last_error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
@@ -662,6 +664,48 @@ class EventAuditLog(Base):
     to_status: Mapped[str | None] = mapped_column(String, nullable=True)
     operator: Mapped[str | None] = mapped_column(String, nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
+class MemoryAccessAuditLog(Base):
+    """Append-only durable WorkingMemory access audit (ISSUE-20)."""
+
+    __tablename__ = "memory_access_audit_log"
+    __table_args__ = (Index("ix_memory_access_audit_event_created", "event_id", "timestamp"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    timestamp: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+    agent_name: Mapped[str] = mapped_column(String, nullable=False)
+    op: Mapped[str] = mapped_column(String, nullable=False)
+    key: Mapped[str] = mapped_column(String, nullable=False)
+    allowed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+
+class ApprovalPublication(Base):
+    """Transactional publication marker for approval_required events."""
+
+    __tablename__ = "approval_publication"
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id", "action_id", "approval_cycle",
+            name="uq_approval_publication_event_action_cycle",
+        ),
+        Index("ix_approval_publication_claim_expires", "claim_expires_at"),
+    )
+
+    publication_id: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(
+        String, ForeignKey("security_event.event_id", ondelete="CASCADE"), nullable=False
+    )
+    action_id: Mapped[str] = mapped_column(
+        String, ForeignKey("action.action_id", ondelete="CASCADE"), nullable=False
+    )
+    approval_cycle: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    claim_token: Mapped[str | None] = mapped_column(String, nullable=True)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
     created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
 
 

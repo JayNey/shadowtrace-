@@ -534,10 +534,10 @@ class InMemoryGuardViolationWriter:
 
 
 class WorkingMemoryGuardViolationWriter:
-    """Persist guard_violations through WorkingMemory as owner OutputGuard."""
+    """Persist guard_violations through a composition-root BoundWorkingMemory."""
 
     def __init__(self, working_memory: Any) -> None:
-        self._bound = working_memory.for_writer("OutputGuard")
+        self._bound = working_memory
 
     async def write_guard_violations(
         self, event_id: str, violations: Sequence[GuardViolation]

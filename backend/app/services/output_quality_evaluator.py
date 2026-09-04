@@ -110,10 +110,7 @@ class OutputQualityEvaluator:
     ) -> None:
         self._llm_client = llm_client
         self._judge_enabled = judge_enabled and llm_client is not None
-        if working_memory is not None:
-            self._bound_wm = working_memory.for_writer("OutputQualityEvaluator")
-        else:
-            self._bound_wm = None
+        self._bound_wm = working_memory
         self._degraded_flags = degraded_flags
         self._blocking_enabled = blocking_enabled
         self.last_degraded_reason: str | None = None

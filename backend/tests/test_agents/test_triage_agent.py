@@ -35,7 +35,7 @@ from app.models.entities import (
 from app.models.enums import EventType, Severity, SourceObjectKind
 from app.models.source import SourceReference
 from app.services.entity_merge import merge_entity_sets
-from app.services.working_memory import FIELD_OWNERSHIP
+from app.services.working_memory import BoundWorkingMemory, FIELD_OWNERSHIP
 
 # --------------------------------------------------------------------------- #
 # Mock-working-memory fixtures — signatures MATCH BoundWorkingMemory exactly
@@ -1074,12 +1074,34 @@ class TestTriageAgentHooks:
         )
         fp_matcher = MagicMock()
 
-        agent = TriageAgent(working_memory=wm, fp_matcher=fp_matcher)
+        agent = TriageAgent(
+            working_memory=wm,
+            fp_matcher=fp_matcher,
+            fp_matcher_memory=_MockBoundWorkingMemory(writer_name="FalsePositiveMatcher"),
+        )
         assert len(agent.pre_triage_hooks) == 0
         assert len(agent.post_triage_hooks) == 1
         from app.services.false_positive_matcher import FalsePositiveMatcherHook
 
         assert isinstance(agent.post_triage_hooks[0], FalsePositiveMatcherHook)
+
+
+    def test_triage_agent_receives_separate_false_positive_matcher_binding(self):
+        triage_wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        fp_wm = _MockBoundWorkingMemory(writer_name="FalsePositiveMatcher")
+        agent = TriageAgent(
+            working_memory=triage_wm,
+            fp_matcher=MagicMock(),
+            fp_matcher_memory=fp_wm,
+        )
+        from app.services.false_positive_matcher import FalsePositiveMatcherHook
+
+        assert len(agent.post_triage_hooks) == 1
+        hook = agent.post_triage_hooks[0]
+        assert isinstance(hook, FalsePositiveMatcherHook)
+        assert hook._wm is fp_wm
+        assert hook._wm is not triage_wm
+        assert not hasattr(BoundWorkingMemory, "for_writer")
 
 
 # --------------------------------------------------------------------------- #

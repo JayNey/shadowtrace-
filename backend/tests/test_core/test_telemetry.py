@@ -422,15 +422,28 @@ def test_fastapi_http_span_links_agent_tool_chain(
 async def test_lookup_writeback_status_no_query_span_without_capability(
     enabled_telemetry: TelemetryReaders,
 ) -> None:
-    from unittest.mock import AsyncMock, MagicMock
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import MagicMock
 
     from app.adapters.disposition.base import (
         BaseDispositionAdapter,
         DispositionAdapterCapabilities,
     )
     from app.adapters.registry import DispositionAdapterRegistry
-    from app.models.disposition import DispositionCommand
-    from app.models.enums import ConnectorStatus, WritebackStatus
+    from app.models.disposition import (
+        DispositionCommand,
+        SourceObjectLocator,
+        SubmitEntityActionParams,
+        TargetDispositionResult,
+    )
+    from app.models.enums import (
+        ConnectorStatus,
+        DispositionIntentKind,
+        ExecutionOwner,
+        SourceObjectKind,
+        TargetExecutionStatus,
+    )
+    from app.services import disposition_sync_service as dss
     from app.services.disposition_sync_service import DispositionSyncService
 
     class _NoQueryAdapter(BaseDispositionAdapter):
@@ -449,38 +462,64 @@ async def test_lookup_writeback_status_no_query_span_without_capability(
         async def health_check(self) -> ConnectorStatus:
             return ConnectorStatus.ONLINE
 
-    outbox = MagicMock()
-    outbox.writeback_id = "wbk-test"
-    outbox.latest_writeback_status = WritebackStatus.UNKNOWN.value
-    outbox.command_payload = {
-        "source_locator": {
-            "source_product": "no_query",
-            "source_object_id": "obj-1",
-            "source_object_kind": "incident",
-        }
-    }
-
-    session = AsyncMock()
-    session.scalar = AsyncMock(return_value=outbox)
-    session_cm = AsyncMock()
-    session_cm.__aenter__.return_value = session
-    session_cm.__aexit__.return_value = None
-    session_factory = MagicMock(return_value=session_cm)
-
+    command = DispositionCommand(
+        disposition_id="disp-1",
+        action_id="act-1",
+        closure_cycle=1,
+        intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT,
+        source_locator=SourceObjectLocator(
+            source_product="no_query",
+            source_tenant_id="tenant-a",
+            connector_id="conn-1",
+            source_kind=SourceObjectKind.INCIDENT,
+            source_object_id="obj-1",
+        ),
+        operation_code="submit_entity_action",
+        operation_params=SubmitEntityActionParams(
+            entity_action_code="isolate_host",
+            canonical_target="host:pc-1",
+        ),
+        target_results=[
+            TargetDispositionResult(
+                canonical_target="host:pc-1",
+                status=TargetExecutionStatus.SUCCESS,
+            )
+        ],
+        operator_id="operator-1",
+        idempotency_key="idem-1",
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+    )
+    adapter = _NoQueryAdapter()
+    now = datetime.now(UTC)
+    claim = dss._PausedLookupClaim(
+        outbox_id="obx-1",
+        token="tok",
+        event_id="evt-1",
+        action_id="act-1",
+        disposition_id="disp-1",
+        writeback_id="wbk-test",
+        idempotency_key="idem-1",
+        command_payload_sha256="abc",
+        command=command,
+        adapter=adapter,
+        provider_job_id=None,
+        attempt=1,
+        locked_at=now,
+        lease_expires_at=now + timedelta(seconds=30),
+    )
     registry = DispositionAdapterRegistry()
-    registry.register("no_query", _NoQueryAdapter())
+    registry.register("no_query", adapter)
     sync = DispositionSyncService(
-        session_factory,
+        MagicMock(),
         context_store=MagicMock(),
         adapter_registry=registry,
     )
-
     span_exporter, _, _ = enabled_telemetry
-    status = await sync.lookup_writeback_status("wbk-test")
-    assert status is WritebackStatus.UNKNOWN
-
+    outcome = await sync._lookup_paused_outbox(claim)
+    assert outcome.kind is dss._PausedLookupKind.DEGRADED
     span_exporter.force_flush()
     names = [span.name for span in span_exporter.get_finished_spans()]
+    assert "disposition.lookup_reconcile" not in names
     assert "disposition.query_status" not in names
 
 
@@ -488,8 +527,8 @@ async def test_lookup_writeback_status_no_query_span_without_capability(
 async def test_lookup_writeback_status_emits_query_span_with_capability(
     enabled_telemetry: TelemetryReaders,
 ) -> None:
-    from datetime import UTC, datetime
-    from unittest.mock import AsyncMock, MagicMock
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import MagicMock
 
     from app.adapters.disposition.base import (
         BaseDispositionAdapter,
@@ -512,6 +551,7 @@ async def test_lookup_writeback_status_emits_query_span_with_capability(
         TargetExecutionStatus,
         WritebackStatus,
     )
+    from app.services import disposition_sync_service as dss
     from app.services.disposition_sync_service import DispositionSyncService
 
     command = DispositionCommand(
@@ -559,7 +599,7 @@ async def test_lookup_writeback_status_emits_query_span_with_capability(
             self, idempotency_key: str, source_locator
         ) -> DispositionReceipt:
             del idempotency_key, source_locator
-            now = datetime.now(UTC)
+            observed = datetime.now(UTC)
             return DispositionReceipt(
                 writeback_id="wbk-test",
                 sequence=1,
@@ -568,43 +608,46 @@ async def test_lookup_writeback_status_emits_query_span_with_capability(
                 source_record_id="src-1",
                 status=WritebackStatus.CONFIRMED,
                 confirmation_evidence=ConfirmationEvidence.STATUS_QUERIED,
-                observed_at=now,
-                submitted_at=now,
+                observed_at=observed,
+                submitted_at=observed,
             )
 
         async def health_check(self) -> ConnectorStatus:
             return ConnectorStatus.ONLINE
 
-    outbox = MagicMock()
-    outbox.writeback_id = "wbk-test"
-    outbox.event_id = "evt-1"
-    outbox.action_id = "act-1"
-    outbox.disposition_id = "disp-1"
-    outbox.latest_writeback_status = WritebackStatus.UNKNOWN.value
-    outbox.command_payload = command.model_dump(mode="json")
-
-    session = AsyncMock()
-    session.scalar = AsyncMock(return_value=outbox)
-    session_cm = AsyncMock()
-    session_cm.__aenter__.return_value = session
-    session_cm.__aexit__.return_value = None
-    session_factory = MagicMock(return_value=session_cm)
-
+    adapter = _LookupAdapter()
+    now = datetime.now(UTC)
+    claim = dss._PausedLookupClaim(
+        outbox_id="obx-1",
+        token="tok",
+        event_id="evt-1",
+        action_id="act-1",
+        disposition_id="disp-1",
+        writeback_id="wbk-test",
+        idempotency_key="idem-1",
+        command_payload_sha256="abc",
+        command=command,
+        adapter=adapter,
+        provider_job_id=None,
+        attempt=1,
+        locked_at=now,
+        lease_expires_at=now + timedelta(seconds=30),
+    )
     registry = DispositionAdapterRegistry()
-    registry.register("lookup_stub", _LookupAdapter())
+    registry.register("lookup_stub", adapter)
     sync = DispositionSyncService(
-        session_factory,
+        MagicMock(),
         context_store=MagicMock(),
         adapter_registry=registry,
     )
-
-    span_exporter, metric_reader, _ = enabled_telemetry
-    status = await sync.lookup_writeback_status("wbk-test")
-    assert status is WritebackStatus.CONFIRMED
-
+    span_exporter, _, _ = enabled_telemetry
+    outcome = await sync._lookup_paused_outbox(claim)
+    assert outcome.kind is dss._PausedLookupKind.FOUND
+    assert outcome.receipt is not None
+    assert outcome.receipt.status is WritebackStatus.CONFIRMED
     span_exporter.force_flush()
     names = [span.name for span in span_exporter.get_finished_spans()]
-    assert "disposition.query_status" in names
+    assert "disposition.lookup_reconcile" in names
 
 
 def test_manual_resolve_records_writeback_metric(

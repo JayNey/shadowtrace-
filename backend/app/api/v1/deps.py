@@ -602,7 +602,7 @@ async def _build_production_investigation_graph(
         "degraded_flags": stack["degraded_flags"],
         "context_store": stack["context_store"],
         "session_factory": stack["session_factory"],
-        "working_memory": stack["wm"],
+        "fp_adjudicator_memory": wm.for_writer("PostEvidenceFpAdjudicator"),
         "approval_engine": await get_approval_engine(),
         "action_execution": await get_action_execution(),
         "disposition_sync": await get_disposition_sync(),
@@ -842,7 +842,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         recovery_interval_seconds=settings.budget_redis_recovery_interval_seconds,
     )
     output_guard = OutputGuard(
-        violation_writer=WorkingMemoryGuardViolationWriter(wm),
+        violation_writer=WorkingMemoryGuardViolationWriter(wm.for_writer("OutputGuard")),
     )
     publication_service = AgentPublicationService(
         event_service,
@@ -937,6 +937,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         trace_service=trace_service,
         event_bus=event_bus,
         fp_matcher=fp_matcher,
+        fp_matcher_memory=wm.for_writer("FalsePositiveMatcher"),
         degraded_flags=_get_degraded_flags(),
         event_service=event_service,
     )
@@ -1042,7 +1043,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
     from app.services.output_quality_evaluator import build_output_quality_evaluator
 
     output_quality_evaluator = build_output_quality_evaluator(
-        working_memory=wm,
+        working_memory=wm.for_writer("OutputQualityEvaluator"),
         llm_client=llm_client,
         judge_enabled=settings.quality_judge_enabled,
         degraded_flags=_get_degraded_flags(),
@@ -1107,7 +1108,7 @@ async def get_pipeline() -> Any:
             report_agent=stack["report"],
             context_store=stack["context_store"],
             session_factory=stack["session_factory"],
-            working_memory=stack["wm"],
+            fp_adjudicator_memory=stack["wm"].for_writer("PostEvidenceFpAdjudicator"),
             degraded_flags=stack["degraded_flags"],
             settings=stack["settings"],
             memory_agent=stack["memory"],
@@ -1199,6 +1200,26 @@ def reset_investigation_stack_cache() -> None:
     _investigation_stack = None
 
 
+async def close_loop_bound_redis_resources() -> None:
+    """Close the Redis client on the event loop that used it."""
+    if _redis_client is not None:
+        await _redis_client.aclose()
+
+
+async def close_loop_bound_adapter_resources() -> None:
+    """Close adapter clients owned by the task-local dependency graph."""
+    if _adapter_registry is None:
+        return
+    for name in _adapter_registry.list_names():
+        adapter = _adapter_registry.get(name)
+        closer = getattr(adapter, "aclose", None)
+        if closer is not None:
+            try:
+                await closer()
+            except Exception:
+                logger.warning("adapter close failed name=%s", name, exc_info=True)
+
+
 def reset_loop_bound_redis_resources() -> None:
     """Drop Redis and redis-backed singletons after Celery ``asyncio.run`` (ISSUE-252).
 
@@ -1207,8 +1228,6 @@ def reset_loop_bound_redis_resources() -> None:
     ``asyncio.run`` binds fresh clients. SessionProvider is intentionally kept —
     worker NullPool engines are already loop-safe across consecutive runs.
     """
-    import asyncio
-
     global _redis_client, _context_store, _degraded_flags
     global _event_service, _state_machine, _event_bus, _pipeline, _approval_engine
     global _super_agent, _event_lease, _investigation_stack, _investigation_intent_service
@@ -1221,7 +1240,6 @@ def reset_loop_bound_redis_resources() -> None:
     global _detection_promotion, _detection_context_projector, _detection_context_service
     global _decision_record_service, _execution_job_query
 
-    client = _redis_client
     _redis_client = None
     _context_store = None
     _degraded_flags = None
@@ -1255,19 +1273,9 @@ def reset_loop_bound_redis_resources() -> None:
     _detection_context_projector = None
     _detection_context_service = None
 
-    if client is None:
-        return
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        # No running loop (Celery Strategy B after asyncio.run) — close cleanly.
-        try:
-            asyncio.run(client.aclose())
-        except Exception:
-            logger.debug("Redis aclose after Celery task failed", exc_info=True)
-        return
-    # Called from inside a running loop (tests / reset_deps): drop references only.
-    # Closing via asyncio.run would nest loops; RedisClient rebind handles reuse.
+    # This reset is invoked after the task runner has exited.  Never create a
+    # second event loop here: the Celery worker shutdown hook owns final disposal.
+    # Dropping references is sufficient to force fresh loop-bound clients next run.
 
 
 def reset_deps() -> None:

@@ -54,6 +54,159 @@ TASK_META_PREFIX = "shadowtrace:celery:task:"
 TASK_META_TTL_SECONDS = 86_400
 
 
+async def _close_task_owned_resources() -> None:
+    """Dispose async clients while the task's single runner loop is alive."""
+    from app.api.v1.deps import (
+        close_loop_bound_adapter_resources,
+        close_loop_bound_redis_resources,
+    )
+    from app.core.embedding.factory import close_embedding_client
+
+    try:
+        await close_embedding_client()
+    except Exception:
+        logger.warning("task-owned embedding client close failed", exc_info=True)
+    try:
+        await close_loop_bound_adapter_resources()
+    except Exception:
+        logger.warning("task-owned adapter client close failed", exc_info=True)
+    try:
+        await close_loop_bound_redis_resources()
+    except Exception:
+        logger.warning("task-owned Redis client close failed", exc_info=True)
+
+
+async def _run_investigation_flow(
+    event_id: str,
+    *,
+    include_response_execution: bool,
+    generate_report: bool,
+    owner_id: str,
+    task_id: str,
+    redelivered: bool,
+    lease_acquired: bool,
+    request_headers: Any,
+    intent_id: str | None,
+    retry_count: int = 0,
+    max_retries: int = CELERY_REDELIVERY_MAX_RETRIES,
+) -> dict[str, str]:
+    """Run admission, body and intent finalization on one event loop."""
+    try:
+        if intent_id:
+            admission = await _admit_intent_delivery(intent_id, task_id)
+            if admission is not IntentDeliveryAdmission.ACCEPTED:
+                reason = {
+                    IntentDeliveryAdmission.STALE_SUPERSEDED: "stale_broker_task",
+                    IntentDeliveryAdmission.ALREADY_TERMINAL: "intent_already_terminal",
+                    IntentDeliveryAdmission.MISSING: "intent_missing",
+                }[admission]
+                return _skipped_delivery_result(event_id, reason=reason)
+        result = await _run_investigation_body(
+            event_id,
+            include_response_execution=include_response_execution,
+            generate_report=generate_report,
+            owner_id=owner_id,
+            task_id=task_id,
+            redelivered=redelivered,
+            lease_acquired=lease_acquired,
+            request_headers=request_headers,
+        )
+        if intent_id:
+            await _finalize_intent_from_result(intent_id, result, broker_task_id=task_id)
+        return result
+    except (RedeliveryLookupRetry, RedeliveryDeferRetry):
+        raise
+    except SoftTimeLimitExceeded:
+        await _handle_soft_time_limit_exceeded(
+            event_id, resolved_owner=owner_id, intent_id=intent_id, broker_task_id=task_id
+        )
+        raise
+    except (DependencyUnavailableError, OperationalError, OSError, ConnectionError) as exc:
+        if intent_id and retry_count >= max_retries:
+            from app.db.session import get_session_factory
+            from app.services.investigation_intent_service import InvestigationIntentService
+
+            await InvestigationIntentService(get_session_factory()).mark_retry(
+                intent_id, error=str(exc), broker_task_id=task_id
+            )
+        raise
+    except Exception as exc:
+        if intent_id:
+            from app.db.session import get_session_factory
+            from app.services.investigation_intent_service import InvestigationIntentService
+
+            await InvestigationIntentService(get_session_factory()).mark_dead(
+                intent_id, error=str(exc), broker_task_id=task_id
+            )
+        raise
+    finally:
+        await _close_task_owned_resources()
+
+
+async def _run_analysis_only_flow(
+    event_id: str,
+    *,
+    generate_report: bool,
+    owner_id: str,
+    task_id: str,
+    redelivered: bool,
+    lease_acquired: bool,
+    request_headers: Any,
+    intent_id: str | None,
+    retry_count: int = 0,
+    max_retries: int = CELERY_REDELIVERY_MAX_RETRIES,
+) -> dict[str, str]:
+    try:
+        if intent_id:
+            admission = await _admit_intent_delivery(intent_id, task_id)
+            if admission is not IntentDeliveryAdmission.ACCEPTED:
+                reason = {
+                    IntentDeliveryAdmission.STALE_SUPERSEDED: "stale_broker_task",
+                    IntentDeliveryAdmission.ALREADY_TERMINAL: "intent_already_terminal",
+                    IntentDeliveryAdmission.MISSING: "intent_missing",
+                }[admission]
+                return _skipped_delivery_result(event_id, reason=reason)
+        result = await _run_analysis_only_body(
+            event_id,
+            generate_report=generate_report,
+            owner_id=owner_id,
+            task_id=task_id,
+            redelivered=redelivered,
+            lease_acquired=lease_acquired,
+            request_headers=request_headers,
+        )
+        if intent_id:
+            await _finalize_intent_from_result(intent_id, result, broker_task_id=task_id)
+        return result
+    except (RedeliveryLookupRetry, RedeliveryDeferRetry):
+        raise
+    except SoftTimeLimitExceeded:
+        await _handle_soft_time_limit_exceeded(
+            event_id, resolved_owner=owner_id, intent_id=intent_id, broker_task_id=task_id
+        )
+        raise
+    except (DependencyUnavailableError, OperationalError, OSError, ConnectionError) as exc:
+        if intent_id and retry_count >= max_retries:
+            from app.db.session import get_session_factory
+            from app.services.investigation_intent_service import InvestigationIntentService
+
+            await InvestigationIntentService(get_session_factory()).mark_retry(
+                intent_id, error=str(exc), broker_task_id=task_id
+            )
+        raise
+    except Exception as exc:
+        if intent_id:
+            from app.db.session import get_session_factory
+            from app.services.investigation_intent_service import InvestigationIntentService
+
+            await InvestigationIntentService(get_session_factory()).mark_dead(
+                intent_id, error=str(exc), broker_task_id=task_id
+            )
+        raise
+    finally:
+        await _close_task_owned_resources()
+
+
 def _release_celery_task_loop_resources() -> None:
     """Strategy B (#623 / ISSUE-252): drop loop-bound clients after each asyncio.run task.
 
@@ -65,7 +218,6 @@ def _release_celery_task_loop_resources() -> None:
         reset_investigation_stack_cache,
         reset_loop_bound_redis_resources,
     )
-    from app.core.embedding.factory import reset_embedding_client
     from app.playbook.resources import reset_playbook_resources_cache
     from app.rag.resources import reset_loaded_retrieval_resources
 
@@ -73,7 +225,11 @@ def _release_celery_task_loop_resources() -> None:
     reset_loop_bound_redis_resources()
     reset_loaded_retrieval_resources()
     reset_playbook_resources_cache()
-    reset_embedding_client()
+    # The runner already closed loop-bound clients; this post-run reset only
+    # drops references and must not start another loop.
+    from app.core.embedding.factory import reset_embedding_client
+
+    reset_embedding_client(close=False)
 
 
 def _task_meta_key(task_id: str) -> str:
@@ -710,27 +866,10 @@ def run_investigation(
             self.request.id,
             resolved_owner,
         )
-    if intent_id:
-        from app.models.investigation_intent import IntentDeliveryAdmission
-
-        admission = asyncio.run(_admit_intent_delivery(intent_id, str(self.request.id)))
-        if admission is not IntentDeliveryAdmission.ACCEPTED:
-            reason = {
-                IntentDeliveryAdmission.STALE_SUPERSEDED: "stale_broker_task",
-                IntentDeliveryAdmission.ALREADY_TERMINAL: "intent_already_terminal",
-                IntentDeliveryAdmission.MISSING: "intent_missing",
-            }[admission]
-            logger.info(
-                "run_investigation delivery rejected event=%s intent=%s admission=%s",
-                event_id,
-                intent_id,
-                admission.value,
-            )
-            return _skipped_delivery_result(event_id, reason=reason)
     try:
         try:
             result = asyncio.run(
-                _run_investigation_body(
+                _run_investigation_flow(
                     event_id,
                     include_response_execution=bool(include_response_execution),
                     generate_report=bool(generate_report),
@@ -739,29 +878,16 @@ def run_investigation(
                     redelivered=redelivered or resume_from_checkpoint,
                     lease_acquired=lease_acquired,
                     request_headers=request_headers,
+                    intent_id=intent_id,
+                    retry_count=int(self.request.retries),
+                    max_retries=int(self.max_retries),
                 )
             )
-            if intent_id:
-                asyncio.run(
-                    _finalize_intent_from_result(
-                        intent_id,
-                        result,
-                        broker_task_id=task_id,
-                    )
-                )
             return result
         finally:
             _release_celery_task_loop_resources()
     except SoftTimeLimitExceeded:
         logger.warning("run_investigation soft time limit exceeded for event=%s", event_id)
-        asyncio.run(
-            _handle_soft_time_limit_exceeded(
-                event_id,
-                resolved_owner=resolved_owner,
-                intent_id=intent_id,
-                broker_task_id=task_id,
-            )
-        )
         raise
     except (RedeliveryLookupRetry, RedeliveryDeferRetry) as exc:
         _celery_redelivery_retry(self, exc, request_headers=request_headers)
@@ -773,37 +899,16 @@ def run_investigation(
             exc_info=True,
         )
         if intent_id and self.request.retries >= self.max_retries:
-            from app.db.session import get_session_factory
-            from app.services.investigation_intent_service import InvestigationIntentService
-
-            asyncio.run(
-                InvestigationIntentService(get_session_factory()).mark_retry(
-                    intent_id,
-                    error=str(exc),
-                    broker_task_id=task_id,
-                )
-            )
             raise
         # Keep intent in STARTED during Celery in-flight retries; dispatcher owns RETRY.
         raise self.retry(exc=exc) from exc
-    except Exception as exc:
+    except Exception:
         logger.error(
             "run_investigation failed for event=%s intent=%s",
             event_id,
             intent_id,
             exc_info=True,
         )
-        if intent_id:
-            from app.db.session import get_session_factory
-            from app.services.investigation_intent_service import InvestigationIntentService
-
-            asyncio.run(
-                InvestigationIntentService(get_session_factory()).mark_dead(
-                    intent_id,
-                    error=str(exc),
-                    broker_task_id=task_id,
-                )
-            )
         raise
 
 
@@ -1065,21 +1170,10 @@ def run_analysis_only_investigation(
             self.request.id,
             resolved_owner,
         )
-    if intent_id:
-        from app.models.investigation_intent import IntentDeliveryAdmission
-
-        admission = asyncio.run(_admit_intent_delivery(intent_id, task_id))
-        if admission is not IntentDeliveryAdmission.ACCEPTED:
-            reason = {
-                IntentDeliveryAdmission.STALE_SUPERSEDED: "stale_broker_task",
-                IntentDeliveryAdmission.ALREADY_TERMINAL: "intent_already_terminal",
-                IntentDeliveryAdmission.MISSING: "intent_missing",
-            }[admission]
-            return _skipped_delivery_result(event_id, reason=reason)
     try:
         try:
             result = asyncio.run(
-                _run_analysis_only_body(
+                _run_analysis_only_flow(
                     event_id,
                     generate_report=bool(generate_report),
                     owner_id=resolved_owner,
@@ -1087,29 +1181,16 @@ def run_analysis_only_investigation(
                     redelivered=redelivered or resume_from_checkpoint,
                     lease_acquired=lease_acquired,
                     request_headers=request_headers,
+                    intent_id=intent_id,
+                    retry_count=int(self.request.retries),
+                    max_retries=int(self.max_retries),
                 )
             )
-            if intent_id:
-                asyncio.run(
-                    _finalize_intent_from_result(
-                        intent_id,
-                        result,
-                        broker_task_id=task_id,
-                    )
-                )
             return result
         finally:
             _release_celery_task_loop_resources()
     except SoftTimeLimitExceeded:
         logger.warning("run_analysis_only soft time limit exceeded for event=%s", event_id)
-        asyncio.run(
-            _handle_soft_time_limit_exceeded(
-                event_id,
-                resolved_owner=resolved_owner,
-                intent_id=intent_id,
-                broker_task_id=task_id,
-            )
-        )
         raise
     except (RedeliveryLookupRetry, RedeliveryDeferRetry) as exc:
         _celery_redelivery_retry(self, exc, request_headers=request_headers)
@@ -1127,36 +1208,15 @@ def run_analysis_only_investigation(
             exc_info=True,
         )
         if intent_id and self.request.retries >= self.max_retries:
-            from app.db.session import get_session_factory
-            from app.services.investigation_intent_service import InvestigationIntentService
-
-            asyncio.run(
-                InvestigationIntentService(get_session_factory()).mark_retry(
-                    intent_id,
-                    error=str(exc),
-                    broker_task_id=task_id,
-                )
-            )
             raise
         raise self.retry(exc=exc) from exc
-    except Exception as exc:
+    except Exception:
         logger.error(
             "run_analysis_only failed for event=%s intent=%s",
             event_id,
             intent_id,
             exc_info=True,
         )
-        if intent_id:
-            from app.db.session import get_session_factory
-            from app.services.investigation_intent_service import InvestigationIntentService
-
-            asyncio.run(
-                InvestigationIntentService(get_session_factory()).mark_dead(
-                    intent_id,
-                    error=str(exc),
-                    broker_task_id=task_id,
-                )
-            )
         raise
 
 

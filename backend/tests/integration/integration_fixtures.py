@@ -262,14 +262,16 @@ def budget_service(
     working_memory: WorkingMemory,
     e2e_settings: Settings,
 ) -> BudgetService:
-    writer = WorkingMemoryBudgetUsageWriter(working_memory)
+    writer = WorkingMemoryBudgetUsageWriter(working_memory.for_writer("BudgetService"))
     return BudgetService(redis=redis_client, usage_writer=writer, settings=e2e_settings)
 
 
 @pytest.fixture
 def output_guard(working_memory: WorkingMemory) -> OutputGuard:
     return OutputGuard(
-        violation_writer=WorkingMemoryGuardViolationWriter(working_memory),
+        violation_writer=WorkingMemoryGuardViolationWriter(
+            working_memory.for_writer("OutputGuard")
+        ),
     )
 
 
@@ -403,6 +405,7 @@ def build_analysis_pipeline(
             output_guard=output_guard,
             trace_service=agent_trace_service,
             fp_matcher=fp_matcher,
+            fp_matcher_memory=working_memory.for_writer("FalsePositiveMatcher"),
             scenario_id=scenario_id,
             event_service=event_service,
         )
@@ -455,11 +458,11 @@ def build_analysis_pipeline(
             risk_agent=risk,
             report_agent=report,
             context_store=context_store,
-            working_memory=working_memory,
+            fp_adjudicator_memory=working_memory.for_writer("PostEvidenceFpAdjudicator"),
             degraded_flags=degraded_flags,
             settings=e2e_settings,
             output_quality_evaluator=build_output_quality_evaluator(
-                working_memory=working_memory,
+                working_memory=working_memory.for_writer("OutputQualityEvaluator"),
                 llm_client=effective_llm,
                 judge_enabled=e2e_settings.quality_judge_enabled,
                 degraded_flags=degraded_flags,
@@ -524,6 +527,7 @@ def build_super_agent(
             output_guard=output_guard,
             trace_service=agent_trace_service,
             fp_matcher=fp_matcher,
+            fp_matcher_memory=working_memory.for_writer("FalsePositiveMatcher"),
             scenario_id=scenario_id,
             event_service=event_service,
         )

@@ -68,6 +68,20 @@ def test_sanitize_redacts_secrets_and_raw_result() -> None:
     assert cleaned["auth_code"] == "[REDACTED]"
 
 
+def test_sanitize_preserves_authorization_race_socket_field() -> None:
+    cleaned = sanitize_payload(
+        {
+            "disposition_id": "disp-0a1b2c3d",
+            "writeback_id": "wbk-0a1b2c3d",
+            "status": "CONFIRMED",
+            "authorization_race": "authorization_changed_after_egress",
+            "authorization": "Bearer should-redact",
+        }
+    )
+    assert cleaned["authorization_race"] == "authorization_changed_after_egress"
+    assert cleaned["authorization"] == "[REDACTED]"
+
+
 def test_redacting_log_formatter_removes_credential_values() -> None:
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)

@@ -34,7 +34,7 @@ import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, NoReturn, Protocol, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -55,6 +55,9 @@ from app.models.ids import is_action_id, is_writeback_id
 from app.models.workflow import WRITEBACK_MAX_RETRIES
 from app.orchestration.graph_state import InvestigationState
 from app.orchestration.ports import StateMachinePort
+
+if TYPE_CHECKING:
+    from app.services.disposition_sync_service import WritebackLookupOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -150,16 +153,10 @@ class _DispositionSyncPort(Protocol):
         comment: str,
     ) -> Any: ...
 
-    async def lookup_writeback_status(
+    async def reconcile_writeback_lookup(
         self,
         writeback_id: str,
-    ) -> WritebackStatus | None: ...
-
-    async def update_writeback_status_from_lookup(
-        self,
-        writeback_id: str,
-        status: WritebackStatus,
-    ) -> None: ...
+    ) -> WritebackLookupOutcome: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -447,38 +444,23 @@ class WritebackRecoveryHandler:
                 )
                 return await self._handle_escalate(event_id, writeback, result, op)
             try:
-                looked_up = await self._disposition_sync.lookup_writeback_status(
+                from app.services.disposition_sync_service import WritebackLookupKind
+
+                lookup_outcome = await self._disposition_sync.reconcile_writeback_lookup(
                     writeback.writeback_id,
                 )
-                if looked_up is not None and looked_up is not WritebackStatus.UNKNOWN:
+                looked_up = lookup_outcome.writeback_status
+                resolved = lookup_outcome.kind in {
+                    WritebackLookupKind.FOUND,
+                    WritebackLookupKind.ALREADY_CONFIRMED,
+                } and looked_up is not None and looked_up is not WritebackStatus.UNKNOWN
+                if resolved:
                     logger.info(
-                        "writeback %s: lookup resolved → %s",
+                        "writeback %s: lookup resolved → %s kind=%s",
                         writeback.writeback_id,
                         looked_up.value,
+                        lookup_outcome.kind.value,
                     )
-                    # Persist the resolved status back to the outbox so the
-                    # next verify cycle reads the terminal status instead of
-                    # re-querying (ISSUE-062 Should-Fix #2).  This is a
-                    # best-effort write — the primary durability mechanism is
-                    # the async receipt from the provider; the lookup resolution
-                    # bridges the gap when the receipt is delayed.
-                    #
-                    # Uses update_writeback_status_from_lookup (not
-                    # resolve_writeback) because resolve_writeback's validation
-                    # gate only accepts manual adjudication resolutions
-                    # (manual_confirmed / mark_failed / abandon).
-                    try:
-                        await self._disposition_sync.update_writeback_status_from_lookup(
-                            writeback.writeback_id,
-                            looked_up,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "writeback %s: unable to persist lookup-resolved "
-                            "status=%s to outbox — relying on async receipt",
-                            writeback.writeback_id,
-                            looked_up.value,
-                        )
                     return WritebackRecoveryResult(
                         action=WritebackRecoveryAction.NOOP,
                         writeback_id=writeback.writeback_id,

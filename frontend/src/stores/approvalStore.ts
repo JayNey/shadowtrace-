@@ -28,6 +28,8 @@ interface ApprovalState {
   unreadCount: number;
   /** action_id -> ISO deadline from approval_required socket payload. */
   approvalDeadlines: Record<string, string>;
+  /** Bounded publication_id set so at-least-once redelivery does not notify twice. */
+  seenPublicationIds: string[];
   /** Deep-link scoped queue (?event_id=) — isolated from the global queue so
    *  polling / the global listener can never overwrite it (ISSUE-207 review). */
   eventPendingApprovals: Action[];
@@ -64,6 +66,7 @@ interface ApprovalState {
 }
 
 const APPROVAL_STATUSES = new Set(["waiting_approval", "approved", "rejected"]);
+const PUBLICATION_DEDUP_LIMIT = 512;
 
 /** Backend EventService.list_events caps page_size at 200 — page through all. */
 const EVENT_LIST_PAGE_SIZE = 200;
@@ -122,6 +125,7 @@ export const useApprovalStore = create<ApprovalState>((set, get) => ({
   error: null,
   unreadCount: 0,
   approvalDeadlines: {},
+  seenPublicationIds: [],
   eventPendingApprovals: [],
   eventLoading: false,
   eventError: null,
@@ -316,6 +320,19 @@ export const useApprovalStore = create<ApprovalState>((set, get) => ({
         ),
       }));
       return;
+    }
+
+    const publicationId = event.payload.publication_id;
+    if (publicationId) {
+      const seen = get().seenPublicationIds;
+      if (seen.includes(publicationId)) {
+        return;
+      }
+      const nextSeen = [...seen, publicationId];
+      if (nextSeen.length > PUBLICATION_DEDUP_LIMIT) {
+        nextSeen.splice(0, nextSeen.length - PUBLICATION_DEDUP_LIMIT);
+      }
+      set({ seenPublicationIds: nextSeen });
     }
 
     const deadline = event.payload.deadline;

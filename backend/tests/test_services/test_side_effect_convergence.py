@@ -2322,22 +2322,23 @@ def test_required_closed_gate_accepts_readback_verified_non_mock_terminal() -> N
     validate_closed_gate(_closed_gate_terminal_ctx(disposition_is_mock=False))
 
 
-def test_required_closed_gate_mock_accepts_ack_simulated_terminal() -> None:
-    """Mock P0: simulated CONFIRMED with adapter_acknowledged may still close."""
-    validate_closed_gate(
-        _closed_gate_terminal_ctx(
-            disposition_is_mock=True,
-            terminal_event_writeback=TerminalEventWritebackView(
-                action_id="act-disp",
-                disposition_id="disp-1",
-                writeback_id="wbk-1",
-                closure_cycle=1,
-                approved_disposition=SourceDisposition.CONTAINED,
-                actual_disposition=SourceDisposition.CONTAINED,
-                receipt_status=WritebackStatus.CONFIRMED,
-                plan_revision=1,
-                simulated=True,
-                confirmation_evidence=ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
-            ),
+def test_required_closed_gate_mock_rejects_ack_simulated_terminal() -> None:
+    """Mock cannot CLOSE on adapter_acknowledged; simulated=true is display-only."""
+    with pytest.raises(InvalidStateTransitionError, match="strong confirmation_evidence"):
+        validate_closed_gate(
+            _closed_gate_terminal_ctx(
+                disposition_is_mock=True,
+                terminal_event_writeback=TerminalEventWritebackView(
+                    action_id="act-disp",
+                    disposition_id="disp-1",
+                    writeback_id="wbk-1",
+                    closure_cycle=1,
+                    approved_disposition=SourceDisposition.CONTAINED,
+                    actual_disposition=SourceDisposition.CONTAINED,
+                    receipt_status=WritebackStatus.CONFIRMED,
+                    plan_revision=1,
+                    simulated=True,
+                    confirmation_evidence=ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
+                ),
+            )
         )
-    )

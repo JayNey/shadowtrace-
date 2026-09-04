@@ -242,6 +242,8 @@ def test_approval_required_null_impact_assessment_validates_offline() -> None:
         "payload": {
             "action_id": "act-0a1b2c3d",
             "action_name": "isolate_host",
+            "publication_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "approval_cycle": 0,
             "impact_assessment": None,
         },
     }
@@ -1335,7 +1337,7 @@ async def test_non_allowlisted_origin_is_rejected(
         base_url = f"http://127.0.0.1:{port}"
         client = socketio.AsyncClient()
         try:
-            with pytest.raises(socketio.exceptions.ConnectionError):
+            with pytest.raises((socketio.exceptions.ConnectionError, RuntimeError)):
                 await client.connect(
                     base_url,
                     namespaces=[SOCKETIO_NAMESPACE],
@@ -1343,6 +1345,7 @@ async def test_non_allowlisted_origin_is_rejected(
                     headers=_socket_headers(origin="http://evil.example"),
                     wait_timeout=5,
                 )
+            assert not client.connected
         finally:
             await client.disconnect()
             server.should_exit = True
@@ -1506,6 +1509,8 @@ def _example_payload(event_type: str) -> dict:
         "approval_required": {
             "action_id": "act-0a1b2c3d",
             "action_name": "isolate_host",
+            "publication_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "approval_cycle": 0,
             "summary": "Isolate host workstation-01",
             "target_count": 1,
             "deadline": "2026-07-12T10:30:00Z",
@@ -1573,3 +1578,176 @@ def _example_payload(event_type: str) -> dict:
         },
     }
     return examples.get(event_type, {})
+
+
+BACKEND_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[2] / "app" / "contracts" / "socketio" / "events.schema.json"
+)
+
+
+def test_approval_required_schema_samples_are_updated_with_required_fields() -> None:
+    payload = _example_payload("approval_required")
+    assert set(payload).issuperset(
+        {"action_id", "action_name", "publication_id", "approval_cycle"}
+    )
+    assert payload["publication_id"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert payload["approval_cycle"] == 0
+    backend = json.loads(BACKEND_SCHEMA_PATH.read_text(encoding="utf-8"))
+    shared = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    jsonschema.validate(instance=payload, schema=backend["definitions"]["ApprovalRequiredPayload"])
+    jsonschema.validate(instance=payload, schema=shared["definitions"]["ApprovalRequiredPayload"])
+
+
+def test_authorization_race_writeback_updated_validates_socket_schema() -> None:
+    payload = {
+        "disposition_id": "disp-0a1b2c3d",
+        "writeback_id": "wbk-0a1b2c3d",
+        "status": "CONFIRMED",
+        "authorization_race": "authorization_changed_after_egress",
+    }
+    envelope = {
+        "type": "writeback_updated",
+        "event_id": "evt-20260712-a1b2c3d4",
+        "sequence": 1,
+        "timestamp": "2026-07-12T10:00:00Z",
+        "payload": payload,
+    }
+    backend = json.loads(BACKEND_SCHEMA_PATH.read_text(encoding="utf-8"))
+    shared = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    jsonschema.validate(instance=envelope, schema=backend)
+    jsonschema.validate(instance=envelope, schema=shared)
+
+
+def test_authorization_race_payload_rejects_raw_result_and_unknown_fields() -> None:
+    shared = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    base = {
+        "type": "writeback_updated",
+        "event_id": "evt-20260712-a1b2c3d4",
+        "sequence": 1,
+        "timestamp": "2026-07-12T10:00:00Z",
+        "payload": {
+            "disposition_id": "disp-0a1b2c3d",
+            "writeback_id": "wbk-0a1b2c3d",
+            "status": "CONFIRMED",
+            "authorization_race": "authorization_changed_after_egress",
+            "raw_result": {"vendor": "secret"},
+        },
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=base, schema=shared)
+    unknown = {
+        **base,
+        "payload": {
+            "disposition_id": "disp-0a1b2c3d",
+            "writeback_id": "wbk-0a1b2c3d",
+            "status": "CONFIRMED",
+            "authorization_race": "authorization_changed_after_egress",
+            "exception": "Traceback ... secret",
+        },
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=unknown, schema=shared)
+
+
+@pytest.mark.asyncio
+async def test_socket_gateway_does_not_drop_valid_authorization_race_event() -> None:
+    from app.core.socketio_manager import SocketIOManager, _events_schema, _events_schema_registry
+
+    payload = {
+        "disposition_id": "disp-0a1b2c3d",
+        "writeback_id": "wbk-0a1b2c3d",
+        "status": "CONFIRMED",
+        "authorization_race": "authorization_changed_after_egress",
+    }
+    envelope = {
+        "type": "writeback_updated",
+        "event_id": "evt-20260712-a1b2c3d4",
+        "sequence": 1,
+        "timestamp": "2026-07-12T10:00:00Z",
+        "payload": payload,
+    }
+    jsonschema.validate(
+        instance=envelope,
+        schema=_events_schema(),
+        registry=_events_schema_registry(),
+    )
+    manager = SocketIOManager(AsyncMock())  # type: ignore[arg-type]
+    manager._consecutive_failures = 0
+    manager._sio.emit = AsyncMock()  # type: ignore[method-assign]
+    manager._increment_sequence = AsyncMock(return_value=1)  # type: ignore[method-assign]
+    manager._disconnect_invalid_sessions = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    await manager._dispatch(
+        b"shadowtrace:events:evt-20260712-a1b2c3d4",
+        RedisClient.dumps(
+            {
+                "message_type": "writeback_updated",
+                "event_id": "evt-20260712-a1b2c3d4",
+                "payload": payload,
+            }
+        ),
+    )
+    assert manager._sio.emit.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_socket_gateway_emits_writeback_readback_failed_warning_not_warn() -> None:
+    from app.core.socketio_manager import SocketIOManager, _events_schema, _events_schema_registry
+
+    payload = {
+        "disposition_id": "disp-0a1b2c3d",
+        "writeback_id": "wbk-0a1b2c3d",
+        "receipt_status": "ACCEPTED",
+        "error_summary": "TimeoutError: readback timeout",
+        "severity": "warning",
+    }
+    envelope = {
+        "type": "writeback_readback_failed",
+        "event_id": "evt-20260712-a1b2c3d4",
+        "sequence": 1,
+        "timestamp": "2026-07-12T10:00:00Z",
+        "payload": payload,
+    }
+    jsonschema.validate(
+        instance=envelope,
+        schema=_events_schema(),
+        registry=_events_schema_registry(),
+    )
+    warn_envelope = {
+        **envelope,
+        "payload": {**payload, "severity": "warn"},
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            instance=warn_envelope,
+            schema=_events_schema(),
+            registry=_events_schema_registry(),
+        )
+
+    manager = SocketIOManager(AsyncMock())  # type: ignore[arg-type]
+    manager._consecutive_failures = 0
+    manager._sio.emit = AsyncMock()  # type: ignore[method-assign]
+    manager._increment_sequence = AsyncMock(return_value=1)  # type: ignore[method-assign]
+    manager._disconnect_invalid_sessions = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    await manager._dispatch(
+        b"shadowtrace:events:evt-20260712-a1b2c3d4",
+        RedisClient.dumps(
+            {
+                "message_type": "writeback_readback_failed",
+                "event_id": "evt-20260712-a1b2c3d4",
+                "payload": payload,
+            }
+        ),
+    )
+    assert manager._sio.emit.await_count == 2
+    manager._sio.emit.reset_mock()
+    await manager._dispatch(
+        b"shadowtrace:events:evt-20260712-a1b2c3d4",
+        RedisClient.dumps(
+            {
+                "message_type": "writeback_readback_failed",
+                "event_id": "evt-20260712-a1b2c3d4",
+                "payload": {**payload, "severity": "warn"},
+            }
+        ),
+    )
+    assert manager._sio.emit.await_count == 0

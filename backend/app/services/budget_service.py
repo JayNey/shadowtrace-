@@ -515,10 +515,10 @@ class BudgetService:
 
 
 class WorkingMemoryBudgetUsageWriter:
-    """Write EventContext.budget_usage via WorkingMemory as owner BudgetService."""
+    """Write EventContext.budget_usage via a composition-root BoundWorkingMemory."""
 
     def __init__(self, working_memory: Any) -> None:
-        self._bound = working_memory.for_writer("BudgetService")
+        self._bound = working_memory
 
     async def write_budget_usage(self, event_id: str, usage: BudgetUsage) -> None:
         await self._bound.write(event_id, "budget_usage", usage.model_dump(mode="json"))

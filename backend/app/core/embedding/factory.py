@@ -49,22 +49,24 @@ def _close_client_sync(client: EmbeddingService) -> None:
         )
 
 
-def reset_embedding_client() -> None:
-    """Close (when possible) and clear the process-local client (tests)."""
+def reset_embedding_client(*, close: bool = True) -> None:
+    """Clear the process-local client; async owners may already have closed it."""
     global _client
     if _client is None:
         return
     client = _client
     _client = None
-    _close_client_sync(client)
+    if close:
+        _close_client_sync(client)
 
 
 async def close_embedding_client() -> None:
     """Dispose network resources held by the process-local client."""
     global _client
-    if _client is not None:
-        await _client.close()
+    client = _client
     _client = None
+    if client is not None:
+        await client.close()
 
 
 __all__ = ["close_embedding_client", "get_embedding_client", "reset_embedding_client"]
