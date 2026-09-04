@@ -1383,6 +1383,7 @@ def validate_writeback_status_transition(
     lookup_never_accepted: bool = False,
     adapter_allows_safe_retry: bool = False,
     evidence_adjudication: bool = False,
+    lookup_proved_accepted: bool = False,
 ) -> None:
     if not _edge_allowed(WRITEBACK_STATUS_TRANSITIONS, current, target):
         raise InvalidStateTransitionError(
@@ -1390,6 +1391,13 @@ def validate_writeback_status_transition(
             current=current,
             target=target,
         )
+    if current is WritebackStatus.FAILED and target is WritebackStatus.ACCEPTED:
+        if not lookup_proved_accepted:
+            raise InvalidStateTransitionError(
+                "FAILED→ACCEPTED requires authoritative provider lookup evidence",
+                current=current,
+                target=target,
+            )
     if current is WritebackStatus.UNKNOWN and target is WritebackStatus.PENDING:
         if not lookup_never_accepted:
             raise InvalidStateTransitionError(
@@ -1406,6 +1414,7 @@ def validate_writeback_status_transition(
             WritebackStatus.CONFLICT,
         }
         and not evidence_adjudication
+        and not lookup_proved_accepted
     ):
         raise InvalidStateTransitionError(
             "UNKNOWN→provider status requires lookup or admin adjudication",

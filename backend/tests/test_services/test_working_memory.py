@@ -224,7 +224,7 @@ async def test_memory_access_log_persists_beyond_projection_capacity(
     event_id = await _seed_event(session_factory)
     await store.init_context(event_id, _summary(event_id))
     reader = wm.for_writer("RiskAgent")
-    with patch("app.services.working_memory.ACCESS_LOG_LIMIT", 2):
+    with patch("app.services.working_memory_bound.ACCESS_LOG_LIMIT", 2):
         for _ in range(5):
             await reader.read(event_id, "triage_result")
     assert len(wm._access_logs[event_id]) == 2
@@ -696,3 +696,111 @@ async def test_released_capability_remains_invalid_after_gc_and_rebind(
     rebound.release()
     with pytest.raises(GuardrailViolationError):
         await rebound.write(event_id, "triage_result", {"after-release": True})
+
+
+def _iter_reflection(root: object, *, max_depth: int = 8) -> Iterator[object]:
+    seen: set[int] = set()
+    stack: list[tuple[object, int]] = [(root, 0)]
+    while stack:
+        current, depth = stack.pop()
+        ident = id(current)
+        if ident in seen or depth > max_depth:
+            continue
+        seen.add(ident)
+        yield current
+        if current is None or isinstance(current, (str, bytes, int, float, bool)):
+            continue
+        children: list[object] = []
+        func = current
+        if inspect.ismethod(current):
+            children.append(current.__func__)
+            self_obj = getattr(current, "__self__", None)
+            if self_obj is not None:
+                children.append(self_obj)
+            func = current.__func__
+        if inspect.isfunction(func) or inspect.ismethod(func):
+            closure = getattr(func, "__closure__", None)
+            if closure:
+                children.extend(cell.cell_contents for cell in closure)
+            globals_map = getattr(func, "__globals__", None)
+            if isinstance(globals_map, dict):
+                children.append(globals_map)
+                children.extend(globals_map.values())
+        slots = getattr(current, "__slots__", ())
+        if isinstance(slots, str):
+            slots = (slots,)
+        for slot in slots:
+            if slot.startswith("__"):
+                continue
+            try:
+                children.append(getattr(current, slot))
+            except Exception:
+                continue
+        mapping = getattr(current, "__dict__", None)
+        if isinstance(mapping, dict):
+            children.extend(mapping.values())
+            children.append(mapping)
+        if isinstance(current, dict):
+            children.extend(current.keys())
+            children.extend(current.values())
+        elif isinstance(current, (list, tuple, set, frozenset)):
+            children.extend(current)
+        try:
+            referent = weakref.ref(current)() if isinstance(current, weakref.ref) else None
+        except TypeError:
+            referent = None
+        if referent is not None:
+            children.append(referent)
+        for child in children:
+            stack.append((child, depth + 1))
+
+
+@pytest.mark.asyncio
+async def test_bound_working_memory_globals_cannot_steal_other_owner_capability(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    triage = wm.for_writer("TriageAgent")
+    risk = wm.for_writer("RiskAgent")
+    reachable = list(_iter_reflection(triage))
+    write_fn = triage.write.__func__
+    write_globals = write_fn.__globals__
+    ops_write = getattr(triage._ops.write, "__func__", triage._ops.write)
+    attack_globals = [write_globals, getattr(ops_write, "__globals__", {})]
+    for globals_map in attack_globals:
+        assert "_ENGINE_LEASES" not in globals_map
+        assert "WorkingMemory" not in globals_map
+        assert "_MemoryEngine" not in globals_map
+        assert "for_writer" not in globals_map
+    stolen_caps = [
+        obj
+        for obj in reachable
+        if isinstance(obj, WriterCapability) and obj.owner != "TriageAgent"
+    ]
+    assert stolen_caps == []
+    stolen_bounds = [
+        obj
+        for obj in reachable
+        if isinstance(obj, BoundWorkingMemory) and obj.writer_name != "TriageAgent"
+    ]
+    assert stolen_bounds == []
+    issued_maps = [
+        obj
+        for obj in reachable
+        if isinstance(obj, dict)
+        and any(isinstance(key, WriterCapability) and key.owner != "TriageAgent" for key in obj)
+    ]
+    assert issued_maps == []
+    with pytest.raises(GuardrailViolationError) as cross_owner:
+        await triage.write(event_id, "risk_assessment", {"score": 99})
+    assert cross_owner.value.error_code == "working_memory_unauthorized_write"
+    for stolen in stolen_caps:
+        with pytest.raises(GuardrailViolationError) as stolen_exc:
+            await wm.write(event_id, "risk_assessment", {"score": 99}, writer=stolen)
+        assert stolen_exc.value.error_code == "working_memory_unauthorized_write"
+    assert await store.get(event_id, "risk_assessment") is None
+    await risk.write(event_id, "risk_assessment", {"score": 1})
+    assert await store.get(event_id, "risk_assessment") == {"score": 1}

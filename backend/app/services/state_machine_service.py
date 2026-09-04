@@ -109,6 +109,19 @@ class PostCommitProjectionOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class AppliedTransition:
+    """Status write that has been flushed in a caller-owned transaction."""
+
+    result: SecurityEvent
+    row: orm.SecurityEvent
+    current: EventStatus
+    target: EventStatus
+    operator: str
+    reason: str | None
+    projection_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class _ProjectionRepairSource:
     row: orm.SecurityEvent
     current: EventStatus
@@ -442,7 +455,6 @@ class StateMachineService:
             If *event_id* does not exist.
         """
         op = operator or _STATE_MACHINE_OPERATOR
-        projection_id = ""
 
         if target is EventStatus.CLOSED:
             await reconcile_stale_executions_before_close(
@@ -452,81 +464,116 @@ class StateMachineService:
 
         async with self._session_factory() as session:
             async with session.begin():
-                # 1. Row-lock the event.
-                row = await session.get(orm.SecurityEvent, event_id, with_for_update=True)
-                if row is None:
-                    raise EventNotFoundError(
-                        f"security_event not found: {event_id}",
-                        details={"event_id": event_id},
-                    )
-
-                current = EventStatus(row.status)
-
-                # 2. Build authoritative TransitionContext from DB state.
-                authoritative_ctx = await _build_authoritative_context(
-                    session, event_id, row, context
+                applied = await self.apply_transition_in_session(
+                    session,
+                    event_id,
+                    target,
+                    context=context,
+                    operator=op,
+                    reason=reason,
                 )
 
-                # 3. Validate the edge.
-                validate_transition(current, target, authoritative_ctx)
+        return await self.finish_committed_transition(applied)
 
-                # 4. Pre-status-write side effects (e.g. replan_count bump, escalated flag).
-                await self._apply_pre_transition_side_effects(
-                    session, row, current, target, authoritative_ctx
-                )
+    async def apply_transition_in_session(
+        self,
+        session: AsyncSession,
+        event_id: str,
+        target: EventStatus,
+        *,
+        context: TransitionContext | None = None,
+        operator: str | None = None,
+        reason: str | None = None,
+        locked_row: orm.SecurityEvent | None = None,
+    ) -> AppliedTransition:
+        """Validate and write one EventStatus change without committing.
 
-                # 5. Write the new status.
-                from_status = row.status
-                row.status = target.value
-                row.row_version = int(row.row_version or 1) + 1
-                row.updated_at = _utc_now()
+        ``locked_row`` must already be locked with ``FOR UPDATE`` when supplied.
+        Callers that already locked ``SecurityEvent`` first keep that lock order.
+        """
+        op = operator or _STATE_MACHINE_OPERATOR
+        row = locked_row
+        if row is None:
+            row = await session.get(orm.SecurityEvent, event_id, with_for_update=True)
+        if row is None:
+            raise EventNotFoundError(
+                f"security_event not found: {event_id}",
+                details={"event_id": event_id},
+            )
+        if row.event_id != event_id:
+            raise EventNotFoundError(
+                f"security_event not found: {event_id}",
+                details={"event_id": event_id},
+            )
 
-                # 6. Post-status-write side effects in same TX.
-                await self._apply_post_transition_side_effects(session, row, target)
+        current = EventStatus(row.status)
+        authoritative_ctx = await _build_authoritative_context(
+            session, event_id, row, context
+        )
+        validate_transition(current, target, authoritative_ctx)
+        await self._apply_pre_transition_side_effects(
+            session, row, current, target, authoritative_ctx
+        )
 
-                # 7. Write audit log in the same transaction.
-                if self._audit_log is not None:
-                    audit_id = await self._audit_log.log_transition_in_session(
-                        session,
-                        event_id,
-                        from_status=from_status,
-                        to_status=target.value,
-                        operator=op,
-                        reason=reason,
-                    )
-                    projection_id = f"audit:{audit_id}"
+        from_status = row.status
+        row.status = target.value
+        row.row_version = int(row.row_version or 1) + 1
+        row.updated_at = _utc_now()
+        await self._apply_post_transition_side_effects(session, row, target)
 
-                await session.flush()
-                await session.refresh(row)
-                if not projection_id:
-                    projection_id = f"row-version:{int(row.row_version or 1)}"
-                result = _security_event_from_row(row)
+        projection_id = ""
+        if self._audit_log is not None:
+            audit_id = await self._audit_log.log_transition_in_session(
+                session,
+                event_id,
+                from_status=from_status,
+                to_status=target.value,
+                operator=op,
+                reason=reason,
+            )
+            projection_id = f"audit:{audit_id}"
 
-        # --- post-commit side effects (best-effort, never roll back) ---
-
-        # 8. Sync EventContext (event summary + state_history).
-        projection = await self._sync_context_after_transition(
-            event_id,
-            row,
-            current,
-            target,
-            op,
-            reason,
+        await session.flush()
+        await session.refresh(row)
+        if not projection_id:
+            projection_id = f"row-version:{int(row.row_version or 1)}"
+        return AppliedTransition(
+            result=_security_event_from_row(row),
+            row=row,
+            current=current,
+            target=target,
+            operator=op,
+            reason=reason,
             projection_id=projection_id,
         )
-        if projection.degraded:
-            result = await self._reload_committed_result(event_id, result, projection)
 
-        # 9. Publish state_change via EventBus (best-effort; never imply rollback).
+    async def finish_committed_transition(
+        self,
+        applied: AppliedTransition,
+    ) -> SecurityEvent:
+        """Best-effort post-commit projection and bus publish; never rolls back."""
+        result = applied.result
+        projection = await self._sync_context_after_transition(
+            applied.result.event_id,
+            applied.row,
+            applied.current,
+            applied.target,
+            applied.operator,
+            applied.reason,
+            projection_id=applied.projection_id,
+        )
+        if projection.degraded:
+            result = await self._reload_committed_result(
+                applied.result.event_id, result, projection
+            )
         await self._publish_state_change(
-            event_id,
+            applied.result.event_id,
             {
-                "from_status": current.value,
-                "to_status": target.value,
-                "operator": op,
+                "from_status": applied.current.value,
+                "to_status": applied.target.value,
+                "operator": applied.operator,
             },
         )
-
         return result
 
     async def force_close(

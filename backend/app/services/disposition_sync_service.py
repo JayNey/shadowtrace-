@@ -122,6 +122,12 @@ _PROVIDER_FACT_WRITEBACK_STATUSES = frozenset(
         WritebackStatus.UNKNOWN,
     }
 )
+_STABLE_PROVIDER_WRITEBACK_STATUSES = frozenset(
+    {
+        WritebackStatus.CONFIRMED,
+        WritebackStatus.FAILED,
+    }
+)
 _OPERATOR_RETRY_REPLAY_PREFIX = "operator_retry:replay"
 _OPERATOR_RETRY_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
@@ -324,6 +330,16 @@ def _receipt_is_weak_confirmed(row: orm.DispositionReceipt | None) -> bool:
     if row is None or row.status != WritebackStatus.CONFIRMED.value:
         return False
     return _confirmation_evidence_from_row(row) in CLOSED_TERMINAL_WEAK_CONFIRMATION_EVIDENCE
+
+
+def _latest_receipt_is_stable_provider_fact(row: orm.DispositionReceipt | None) -> bool:
+    if row is None:
+        return False
+    try:
+        status = WritebackStatus(row.status)
+    except ValueError:
+        return False
+    return status in _STABLE_PROVIDER_WRITEBACK_STATUSES
 
 
 def _receipt_is_strong_confirmed(row: orm.DispositionReceipt | None) -> bool:
@@ -775,17 +791,14 @@ class DispositionSyncService:
                     )
                 if (
                     outbox.egress_admitted_at is not None
-                    and delivery
-                    not in {
-                        OutboxDeliveryStatus.DELIVERED,
-                        OutboxDeliveryStatus.DEAD_LETTER,
-                    }
+                    and not _latest_receipt_is_stable_provider_fact(latest_row)
                 ):
                     raise WritebackConflictError(
                         "egress-admitted delivery is in flight; resolve cannot overwrite provider facts",
                         details={
                             "writeback_id": writeback_id,
                             "delivery_status": delivery.value,
+                            "receipt_status": latest_row.status if latest_row is not None else None,
                             "egress_admitted_at": outbox.egress_admitted_at.isoformat(),
                         },
                     )
@@ -860,6 +873,7 @@ class DispositionSyncService:
                         status=WritebackStatus.CONFIRMED,
                         confirmation_evidence=ConfirmationEvidence.MANUAL_CONFIRMED,
                         provider_message=comment,
+                        evidence_adjudication=True,
                     )
                     _mirror_writeback_status_to_action(action, WritebackStatus.CONFIRMED.value)
                     await _enqueue_resume()
@@ -881,6 +895,7 @@ class DispositionSyncService:
                             else None
                         ),
                         provider_message=comment,
+                        evidence_adjudication=True,
                     )
                     outbox.latest_writeback_status = target.value
                     if delivery is OutboxDeliveryStatus.LEASED:
@@ -1235,7 +1250,7 @@ class DispositionSyncService:
                     "writeback_id": claim.writeback_id,
                     "receipt_status": receipts[0].status.value,
                     "error_summary": f"{type(readback_error).__name__}: {readback_error}",
-                    "severity": "warn",
+                    "severity": "warning",
                 },
             )
         final_receipt = parsed_receipt
@@ -1747,6 +1762,9 @@ class DispositionSyncService:
                             current_status,
                             decision.target_status,
                             evidence_adjudication=True,
+                            lookup_proved_accepted=(
+                                decision.target_status is WritebackStatus.ACCEPTED
+                            ),
                         )
                         validate_outbox_delivery_transition(
                             OutboxDeliveryStatus.PAUSED,
@@ -1754,7 +1772,13 @@ class DispositionSyncService:
                             lookup_confirmed_submission=True,
                         )
                         parsed = await self._append_receipt(
-                            session, outbox, receipt=decision.receipt
+                            session,
+                            outbox,
+                            receipt=decision.receipt,
+                            evidence_adjudication=True,
+                            lookup_proved_accepted=(
+                                decision.target_status is WritebackStatus.ACCEPTED
+                            ),
                         )
                         outbox.latest_writeback_status = parsed.status.value
                         outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
@@ -2061,6 +2085,24 @@ class DispositionSyncService:
         action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
         return outbox, action
 
+    async def _lock_event_outbox_action_job(
+        self,
+        session: AsyncSession,
+        outbox_id: str,
+    ) -> tuple[orm.DispositionOutbox | None, orm.Action | None, orm.ActionExecutionJob | None]:
+        """Canonical lock order: SecurityEvent → Outbox → Action → Job."""
+        outbox, action = await self._lock_event_outbox_action(session, outbox_id)
+        if outbox is None or action is None:
+            return outbox, action, None
+        job = None
+        if action.execution_job_id:
+            job = await session.get(
+                orm.ActionExecutionJob,
+                action.execution_job_id,
+                with_for_update=True,
+            )
+        return outbox, action, job
+
     async def _confirm_egress_admission(self, claim: _DeliveryClaim) -> _DeliveryClaim | None:
         """Durable point-of-no-return CAS. Provider I/O must not run if this returns None."""
         async with self._session_factory() as session:
@@ -2164,6 +2206,10 @@ class DispositionSyncService:
         status: WritebackStatus | None = None,
         confirmation_evidence: ConfirmationEvidence | None = None,
         provider_message: str | None = None,
+        evidence_adjudication: bool = False,
+        lookup_proved_accepted: bool = False,
+        lookup_never_accepted: bool = False,
+        adapter_allows_safe_retry: bool = False,
     ) -> DispositionReceipt:
         seq_row = await session.scalar(
             select(orm.DispositionReceipt.sequence)
@@ -2220,7 +2266,10 @@ class DispositionSyncService:
             validate_writeback_status_transition(
                 previous_status,
                 parsed.status,
-                evidence_adjudication=True,
+                evidence_adjudication=evidence_adjudication,
+                lookup_proved_accepted=lookup_proved_accepted,
+                lookup_never_accepted=lookup_never_accepted,
+                adapter_allows_safe_retry=adapter_allows_safe_retry,
             )
         elif (
             previous_status is WritebackStatus.CONFIRMED
@@ -2500,8 +2549,21 @@ class DispositionSyncService:
                 }
             )
             adapter = self._resolve_adapter(outbox)
-            action_id = action.action_id
-            job_id = action.execution_job_id
+            observed_job = None
+            if action.execution_job_id:
+                observed_job = await session.get(
+                    orm.ActionExecutionJob,
+                    action.execution_job_id,
+                )
+            observed_superseded = outbox.superseded_by_disposition_id
+            observed_sequence = int(receipt_row.sequence)
+            observed_receipt_status = receipt_row.status
+            observed_latest = outbox.latest_writeback_status
+            observed_delivery = outbox.delivery_status
+            observed_admitted = outbox.egress_admitted_at
+            observed_action_status = action.status
+            observed_job_id = action.execution_job_id
+            observed_job_status = observed_job.status if observed_job is not None else None
         try:
             completion = await self._maybe_complete_entity_effect(
                 action,
@@ -2536,23 +2598,36 @@ class DispositionSyncService:
         projection: ActionExecutionJob | None = None
         async with self._session_factory() as session:
             async with session.begin():
-                if job_id:
-                    await session.get(
-                        orm.ActionExecutionJob,
-                        job_id,
-                        with_for_update=True,
-                    )
-                locked_action = await session.get(
-                    orm.Action,
-                    action_id,
-                    with_for_update=True,
-                )
-                locked_outbox = await session.get(
-                    orm.DispositionOutbox,
-                    outbox_id,
-                    with_for_update=True,
+                locked_outbox, locked_action, locked_job = (
+                    await self._lock_event_outbox_action_job(session, outbox_id)
                 )
                 if locked_action is None or locked_outbox is None:
+                    return False
+                latest_row = await session.scalar(
+                    select(orm.DispositionReceipt)
+                    .where(orm.DispositionReceipt.writeback_id == locked_outbox.writeback_id)
+                    .order_by(orm.DispositionReceipt.sequence.desc())
+                    .limit(1)
+                )
+                if not self._entity_effect_snapshot_still_valid(
+                    locked_outbox,
+                    locked_action,
+                    latest_row,
+                    locked_job,
+                    observed_superseded=observed_superseded,
+                    observed_sequence=observed_sequence,
+                    observed_receipt_status=observed_receipt_status,
+                    observed_latest=observed_latest,
+                    observed_delivery=observed_delivery,
+                    observed_admitted=observed_admitted,
+                    observed_action_status=observed_action_status,
+                    observed_job_id=observed_job_id,
+                    observed_job_status=observed_job_status,
+                ):
+                    logger.info(
+                        "stale entity-effect snapshot discarded outbox=%s",
+                        outbox_id,
+                    )
                     return False
                 if completion.verified:
                     projection = await self._finalize_entity_effect_completion(
@@ -2580,15 +2655,19 @@ class DispositionSyncService:
             )
             async with self._session_factory() as session:
                 async with session.begin():
-                    row = await session.get(
-                        orm.ActionExecutionJob,
-                        projection.job_id,
-                        with_for_update=True,
+                    locked_outbox, locked_action, row = (
+                        await self._lock_event_outbox_action_job(session, outbox_id)
                     )
-                    if row is not None:
-                        raw_result = dict(row.raw_result or {})
-                        raw_result["effect_projection_pending"] = False
-                        row.raw_result = sanitize_raw_result(raw_result)
+                    if (
+                        row is None
+                        or locked_action is None
+                        or locked_action.execution_job_id != projection.job_id
+                        or row.job_id != projection.job_id
+                    ):
+                        return False
+                    raw_result = dict(row.raw_result or {})
+                    raw_result["effect_projection_pending"] = False
+                    row.raw_result = sanitize_raw_result(raw_result)
         except Exception:
             logger.exception(
                 "entity effect projection deferred for durable retry outbox=%s job=%s",
@@ -2597,6 +2676,68 @@ class DispositionSyncService:
             )
             return False
         return completion.verified
+
+    @staticmethod
+    def _entity_effect_snapshot_still_valid(
+        outbox: orm.DispositionOutbox,
+        action: orm.Action,
+        latest_row: orm.DispositionReceipt | None,
+        locked_job: orm.ActionExecutionJob | None,
+        *,
+        observed_superseded: str | None,
+        observed_sequence: int,
+        observed_receipt_status: str,
+        observed_latest: str | None,
+        observed_delivery: str,
+        observed_admitted: datetime | None,
+        observed_action_status: str,
+        observed_job_id: str | None,
+        observed_job_status: str | None,
+    ) -> bool:
+        if latest_row is None:
+            return False
+        if outbox.superseded_by_disposition_id is not None:
+            return False
+        if outbox.superseded_by_disposition_id != observed_superseded:
+            return False
+        if int(latest_row.sequence) != observed_sequence:
+            return False
+        if latest_row.status != observed_receipt_status:
+            return False
+        if latest_row.status != WritebackStatus.ACCEPTED.value:
+            return False
+        if outbox.latest_writeback_status != latest_row.status:
+            return False
+        if outbox.latest_writeback_status != observed_latest:
+            return False
+        if outbox.delivery_status != observed_delivery:
+            return False
+        if outbox.egress_admitted_at != observed_admitted:
+            return False
+        if action.status != observed_action_status:
+            return False
+        if action.execution_job_id != observed_job_id:
+            return False
+        if observed_job_id is not None and (
+            locked_job is None or locked_job.job_id != observed_job_id
+        ):
+            return False
+        if locked_job is not None and locked_job.status != observed_job_status:
+            return False
+        if action.status in {
+            ActionStatus.FAILED.value,
+            ActionStatus.REJECTED.value,
+            ActionStatus.SUPERSEDED.value,
+        }:
+            return False
+        if locked_job is not None and locked_job.status in {
+            ExecutionJobStatus.FAILED.value,
+            ExecutionJobStatus.TIMED_OUT.value,
+            ExecutionJobStatus.CANCELLED.value,
+            ExecutionJobStatus.PARTIAL_SUCCESS.value,
+        }:
+            return False
+        return True
 
     async def _publish_entity_effect_projection(
         self,
@@ -3640,11 +3781,18 @@ class DispositionSyncService:
                     current_status,
                     lookup_receipt.status,
                     evidence_adjudication=True,
+                    lookup_proved_accepted=(
+                        lookup_receipt.status is WritebackStatus.ACCEPTED
+                    ),
                 )
                 parsed_receipt = await self._append_receipt(
                     session,
                     outbox,
                     receipt=lookup_receipt,
+                    evidence_adjudication=True,
+                    lookup_proved_accepted=(
+                        lookup_receipt.status is WritebackStatus.ACCEPTED
+                    ),
                 )
                 outbox.latest_writeback_status = parsed_receipt.status.value
                 validate_outbox_delivery_transition(
@@ -3866,16 +4014,15 @@ class DispositionSyncService:
         session: AsyncSession,
         action_id: str,
     ) -> orm.Action | None:
-        execution_job_id = await session.scalar(
-            select(orm.Action.execution_job_id).where(orm.Action.action_id == action_id)
-        )
-        if execution_job_id:
+        """Lock Action then Job. Callers must already hold SecurityEvent and Outbox."""
+        action = await session.get(orm.Action, action_id, with_for_update=True)
+        if action is not None and action.execution_job_id:
             await session.get(
                 orm.ActionExecutionJob,
-                execution_job_id,
+                action.execution_job_id,
                 with_for_update=True,
             )
-        return await session.get(orm.Action, action_id, with_for_update=True)
+        return action
 
     async def _apply_deterministic_rejection_terminal_state(
         self,

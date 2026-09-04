@@ -14,7 +14,13 @@ const api = vi.hoisted(() => ({
   listDispositions: vi.fn(),
 }));
 
-let socketHandler: ((event: { event_id: string; type: string }) => void) | undefined;
+type TestSocketEvent = {
+  event_id: string;
+  type: string;
+  payload?: Record<string, unknown>;
+};
+
+let socketHandler: ((event: TestSocketEvent) => void) | undefined;
 
 vi.mock("../../src/services/eventApi", () => api);
 vi.mock("../../src/services/socketClient", () => ({
@@ -188,7 +194,18 @@ describe("useEventDetail request races", () => {
     const { result } = renderHook(() => useEventDetail("event-a"));
     await waitFor(() => expect(result.current.loading).toBe(false));
     vi.clearAllMocks();
-    act(() => socketHandler?.({ event_id: "event-a", type: "approval_required" }));
+    act(() =>
+      socketHandler?.({
+        event_id: "event-a",
+        type: "approval_required",
+        payload: {
+          action_id: "act-0a1b2c3d",
+          action_name: "block_ip",
+          publication_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          approval_cycle: 0,
+        },
+      }),
+    );
     await act(async () => vi.advanceTimersByTimeAsync(50));
     expect(api.listActions).toHaveBeenCalledTimes(1);
     expect(api.getEvent).toHaveBeenCalledTimes(1);

@@ -28,20 +28,23 @@ export interface SocketStateChangePayload {
 }
 
 /** Socket schema uses uppercase provider codes; map to API WritebackStatus. */
-export type SocketWritebackStatusCode =
-  | "PENDING"
-  | "ACCEPTED"
-  | "CONFIRMED"
-  | "FAILED"
-  | "CONFLICT"
-  | "UNKNOWN";
+export const SOCKET_WRITEBACK_STATUS_CODES = [
+  "PENDING",
+  "ACCEPTED",
+  "CONFIRMED",
+  "FAILED",
+  "CONFLICT",
+  "UNKNOWN",
+] as const;
+
+export type SocketWritebackStatusCode = (typeof SOCKET_WRITEBACK_STATUS_CODES)[number];
 
 export type SocketAuthorizationRaceCode = "authorization_changed_after_egress";
 
 export interface SocketWritebackUpdatedPayload {
   disposition_id: string;
   writeback_id: string;
-  status: SocketWritebackStatusCode | string;
+  status: SocketWritebackStatusCode;
   provider_code?: string;
   created_at?: string;
   updated_at?: string;
@@ -58,15 +61,22 @@ export interface SocketToolCallPayload {
   retry_count?: number;
 }
 
-export interface SocketApprovalPayload {
+export interface SocketApprovalRequiredPayload {
   action_id: string;
-  event_id?: string;
-  status?: string;
-  approval_cycle?: number;
-  publication_id?: string;
+  action_name: string;
+  publication_id: string;
+  approval_cycle: number;
   deadline?: string;
   summary?: string;
+  target_count?: number;
   impact_assessment?: Record<string, unknown> | null;
+}
+
+export interface SocketApprovalUpdatedPayload {
+  action_id: string;
+  decision: "approved" | "rejected";
+  approver?: string;
+  comment?: string;
 }
 
 export interface SocketEventTypeRewrittenPayload {
@@ -94,8 +104,8 @@ export type SocketEvent =
   | { type: "event_created"; event_id: string; payload: SocketEventCreatedPayload }
   | { type: "state_change"; event_id: string; payload: SocketStateChangePayload }
   | { type: "writeback_updated"; event_id: string; payload: SocketWritebackUpdatedPayload }
-  | { type: "approval_required"; event_id: string; payload: SocketApprovalPayload }
-  | { type: "approval_updated"; event_id: string; payload: SocketApprovalPayload }
+  | { type: "approval_required"; event_id: string; payload: SocketApprovalRequiredPayload }
+  | { type: "approval_updated"; event_id: string; payload: SocketApprovalUpdatedPayload }
   | {
       type: EventDetailSocketEventType;
       event_id: string;

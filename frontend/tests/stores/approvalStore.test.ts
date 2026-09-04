@@ -559,6 +559,7 @@ describe("approvalStore", () => {
       event_id: "evt-1",
       payload: {
         action_id: "act-new",
+        action_name: "isolate_host",
         publication_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         approval_cycle: 0,
         deadline: "2099-01-01T00:00:00.000Z",
@@ -594,7 +595,7 @@ describe("approvalStore", () => {
     useApprovalStore.getState()._applySocketEvent({
       type: "approval_updated",
       event_id: "evt-1",
-      payload: { action_id: "act-1" },
+      payload: { action_id: "act-1", decision: "approved" },
     });
 
     expect(useApprovalStore.getState().pendingApprovals).toHaveLength(0);
@@ -673,7 +674,7 @@ describe("approvalStore", () => {
     useApprovalStore.getState()._applySocketEvent({
       type: "approval_updated",
       event_id: "evt-a",
-      payload: { action_id: "act-x" },
+      payload: { action_id: "act-x", decision: "rejected" },
     });
     expect(useApprovalStore.getState().pendingApprovals.map((a) => a.action_id)).toEqual([
       "act-y",
@@ -810,6 +811,7 @@ describe("approvalStore", () => {
       event_id: "evt-1",
       payload: {
         action_id: "act-dup",
+        action_name: "isolate_host",
         publication_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         approval_cycle: 0,
         deadline: "2099-01-01T00:00:00.000Z",
@@ -834,6 +836,7 @@ describe("approvalStore", () => {
       event_id: "evt-1",
       payload: {
         action_id: "act-cycle",
+        action_name: "isolate_host",
         publication_id: "cccccccccccccccccccccccccccccccc",
         approval_cycle: 0,
         summary: "isolate host",
@@ -844,6 +847,7 @@ describe("approvalStore", () => {
       event_id: "evt-1",
       payload: {
         action_id: "act-cycle",
+        action_name: "isolate_host",
         publication_id: "dddddddddddddddddddddddddddddddd",
         approval_cycle: 1,
         summary: "isolate host",

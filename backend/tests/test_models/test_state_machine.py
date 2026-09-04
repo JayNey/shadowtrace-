@@ -990,6 +990,22 @@ def test_confirmed_receipt_never_transitions_to_unknown() -> None:
         WritebackStatus.ACCEPTED,
         evidence_adjudication=True,
     )
+    with pytest.raises(InvalidStateTransitionError, match="lookup"):
+        validate_writeback_status_transition(
+            WritebackStatus.FAILED,
+            WritebackStatus.ACCEPTED,
+        )
+    with pytest.raises(InvalidStateTransitionError, match="lookup"):
+        validate_writeback_status_transition(
+            WritebackStatus.FAILED,
+            WritebackStatus.ACCEPTED,
+            evidence_adjudication=True,
+        )
+    validate_writeback_status_transition(
+        WritebackStatus.FAILED,
+        WritebackStatus.ACCEPTED,
+        lookup_proved_accepted=True,
+    )
 
 
 def test_confirmed_status_never_downgrades_during_evidence_upgrade() -> None:

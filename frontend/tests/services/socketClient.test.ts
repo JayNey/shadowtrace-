@@ -176,6 +176,120 @@ describe("socketClient", () => {
     });
   });
 
+  it("keeps approval_required required fields from a full production envelope", async () => {
+    const { socketClient } = await import("../../src/services/socketClient");
+    const handler = vi.fn();
+    socketClient.connect();
+    socketClient.onEvent(handler);
+
+    eventHandler?.({
+      type: "approval_required",
+      event_id: "evt-20260712-a1b2c3d4",
+      sequence: 8,
+      timestamp: "2026-07-12T10:00:00Z",
+      payload: {
+        action_id: "act-0a1b2c3d",
+        action_name: "block_ip",
+        publication_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        approval_cycle: 0,
+        summary: "block source ip",
+        target_count: 1,
+        deadline: "2026-07-12T11:00:00Z",
+        impact_assessment: null,
+      },
+    });
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith({
+      type: "approval_required",
+      event_id: "evt-20260712-a1b2c3d4",
+      payload: {
+        action_id: "act-0a1b2c3d",
+        action_name: "block_ip",
+        publication_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        approval_cycle: 0,
+        summary: "block source ip",
+        target_count: 1,
+        deadline: "2026-07-12T11:00:00Z",
+        impact_assessment: null,
+      },
+    });
+  });
+
+  it("does not drop approval_required required fields when approval_updated uses different keys", async () => {
+    const { socketClient } = await import("../../src/services/socketClient");
+    const handler = vi.fn();
+    socketClient.connect();
+    socketClient.onEvent(handler);
+
+    eventHandler?.({
+      type: "approval_updated",
+      event_id: "evt-20260712-a1b2c3d4",
+      sequence: 9,
+      timestamp: "2026-07-12T10:01:00Z",
+      payload: {
+        action_id: "act-0a1b2c3d",
+        decision: "approved",
+        approver: "approver-1",
+        comment: "ok",
+      },
+    });
+    eventHandler?.({
+      type: "approval_required",
+      event_id: "evt-20260712-a1b2c3d4",
+      sequence: 10,
+      timestamp: "2026-07-12T10:02:00Z",
+      payload: {
+        action_id: "act-1b2c3d4e",
+        action_name: "isolate_host",
+        publication_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        approval_cycle: 1,
+      },
+    });
+
+    expect(handler).toHaveBeenNthCalledWith(1, {
+      type: "approval_updated",
+      event_id: "evt-20260712-a1b2c3d4",
+      payload: {
+        action_id: "act-0a1b2c3d",
+        decision: "approved",
+        approver: "approver-1",
+        comment: "ok",
+      },
+    });
+    expect(handler).toHaveBeenNthCalledWith(2, {
+      type: "approval_required",
+      event_id: "evt-20260712-a1b2c3d4",
+      payload: {
+        action_id: "act-1b2c3d4e",
+        action_name: "isolate_host",
+        publication_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        approval_cycle: 1,
+      },
+    });
+  });
+
+  it("drops writeback_updated envelopes whose status is not a schema enum value", async () => {
+    const { socketClient } = await import("../../src/services/socketClient");
+    const handler = vi.fn();
+    socketClient.connect();
+    socketClient.onEvent(handler);
+
+    eventHandler?.({
+      type: "writeback_updated",
+      event_id: "evt-2",
+      sequence: 3,
+      timestamp: "2026-01-01T00:00:00Z",
+      payload: {
+        disposition_id: "disp-0a1b2c3d",
+        writeback_id: "wbk-0a1b2c3d",
+        status: "delivered",
+      },
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("preserves authorization_race on writeback_updated envelopes", async () => {
     const { socketClient } = await import("../../src/services/socketClient");
     const handler = vi.fn();

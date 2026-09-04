@@ -1,7 +1,15 @@
 /** Socket.IO client wrapper with poll fallback (ISSUE-067 / ISSUE-040). */
 
 import { io, Socket } from "socket.io-client";
-import type { SocketEvent, SocketEventEnvelope } from "../types/socket";
+import type {
+  SocketApprovalRequiredPayload,
+  SocketApprovalUpdatedPayload,
+  SocketEvent,
+  SocketEventEnvelope,
+  SocketWritebackStatusCode,
+  SocketWritebackUpdatedPayload,
+} from "../types/socket";
+import { SOCKET_WRITEBACK_STATUS_CODES } from "../types/socket";
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL ?? "http://localhost:8000";
 const EVENTS_NAMESPACE = "/events";
@@ -156,43 +164,38 @@ class SocketClient {
       return;
     }
     if (type === "writeback_updated") {
+      const parsed = parseWritebackUpdatedPayload(payload);
+      if (parsed === null) {
+        return;
+      }
       this.emit({
         type: "writeback_updated",
         event_id,
-        payload: {
-          disposition_id: String(payload.disposition_id ?? ""),
-          writeback_id: String(payload.writeback_id ?? ""),
-          status: String(payload.status ?? "UNKNOWN"),
-          provider_code: payload.provider_code as string | undefined,
-          created_at: payload.created_at as string | undefined,
-          updated_at: payload.updated_at as string | undefined,
-          authorization_race:
-            payload.authorization_race === "authorization_changed_after_egress"
-              ? "authorization_changed_after_egress"
-              : undefined,
-        },
+        payload: parsed,
       });
       return;
     }
-    if (type === "approval_required" || type === "approval_updated") {
+    if (type === "approval_required") {
+      const parsed = parseApprovalRequiredPayload(payload);
+      if (parsed === null) {
+        return;
+      }
       this.emit({
-        type,
+        type: "approval_required",
         event_id,
-        payload: {
-          action_id: String(payload.action_id ?? ""),
-          event_id: String(payload.event_id ?? event_id),
-          status: payload.status as string | undefined,
-          approval_cycle:
-            typeof payload.approval_cycle === "number" ? payload.approval_cycle : undefined,
-          publication_id:
-            typeof payload.publication_id === "string" ? payload.publication_id : undefined,
-          deadline: payload.deadline as string | undefined,
-          summary: payload.summary as string | undefined,
-          impact_assessment: payload.impact_assessment as
-            | Record<string, unknown>
-            | null
-            | undefined,
-        },
+        payload: parsed,
+      });
+      return;
+    }
+    if (type === "approval_updated") {
+      const parsed = parseApprovalUpdatedPayload(payload);
+      if (parsed === null) {
+        return;
+      }
+      this.emit({
+        type: "approval_updated",
+        event_id,
+        payload: parsed,
       });
       return;
     }
@@ -235,6 +238,98 @@ class SocketClient {
       }
     }
   }
+}
+
+const WRITEBACK_STATUS_SET = new Set<string>(SOCKET_WRITEBACK_STATUS_CODES);
+
+function parseWritebackUpdatedPayload(
+  payload: Record<string, unknown>,
+): SocketWritebackUpdatedPayload | null {
+  if (typeof payload.disposition_id !== "string" || payload.disposition_id.length === 0) {
+    return null;
+  }
+  if (typeof payload.writeback_id !== "string" || payload.writeback_id.length === 0) {
+    return null;
+  }
+  if (typeof payload.status !== "string" || !WRITEBACK_STATUS_SET.has(payload.status)) {
+    return null;
+  }
+  const parsed: SocketWritebackUpdatedPayload = {
+    disposition_id: payload.disposition_id,
+    writeback_id: payload.writeback_id,
+    status: payload.status as SocketWritebackStatusCode,
+  };
+  if (typeof payload.provider_code === "string") {
+    parsed.provider_code = payload.provider_code;
+  }
+  if (typeof payload.created_at === "string") {
+    parsed.created_at = payload.created_at;
+  }
+  if (typeof payload.updated_at === "string") {
+    parsed.updated_at = payload.updated_at;
+  }
+  if (payload.authorization_race === "authorization_changed_after_egress") {
+    parsed.authorization_race = "authorization_changed_after_egress";
+  }
+  return parsed;
+}
+
+function parseApprovalRequiredPayload(
+  payload: Record<string, unknown>,
+): SocketApprovalRequiredPayload | null {
+  if (typeof payload.action_id !== "string" || payload.action_id.length === 0) {
+    return null;
+  }
+  if (typeof payload.action_name !== "string") {
+    return null;
+  }
+  if (typeof payload.publication_id !== "string" || payload.publication_id.length === 0) {
+    return null;
+  }
+  if (typeof payload.approval_cycle !== "number") {
+    return null;
+  }
+  const parsed: SocketApprovalRequiredPayload = {
+    action_id: payload.action_id,
+    action_name: payload.action_name,
+    publication_id: payload.publication_id,
+    approval_cycle: payload.approval_cycle,
+  };
+  if (typeof payload.deadline === "string") {
+    parsed.deadline = payload.deadline;
+  }
+  if (typeof payload.summary === "string") {
+    parsed.summary = payload.summary;
+  }
+  if (typeof payload.target_count === "number") {
+    parsed.target_count = payload.target_count;
+  }
+  if (payload.impact_assessment === null || typeof payload.impact_assessment === "object") {
+    parsed.impact_assessment = payload.impact_assessment as Record<string, unknown> | null;
+  }
+  return parsed;
+}
+
+function parseApprovalUpdatedPayload(
+  payload: Record<string, unknown>,
+): SocketApprovalUpdatedPayload | null {
+  if (typeof payload.action_id !== "string" || payload.action_id.length === 0) {
+    return null;
+  }
+  if (payload.decision !== "approved" && payload.decision !== "rejected") {
+    return null;
+  }
+  const parsed: SocketApprovalUpdatedPayload = {
+    action_id: payload.action_id,
+    decision: payload.decision,
+  };
+  if (typeof payload.approver === "string") {
+    parsed.approver = payload.approver;
+  }
+  if (typeof payload.comment === "string") {
+    parsed.comment = payload.comment;
+  }
+  return parsed;
 }
 
 export const socketClient = new SocketClient();

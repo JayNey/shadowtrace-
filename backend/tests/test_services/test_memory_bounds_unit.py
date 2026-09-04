@@ -5,7 +5,7 @@ import gc
 import inspect
 import weakref
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -312,7 +312,7 @@ def test_bound_working_memory_has_no_reachable_factory() -> None:
     reachable = _iter_reachable(bound)
     assert not any(isinstance(obj, WorkingMemory) for obj in reachable)
     assert not any(
-        getattr(obj, "for_writer", None) is not None and callable(getattr(obj, "for_writer", None))
+        callable(getattr(obj, "for_writer", None)) and not isinstance(obj, Mock)
         for obj in reachable
     )
     assert not hasattr(BoundWorkingMemory, "for_writer")

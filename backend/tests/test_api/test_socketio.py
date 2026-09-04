@@ -1687,3 +1687,67 @@ async def test_socket_gateway_does_not_drop_valid_authorization_race_event() -> 
         ),
     )
     assert manager._sio.emit.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_socket_gateway_emits_writeback_readback_failed_warning_not_warn() -> None:
+    from app.core.socketio_manager import SocketIOManager, _events_schema, _events_schema_registry
+
+    payload = {
+        "disposition_id": "disp-0a1b2c3d",
+        "writeback_id": "wbk-0a1b2c3d",
+        "receipt_status": "ACCEPTED",
+        "error_summary": "TimeoutError: readback timeout",
+        "severity": "warning",
+    }
+    envelope = {
+        "type": "writeback_readback_failed",
+        "event_id": "evt-20260712-a1b2c3d4",
+        "sequence": 1,
+        "timestamp": "2026-07-12T10:00:00Z",
+        "payload": payload,
+    }
+    jsonschema.validate(
+        instance=envelope,
+        schema=_events_schema(),
+        registry=_events_schema_registry(),
+    )
+    warn_envelope = {
+        **envelope,
+        "payload": {**payload, "severity": "warn"},
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            instance=warn_envelope,
+            schema=_events_schema(),
+            registry=_events_schema_registry(),
+        )
+
+    manager = SocketIOManager(AsyncMock())  # type: ignore[arg-type]
+    manager._consecutive_failures = 0
+    manager._sio.emit = AsyncMock()  # type: ignore[method-assign]
+    manager._increment_sequence = AsyncMock(return_value=1)  # type: ignore[method-assign]
+    manager._disconnect_invalid_sessions = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    await manager._dispatch(
+        b"shadowtrace:events:evt-20260712-a1b2c3d4",
+        RedisClient.dumps(
+            {
+                "message_type": "writeback_readback_failed",
+                "event_id": "evt-20260712-a1b2c3d4",
+                "payload": payload,
+            }
+        ),
+    )
+    assert manager._sio.emit.await_count == 2
+    manager._sio.emit.reset_mock()
+    await manager._dispatch(
+        b"shadowtrace:events:evt-20260712-a1b2c3d4",
+        RedisClient.dumps(
+            {
+                "message_type": "writeback_readback_failed",
+                "event_id": "evt-20260712-a1b2c3d4",
+                "payload": {**payload, "severity": "warn"},
+            }
+        ),
+    )
+    assert manager._sio.emit.await_count == 0
