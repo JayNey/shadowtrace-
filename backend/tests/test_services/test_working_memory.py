@@ -6,6 +6,7 @@ import asyncio
 import gc
 import inspect
 import os
+import types
 import uuid
 import weakref
 from collections.abc import AsyncIterator, Iterator
@@ -43,7 +44,9 @@ from app.services.working_memory import (
     BoundWorkingMemory,
     WorkingMemory,
     WriterCapability,
+    _MemoryEngine,
 )
+from app.services.working_memory_bound import OwnerMemoryOps
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.environ.get(
@@ -569,6 +572,32 @@ async def test_live_binding_survives_idle_ttl_and_capacity_pressure(
 
 
 @pytest.mark.asyncio
+async def test_orphan_capability_expires_after_ttl_while_live_binding_survives(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    live = wm.for_writer("TriageAgent")
+    with patch("app.services.working_memory.time.monotonic", return_value=100.0):
+        orphan_bound = wm.for_writer("RiskAgent")
+        orphan = orphan_bound._capability
+        del orphan_bound
+        gc.collect()
+    with (
+        patch("app.services.working_memory.time.monotonic", return_value=10_000.0),
+        patch("app.services.working_memory.CAPABILITY_TTL_SECONDS", 5),
+    ):
+        with pytest.raises(GuardrailViolationError) as exc_info:
+            await wm.write(event_id, "risk_assessment", {"expired": True}, writer=orphan)
+        assert exc_info.value.error_code == "working_memory_unauthorized_write"
+        await live.write(event_id, "triage_result", {"ok": True})
+    assert await store.get(event_id, "triage_result") == {"ok": True}
+    assert await store.get(event_id, "risk_assessment") is None
+
+
+@pytest.mark.asyncio
 async def test_cached_writer_remains_authorized_after_capability_ttl(
     wm: WorkingMemory,
     store: EventContextStore,
@@ -586,9 +615,25 @@ async def test_cached_writer_remains_authorized_after_capability_ttl(
     assert await store.get(event_id, "risk_assessment") == {"score": 9}
 
 
-def _iter_reachable(root: object, *, max_depth: int = 6) -> Iterator[object]:
+def _iter_agent_graph(root: object, *, max_depth: int = 8) -> Iterator[object]:
+    """Walk an Agent-facing bound view using the contract-review attack surface.
+
+    Traverses ``__slots__``, ``__dict__``, ``__closure__``, ``__globals__``,
+    weakrefs, and method ``__self__``. Engine-private ops must not appear as
+    slots, instance attrs, closures, or module-level registries from this view.
+    """
     seen: set[int] = set()
     stack: list[tuple[object, int]] = [(root, 0)]
+    for _, member in inspect.getmembers(
+        root, predicate=lambda obj: inspect.ismethod(obj) or inspect.isfunction(obj)
+    ):
+        stack.append((member, 1))
+
+    def _push(child: object, depth: int) -> None:
+        if child is None:
+            return
+        stack.append((child, depth))
+
     while stack:
         current, depth = stack.pop()
         ident = id(current)
@@ -596,41 +641,176 @@ def _iter_reachable(root: object, *, max_depth: int = 6) -> Iterator[object]:
             continue
         seen.add(ident)
         yield current
-        if current is None or isinstance(current, (str, bytes, int, float, bool, type)):
+        if current is None or isinstance(
+            current, (str, bytes, int, float, bool, type, types.ModuleType)
+        ):
             continue
-        children: list[object] = []
-        if inspect.isfunction(current) or inspect.ismethod(current):
-            closure = getattr(current, "__closure__", None)
+        children_depth = depth + 1
+        func = current
+        if inspect.ismethod(current):
+            _push(current.__func__, children_depth)
+            _push(getattr(current, "__self__", None), children_depth)
+            func = current.__func__
+        if inspect.isfunction(func) or inspect.ismethod(func):
+            closure = getattr(func, "__closure__", None)
             if closure:
-                children.extend(cell.cell_contents for cell in closure)
-            self_obj = getattr(current, "__self__", None)
-            if self_obj is not None:
-                children.append(self_obj)
+                for cell in closure:
+                    try:
+                        _push(cell.cell_contents, children_depth)
+                    except ValueError:
+                        continue
+            globals_map = getattr(func, "__globals__", None)
+            if isinstance(globals_map, dict):
+                _push(globals_map, children_depth)
+                for key, value in globals_map.items():
+                    if key == "__builtins__":
+                        continue
+                    _push(value, children_depth)
         slots = getattr(current, "__slots__", ())
         if isinstance(slots, str):
             slots = (slots,)
         for slot in slots:
-            if slot.startswith("__"):
+            if slot in ("__weakref__", "__dict__"):
                 continue
             try:
-                children.append(getattr(current, slot))
+                _push(getattr(current, slot), children_depth)
             except Exception:
                 continue
         mapping = getattr(current, "__dict__", None)
         if isinstance(mapping, dict):
-            children.extend(mapping.values())
+            _push(mapping, children_depth)
+            for value in mapping.values():
+                _push(value, children_depth)
         if isinstance(current, dict):
-            children.extend(current.values())
+            for key, value in current.items():
+                _push(key, children_depth)
+                _push(value, children_depth)
         elif isinstance(current, (list, tuple, set, frozenset)):
-            children.extend(current)
+            for item in current:
+                _push(item, children_depth)
         try:
-            referent = weakref.ref(current)() if isinstance(current, weakref.ref) else None
+            referent = current() if isinstance(current, weakref.ref) else None
         except TypeError:
             referent = None
         if referent is not None:
-            children.append(referent)
-        for child in children:
-            stack.append((child, depth + 1))
+            _push(referent, children_depth)
+
+
+def _iter_reachable(root: object, *, max_depth: int = 6) -> Iterator[object]:
+    yield from _iter_agent_graph(root, max_depth=max_depth)
+
+
+def _iter_reflection(root: object, *, max_depth: int = 8) -> Iterator[object]:
+    yield from _iter_agent_graph(root, max_depth=max_depth)
+
+
+def _is_store_like(obj: object) -> bool:
+    return all(
+        callable(getattr(obj, name, None))
+        for name in ("compare_and_set", "get", "get_field_version")
+    )
+
+
+def _extract_ops_reference(bound: BoundWorkingMemory) -> OwnerMemoryOps | None:
+    """Best-effort capture of a leaked OwnerMemoryOps for resurrection attacks."""
+    direct = getattr(bound, "_ops", None)
+    if isinstance(direct, OwnerMemoryOps):
+        return direct
+    port = getattr(bound, "_port", None)
+    if port is None:
+        return None
+    slots = getattr(type(port), "__slots__", ())
+    if isinstance(slots, str):
+        slots = (slots,)
+    for slot in slots:
+        fn = getattr(port, slot, None)
+        defaults = getattr(fn, "__defaults__", None)
+        if not defaults:
+            continue
+        for item in defaults:
+            if isinstance(item, OwnerMemoryOps):
+                return item
+    return None
+
+
+_FOREIGN_FIELD = {
+    "TriageAgent": "risk_assessment",
+    "RiskAgent": "triage_result",
+}
+
+
+async def _assert_store_like_cannot_write_foreign(
+    obj: object,
+    *,
+    event_id: str,
+    owner: str,
+    store: EventContextStore,
+) -> None:
+    if not _is_store_like(obj) and not callable(getattr(obj, "compare_and_set", None)):
+        return
+    foreign_key = _FOREIGN_FIELD[owner]
+    before = await store.get(event_id, foreign_key)
+    payload = {"stolen": True, "via": type(obj).__name__}
+    cas = getattr(obj, "compare_and_set", None)
+    if callable(cas):
+        expected = 0
+        get_version = getattr(obj, "get_field_version", None)
+        if callable(get_version):
+            try:
+                expected = await get_version(event_id, foreign_key) or 0
+            except Exception:
+                expected = 0
+        try:
+            result = await cas(event_id, foreign_key, expected, payload)
+        except GuardrailViolationError as exc:
+            assert exc.error_code == "working_memory_unauthorized_write"
+        except Exception:
+            result = False
+        else:
+            assert result is not True
+    setter = getattr(obj, "set", None)
+    if callable(setter) and _is_store_like(obj):
+        try:
+            await setter(event_id, foreign_key, payload)
+        except GuardrailViolationError as exc:
+            assert exc.error_code == "working_memory_unauthorized_write"
+        except Exception:
+            pass
+    assert await store.get(event_id, foreign_key) == before
+
+
+def _assert_bound_graph_isolated(
+    bound: BoundWorkingMemory,
+    reachable: list[object],
+    *,
+    other_owner: str | None = None,
+) -> None:
+    assert not any(isinstance(obj, WorkingMemory) for obj in reachable)
+    assert not any(isinstance(obj, _MemoryEngine) for obj in reachable)
+    assert not any(isinstance(obj, EventContextStore) for obj in reachable)
+    assert not any(isinstance(obj, OwnerMemoryOps) for obj in reachable)
+    assert not any(
+        callable(obj) and getattr(obj, "__name__", "") == "for_writer" for obj in reachable
+    )
+    assert not hasattr(BoundWorkingMemory, "for_writer")
+    assert not hasattr(bound, "for_writer")
+    stolen_caps = [
+        obj
+        for obj in reachable
+        if isinstance(obj, WriterCapability) and obj.owner != bound.writer_name
+    ]
+    assert stolen_caps == []
+    stolen_bounds = [
+        obj
+        for obj in reachable
+        if isinstance(obj, BoundWorkingMemory) and obj is not bound
+    ]
+    if other_owner is not None:
+        assert not any(
+            isinstance(obj, BoundWorkingMemory) and obj.writer_name == other_owner
+            for obj in reachable
+        )
+    assert stolen_bounds == []
 
 
 @pytest.mark.asyncio
@@ -642,11 +822,13 @@ async def test_bound_working_memory_cannot_reach_root_or_mint_cross_owner(
     event_id = await _seed_event(session_factory)
     await store.init_context(event_id, _summary(event_id))
     bound = wm.for_writer("TriageAgent")
-    reachable = list(_iter_reachable(bound))
-    assert not any(isinstance(obj, WorkingMemory) for obj in reachable)
-    assert not any(getattr(obj, "for_writer", None) is not None and callable(getattr(obj, "for_writer")) for obj in reachable)
-    for name in ("_memory", "_root", "_factory"):
-        assert not hasattr(bound, name) or not isinstance(getattr(bound, name), WorkingMemory)
+    reachable = list(_iter_agent_graph(bound))
+    _assert_bound_graph_isolated(bound, reachable, other_owner="RiskAgent")
+    for name in ("_memory", "_root", "_factory", "_ops"):
+        value = getattr(bound, name, None)
+        assert not isinstance(
+            value, (WorkingMemory, EventContextStore, OwnerMemoryOps, _MemoryEngine)
+        )
     with pytest.raises(AttributeError):
         bound.for_writer("RiskAgent")  # type: ignore[attr-defined]
     with pytest.raises(GuardrailViolationError) as exc_info:
@@ -698,63 +880,6 @@ async def test_released_capability_remains_invalid_after_gc_and_rebind(
         await rebound.write(event_id, "triage_result", {"after-release": True})
 
 
-def _iter_reflection(root: object, *, max_depth: int = 8) -> Iterator[object]:
-    seen: set[int] = set()
-    stack: list[tuple[object, int]] = [(root, 0)]
-    while stack:
-        current, depth = stack.pop()
-        ident = id(current)
-        if ident in seen or depth > max_depth:
-            continue
-        seen.add(ident)
-        yield current
-        if current is None or isinstance(current, (str, bytes, int, float, bool)):
-            continue
-        children: list[object] = []
-        func = current
-        if inspect.ismethod(current):
-            children.append(current.__func__)
-            self_obj = getattr(current, "__self__", None)
-            if self_obj is not None:
-                children.append(self_obj)
-            func = current.__func__
-        if inspect.isfunction(func) or inspect.ismethod(func):
-            closure = getattr(func, "__closure__", None)
-            if closure:
-                children.extend(cell.cell_contents for cell in closure)
-            globals_map = getattr(func, "__globals__", None)
-            if isinstance(globals_map, dict):
-                children.append(globals_map)
-                children.extend(globals_map.values())
-        slots = getattr(current, "__slots__", ())
-        if isinstance(slots, str):
-            slots = (slots,)
-        for slot in slots:
-            if slot.startswith("__"):
-                continue
-            try:
-                children.append(getattr(current, slot))
-            except Exception:
-                continue
-        mapping = getattr(current, "__dict__", None)
-        if isinstance(mapping, dict):
-            children.extend(mapping.values())
-            children.append(mapping)
-        if isinstance(current, dict):
-            children.extend(current.keys())
-            children.extend(current.values())
-        elif isinstance(current, (list, tuple, set, frozenset)):
-            children.extend(current)
-        try:
-            referent = weakref.ref(current)() if isinstance(current, weakref.ref) else None
-        except TypeError:
-            referent = None
-        if referent is not None:
-            children.append(referent)
-        for child in children:
-            stack.append((child, depth + 1))
-
-
 @pytest.mark.asyncio
 async def test_bound_working_memory_globals_cannot_steal_other_owner_capability(
     wm: WorkingMemory,
@@ -766,27 +891,13 @@ async def test_bound_working_memory_globals_cannot_steal_other_owner_capability(
     triage = wm.for_writer("TriageAgent")
     risk = wm.for_writer("RiskAgent")
     reachable = list(_iter_reflection(triage))
+    _assert_bound_graph_isolated(triage, reachable, other_owner="RiskAgent")
     write_fn = triage.write.__func__
     write_globals = write_fn.__globals__
-    ops_write = getattr(triage._ops.write, "__func__", triage._ops.write)
-    attack_globals = [write_globals, getattr(ops_write, "__globals__", {})]
-    for globals_map in attack_globals:
-        assert "_ENGINE_LEASES" not in globals_map
-        assert "WorkingMemory" not in globals_map
-        assert "_MemoryEngine" not in globals_map
-        assert "for_writer" not in globals_map
-    stolen_caps = [
-        obj
-        for obj in reachable
-        if isinstance(obj, WriterCapability) and obj.owner != "TriageAgent"
-    ]
-    assert stolen_caps == []
-    stolen_bounds = [
-        obj
-        for obj in reachable
-        if isinstance(obj, BoundWorkingMemory) and obj.writer_name != "TriageAgent"
-    ]
-    assert stolen_bounds == []
+    assert "_ENGINE_LEASES" not in write_globals
+    assert "WorkingMemory" not in write_globals
+    assert "_MemoryEngine" not in write_globals
+    assert "for_writer" not in write_globals
     issued_maps = [
         obj
         for obj in reachable
@@ -797,10 +908,253 @@ async def test_bound_working_memory_globals_cannot_steal_other_owner_capability(
     with pytest.raises(GuardrailViolationError) as cross_owner:
         await triage.write(event_id, "risk_assessment", {"score": 99})
     assert cross_owner.value.error_code == "working_memory_unauthorized_write"
-    for stolen in stolen_caps:
-        with pytest.raises(GuardrailViolationError) as stolen_exc:
-            await wm.write(event_id, "risk_assessment", {"score": 99}, writer=stolen)
-        assert stolen_exc.value.error_code == "working_memory_unauthorized_write"
     assert await store.get(event_id, "risk_assessment") is None
     await risk.write(event_id, "risk_assessment", {"score": 1})
     assert await store.get(event_id, "risk_assessment") == {"score": 1}
+
+
+@pytest.mark.asyncio
+async def test_bound_view_object_graph_cannot_cas_foreign_owner_fields(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    triage = wm.for_writer("TriageAgent")
+    risk = wm.for_writer("RiskAgent")
+    await triage.write(event_id, "triage_result", {"ok": True})
+    await risk.write(event_id, "risk_assessment", {"score": 1})
+
+    for bound in (triage, risk):
+        reachable = list(_iter_agent_graph(bound))
+        _assert_bound_graph_isolated(
+            bound,
+            reachable,
+            other_owner="RiskAgent" if bound is triage else "TriageAgent",
+        )
+        for obj in reachable:
+            await _assert_store_like_cannot_write_foreign(
+                obj,
+                event_id=event_id,
+                owner=bound.writer_name,
+                store=store,
+            )
+
+    assert await store.get(event_id, "triage_result") == {"ok": True}
+    assert await store.get(event_id, "risk_assessment") == {"score": 1}
+
+    write_globals = triage.write.__func__.__globals__
+    store_cls = write_globals.get("EventContextStore")
+    before_risk = await store.get(event_id, "risk_assessment")
+    if store_cls is EventContextStore:
+        try:
+            stolen = store_cls(object(), object())
+            cas = getattr(stolen, "compare_and_set", None)
+            if callable(cas):
+                await cas(event_id, "risk_assessment", 0, {"pwn": 1})
+        except Exception:
+            pass
+    assert await store.get(event_id, "risk_assessment") == before_risk
+
+
+@pytest.mark.asyncio
+async def test_bound_private_store_reference_cannot_cas_foreign_field(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    triage = wm.for_writer("TriageAgent")
+    risk = wm.for_writer("RiskAgent")
+    await triage.write(event_id, "triage_result", {"ok": True})
+    await risk.write(event_id, "risk_assessment", {"score": 1})
+
+    for bound, foreign_key, payload in (
+        (triage, "risk_assessment", {"stolen": "triage"}),
+        (risk, "triage_result", {"stolen": "risk"}),
+    ):
+        before = await store.get(event_id, foreign_key)
+        try:
+            leaked = bound._ops._store  # type: ignore[attr-defined]
+        except AttributeError:
+            leaked = None
+        else:
+            assert leaked is None or not _is_store_like(leaked)
+            if _is_store_like(leaked):
+                expected = await leaked.get_field_version(event_id, foreign_key) or 0
+                try:
+                    result = await leaked.compare_and_set(
+                        event_id, foreign_key, expected, payload
+                    )
+                except GuardrailViolationError as exc:
+                    assert exc.error_code == "working_memory_unauthorized_write"
+                    result = False
+                assert result is not True
+        for name in dir(bound):
+            if name.startswith("__"):
+                continue
+            try:
+                attr = getattr(bound, name)
+            except Exception:
+                continue
+            await _assert_store_like_cannot_write_foreign(
+                attr,
+                event_id=event_id,
+                owner=bound.writer_name,
+                store=store,
+            )
+        assert await store.get(event_id, foreign_key) == before
+
+
+@pytest.mark.asyncio
+async def test_release_is_permanent_against_alive_flip_and_stale_ops(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    bound = wm.for_writer("TriageAgent")
+    stale_cap = bound._capability
+    captured_ops = _extract_ops_reference(bound)
+    captured_port = getattr(bound, "_port", None)
+    captured_write = bound.write
+    captured_read = bound.read
+    captured_append = bound.append_scratchpad
+
+    bound.release()
+
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        await bound.write(event_id, "triage_result", {"after": True})
+    assert exc_info.value.error_code == "working_memory_unauthorized_write"
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        await bound.read(event_id, "triage_result")
+    assert exc_info.value.error_code == "working_memory_unauthorized_write"
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        await bound.append_scratchpad(event_id, "after")
+    assert exc_info.value.error_code == "working_memory_unauthorized_write"
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        await captured_write(event_id, "triage_result", {"captured": True})
+    assert exc_info.value.error_code == "working_memory_unauthorized_write"
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        await captured_read(event_id, "triage_result")
+    assert exc_info.value.error_code == "working_memory_unauthorized_write"
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        await captured_append(event_id, "captured")
+    assert exc_info.value.error_code == "working_memory_unauthorized_write"
+
+    ops = getattr(bound, "_ops", None)
+    alive = getattr(ops, "_alive", None) if ops is not None else None
+    if isinstance(alive, list) and alive:
+        alive[0] = True
+    if captured_ops is not None:
+        captured_alive = getattr(captured_ops, "_alive", None)
+        if isinstance(captured_alive, list) and captured_alive:
+            captured_alive[0] = True
+        with pytest.raises(GuardrailViolationError) as ops_exc:
+            await captured_ops.write(event_id, "triage_result", {"resurrected": True})
+        assert ops_exc.value.error_code == "working_memory_unauthorized_write"
+        leaked_store = getattr(captured_ops, "_store", None)
+        if leaked_store is not None and callable(getattr(leaked_store, "compare_and_set", None)):
+            before = await store.get(event_id, "risk_assessment")
+            expected = 0
+            get_version = getattr(leaked_store, "get_field_version", None)
+            if callable(get_version):
+                expected = await get_version(event_id, "risk_assessment") or 0
+            try:
+                result = await leaked_store.compare_and_set(
+                    event_id, "risk_assessment", expected, {"stolen": True}
+                )
+            except GuardrailViolationError as exc:
+                assert exc.error_code == "working_memory_unauthorized_write"
+                result = False
+            assert result is not True
+            assert await store.get(event_id, "risk_assessment") == before
+
+    try:
+        object.__setattr__(bound, "_ops", captured_ops)
+    except Exception:
+        pass
+    try:
+        object.__setattr__(bound, "_port", captured_port)
+    except Exception:
+        pass
+    with pytest.raises(GuardrailViolationError) as stuffed:
+        await bound.write(event_id, "triage_result", {"stuffed": True})
+    assert stuffed.value.error_code == "working_memory_unauthorized_write"
+
+    with pytest.raises(GuardrailViolationError) as stale_exc:
+        await wm.write(event_id, "triage_result", {"stale": True}, writer=stale_cap)
+    assert stale_exc.value.error_code == "working_memory_unauthorized_write"
+    assert await store.get(event_id, "triage_result") is None
+
+    async with session_factory() as session:
+        denied = await session.scalar(
+            select(orm.MemoryAccessAuditLog).where(
+                orm.MemoryAccessAuditLog.event_id == event_id,
+                orm.MemoryAccessAuditLog.allowed.is_(False),
+            )
+        )
+    assert denied is not None
+
+    del bound
+    gc.collect()
+    rebound = wm.for_writer("TriageAgent")
+    await rebound.write(event_id, "triage_result", {"ok": True})
+    assert await store.get(event_id, "triage_result") == {"ok": True}
+    with pytest.raises(GuardrailViolationError):
+        await wm.write(event_id, "triage_result", {"stale": True}, writer=stale_cap)
+
+
+@pytest.mark.asyncio
+async def test_revoke_is_release_alias_and_cannot_be_revived(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    bound = wm.for_writer("RiskAgent")
+    bound.revoke()
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        await bound.write(event_id, "risk_assessment", {"revoked": True})
+    assert exc_info.value.error_code == "working_memory_unauthorized_write"
+    assert bound.release is bound.revoke or bound.revoke.__func__ is bound.release.__func__
+
+
+@pytest.mark.asyncio
+async def test_legal_owner_write_and_scratchpad_survive_isolation_fix(
+    wm: WorkingMemory,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+    triage = wm.for_writer("TriageAgent")
+    risk = wm.for_writer("RiskAgent")
+    evidence = wm.for_writer("EvidenceAgent")
+
+    await triage.write(event_id, "triage_result", {"ok": True})
+    assert await store.get(event_id, "triage_result") == {"ok": True}
+    await risk.append_scratchpad(event_id, "from-risk")
+    await evidence.append_scratchpad(event_id, "from-evidence")
+    notes = {entry.note for entry in await triage.read_scratchpad(event_id)}
+    assert notes == {"from-risk", "from-evidence"}
+
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        await risk.write(event_id, "triage_result", {"nope": True})
+    assert exc_info.value.error_code == "working_memory_unauthorized_write"
+    assert await store.get(event_id, "triage_result") == {"ok": True}
+
+    async with session_factory() as session:
+        denied = await session.scalar(
+            select(orm.MemoryAccessAuditLog).where(
+                orm.MemoryAccessAuditLog.event_id == event_id,
+                orm.MemoryAccessAuditLog.allowed.is_(False),
+                orm.MemoryAccessAuditLog.key == "triage_result",
+            )
+        )
+    assert denied is not None
+    assert denied.agent_name == "RiskAgent"

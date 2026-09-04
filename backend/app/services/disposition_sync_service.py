@@ -1124,9 +1124,12 @@ class DispositionSyncService:
            point of no return: concurrent code must not mark the command as
            un-egressed SUPERSEDED. If the CAS fails, this worker must not
            submit and must not write receipts/Action/outbox/resume/events.
-        4. Provider ``submit`` / ``readback`` stay outside any database
-           transaction. After I/O, finalize re-locks and applies only when
-           the fence still matches and the lease has not expired.
+        4.            Provider ``submit`` / ``readback`` stay outside any database
+           transaction. After I/O, finalize re-locks and applies when the
+           fence token/attempt still match. An already-admitted claim must
+           not discard a provider result solely because the lease wall clock
+           expired; lookup-first recovery stays on PAUSED/UNKNOWN and must
+           never re-enqueue a second submit.
         """
         claim = await self._claim_outbox(outbox_id)
         if claim is None:
@@ -1235,7 +1238,7 @@ class DispositionSyncService:
                             and parsed_receipt.status is WritebackStatus.ACCEPTED
                         )
         except Exception as exc:
-            await self._finalize_claim_exception(claim, exc)
+            await self._finalize_claim_exception(claim, exc, submitted=True)
             return
 
         if parsed_receipt is None:
@@ -1448,12 +1451,22 @@ class DispositionSyncService:
 
     @staticmethod
     def _claim_fence_matches(outbox: orm.DispositionOutbox, claim: _DeliveryClaim) -> bool:
+        if (
+            OutboxDeliveryStatus(outbox.delivery_status) is not OutboxDeliveryStatus.LEASED
+            or outbox.locked_by != claim.fence_token
+            or int(outbox.attempt) != claim.attempt
+            or outbox.locked_at != claim.locked_at
+        ):
+            return False
+        admitted = (
+            outbox.egress_admitted_at is not None or claim.egress_admitted_at is not None
+        )
+        if admitted:
+            # Point of no return: matching fence/attempt must still finalize.
+            # Lease wall-clock expiry must not discard an in-flight provider result.
+            return True
         return (
-            OutboxDeliveryStatus(outbox.delivery_status) is OutboxDeliveryStatus.LEASED
-            and outbox.locked_by == claim.fence_token
-            and int(outbox.attempt) == claim.attempt
-            and outbox.locked_at == claim.locked_at
-            and outbox.lease_expires_at == claim.lease_expires_at
+            outbox.lease_expires_at == claim.lease_expires_at
             and outbox.lease_expires_at is not None
             and outbox.lease_expires_at > datetime.now(UTC)
         )
@@ -2168,9 +2181,25 @@ class DispositionSyncService:
             )
         )
 
-    async def _finalize_claim_exception(self, claim: _DeliveryClaim, exc: Exception) -> None:
-        kind, code = classify_disposition_delivery_error(exc)
+    async def _finalize_claim_exception(
+        self,
+        claim: _DeliveryClaim,
+        exc: Exception,
+        *,
+        submitted: bool = False,
+    ) -> None:
         detail = f"{type(exc).__name__}: {exc}"
+        if submitted and claim.egress_admitted_at is not None:
+            # Submit already happened. Do not invent CONFLICT / DEAD_LETTER
+            # as if the provider rejected the command.
+            await self._mark_delivery_paused_unknown(
+                claim.outbox_id,
+                claim=claim,
+                error_code="delivery_outcome_unknown",
+                error_detail=detail,
+            )
+            return
+        kind, code = classify_disposition_delivery_error(exc)
         if kind is DispositionDeliveryErrorKind.GUARDRAIL:
             await self._mark_delivery_dead_letter(
                 claim.outbox_id, claim=claim, error_code="guardrail_blocked", error_detail=detail
@@ -3711,6 +3740,17 @@ class DispositionSyncService:
                     return False, outbox.event_id, WritebackStatus.UNKNOWN
 
                 if outcome.kind is _PausedLookupKind.NOT_FOUND:
+                    if _outbox_is_egress_admitted(outbox):
+                        outbox.latest_writeback_status = WritebackStatus.UNKNOWN.value
+                        outbox.last_error_code = "lookup_not_found_after_egress"
+                        outbox.last_error_detail = self._truncate_error_detail(
+                            "lookup returned not-found after egress admission; "
+                            "false-negative retry is forbidden until lookup FOUND"
+                        )
+                        _mirror_writeback_status_to_action(
+                            action, WritebackStatus.UNKNOWN.value
+                        )
+                        return False, outbox.event_id, WritebackStatus.UNKNOWN
                     if is_deterministic_adapter_rejection_code(
                         getattr(outbox, "last_error_code", None),
                     ):

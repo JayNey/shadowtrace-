@@ -28,6 +28,7 @@ from app.services.working_memory_bound import (
     BoundWorkingMemory,
     OwnerMemoryOps,
     WriterCapability,
+    bind_working_memory,
     normalize_writer,
     wm_key,
 )
@@ -62,6 +63,7 @@ class _MemoryEngine:
         self._capability_last_used: OrderedDict[WriterCapability, float] = OrderedDict()
         self._capability_alive: dict[WriterCapability, list[bool]] = {}
         self._ops_by_capability: dict[WriterCapability, OwnerMemoryOps] = {}
+        self._ops_holders: dict[WriterCapability, list[OwnerMemoryOps | None]] = {}
         self._degraded_holder: list[DegradedFlagService | None] = [degraded_flags]
         self._live_bindings: dict[WriterCapability, weakref.ReferenceType[BoundWorkingMemory]] = {}
         self._capability_lock = RLock()
@@ -286,7 +288,12 @@ class _MemoryEngine:
         alive = self._capability_alive.pop(capability, None)
         if alive is not None:
             alive[0] = False
-        self._ops_by_capability.pop(capability, None)
+        holder = self._ops_holders.pop(capability, None)
+        if holder is not None:
+            holder[0] = None
+        ops = self._ops_by_capability.pop(capability, None)
+        if ops is not None:
+            ops.disconnect()
         self._issued_capabilities.pop(capability, None)
         self._capability_last_used.pop(capability, None)
         self._live_bindings.pop(capability, None)
@@ -362,7 +369,14 @@ class WorkingMemory:
             engine._capability_last_used[capability] = time.monotonic()
             engine._capability_alive[capability] = alive
             engine._ops_by_capability[capability] = ops
-            bound = BoundWorkingMemory(_capability=capability, _ops=ops)
+            holder: list[OwnerMemoryOps | None] = [ops]
+            engine._ops_holders[capability] = holder
+            ops.bind_liveness(alive, holder)
+            bound = bind_working_memory(
+                capability=capability,
+                ops=ops,
+                engine=engine,
+            )
             engine._live_bindings[capability] = weakref.ref(bound)
             return bound
 

@@ -1762,6 +1762,326 @@ async def test_lookup_never_accepted_safe_retry_re_enqueues(
 
 
 @pytest.mark.asyncio
+async def test_admitted_paused_false_not_found_does_not_reenqueue(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admitted + lookup NOT_FOUND must stay PAUSED/UNKNOWN; never a second submit."""
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    idem = f"idem-admitted-nf-{_sfx()}"
+    admitted_at = datetime.now(UTC) - timedelta(seconds=5)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=idem,
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                        "idempotency_key": idem,
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.PAUSED.value,
+                    latest_writeback_status=WritebackStatus.UNKNOWN.value,
+                    last_error_code="lease_expired",
+                    egress_admitted_at=admitted_at,
+                )
+            )
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    assert adapter.allows_safe_retry() is True
+    submit_calls: list[str] = []
+    original_submit = adapter.submit
+
+    async def _lookup_none(
+        _idempotency_key: str,
+        _source_locator: SourceObjectLocator,
+    ) -> None:
+        return None
+
+    async def _count_submit(command: DispositionCommand) -> object:
+        submit_calls.append(command.idempotency_key)
+        return await original_submit(command)
+
+    monkeypatch.setattr(adapter, "lookup_submission", _lookup_none)
+    monkeypatch.setattr(adapter, "submit", _count_submit)
+    assert await sync.reconcile_paused_outboxes(limit=1) == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+        assert row.latest_writeback_status == WritebackStatus.UNKNOWN.value
+        assert row.egress_admitted_at is not None
+        assert row.last_error_code == "lookup_not_found_after_egress"
+    assert submit_calls == []
+
+
+@pytest.mark.asyncio
+async def test_long_submit_expired_lease_does_not_double_submit(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker B must not submit again while A is still in provider I/O past lease."""
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync_a = _sync_service(session_factory, store, mock_xdr_client)
+    sync_b = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id = f"wbk-{_sfx()}"
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-double-submit",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "block ip",
+            "tool_name": "block_ip",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target": "203.0.113.88",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": locator,
+            "idempotency_key": f"idem-long-{_sfx()}",
+        }
+    )
+    command = factory.build_entity_action_submit(
+        action,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="ActionExecutionService",
+        disposition_id=new_disposition_id(),
+        writeback_id=writeback_id,
+        closure_cycle=1,
+        entity_action_code="block_ip",
+    )
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=writeback_id,
+                    disposition_id=command.disposition_id,
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=command.idempotency_key,
+                    command_payload=command.model_dump(mode="json"),
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                    latest_writeback_status=WritebackStatus.PENDING.value,
+                )
+            )
+    adapter = sync_a._adapters.get("mock_xdr")
+    assert adapter is not None
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    submit_calls: list[str] = []
+    original_submit = adapter.submit
+
+    async def _block_submit(cmd: DispositionCommand) -> object:
+        submit_calls.append(cmd.disposition_id)
+        if len(submit_calls) > 1:
+            raise AssertionError("provider submit must not run twice")
+        entered.set()
+        await release.wait()
+        return await original_submit(cmd)
+
+    monkeypatch.setattr(adapter, "submit", _block_submit)
+    monkeypatch.setattr(sync_b._adapters.get("mock_xdr"), "submit", _block_submit)
+    delivery = asyncio.create_task(sync_a._deliver_outbox(outbox_id))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.DispositionOutbox, outbox_id)
+            assert row is not None
+            assert row.egress_admitted_at is not None
+            row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    worker_b = OutboxWorker(sync_b)
+    claimed_b = await worker_b.run_once(limit=1)
+    assert claimed_b == 0
+    assert submit_calls == [command.disposition_id]
+    release.set()
+    await delivery
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status != OutboxDeliveryStatus.READY.value
+        assert row.delivery_status != OutboxDeliveryStatus.WAITING_RETRY.value
+        assert row.delivery_status in {
+            OutboxDeliveryStatus.DELIVERED.value,
+            OutboxDeliveryStatus.PAUSED.value,
+            OutboxDeliveryStatus.LEASED.value,
+        }
+        if row.delivery_status == OutboxDeliveryStatus.PAUSED.value:
+            assert row.latest_writeback_status == WritebackStatus.UNKNOWN.value
+    assert submit_calls == [command.disposition_id]
+
+
+@pytest.mark.asyncio
+async def test_post_admit_append_receipt_conflict_stays_paused_unknown(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    mock_xdr_state: MockXDRState,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-submit finalize conflict must not become CONFLICT/DEAD_LETTER."""
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id = f"wbk-{_sfx()}"
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-finalize-conflict",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "block ip",
+            "tool_name": "block_ip",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target": "203.0.113.88",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": locator,
+            "idempotency_key": f"idem-finalize-{_sfx()}",
+        }
+    )
+    command = factory.build_entity_action_submit(
+        action,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="ActionExecutionService",
+        disposition_id=new_disposition_id(),
+        writeback_id=writeback_id,
+        closure_cycle=1,
+        entity_action_code="block_ip",
+    )
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=writeback_id,
+                    disposition_id=command.disposition_id,
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=command.idempotency_key,
+                    command_payload=command.model_dump(mode="json"),
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                    latest_writeback_status=WritebackStatus.PENDING.value,
+                )
+            )
+    original_append_receipt = sync._append_receipt
+    fault_injected = False
+
+    async def _conflict_once_after_submit(*args: object, **kwargs: object) -> object:
+        nonlocal fault_injected
+        if not fault_injected and kwargs.get("receipt") is not None:
+            fault_injected = True
+            raise WritebackConflictError(
+                "fault injection: finalize conflict after admit",
+                error_code="version_conflict",
+            )
+        return await original_append_receipt(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sync, "_append_receipt", _conflict_once_after_submit)
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 1
+    assert fault_injected is True
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+        assert row.latest_writeback_status == WritebackStatus.UNKNOWN.value
+        assert row.delivery_status != OutboxDeliveryStatus.READY.value
+        assert row.delivery_status != OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.latest_writeback_status != WritebackStatus.CONFLICT.value
+        assert row.latest_writeback_status != WritebackStatus.FAILED.value
+
+    monkeypatch.setattr(sync, "_append_receipt", original_append_receipt)
+    assert await sync.reconcile_paused_outboxes(limit=1) == 1
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DELIVERED.value
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == row.writeback_id
+                )
+            )
+        ).all()
+        assert receipts
+        assert any(
+            receipt.status in {
+                WritebackStatus.ACCEPTED.value,
+                WritebackStatus.CONFIRMED.value,
+            }
+            for receipt in receipts
+        )
+
+
+@pytest.mark.asyncio
 async def test_lookup_degraded_keeps_outbox_paused_and_releases_reconcile_lease(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,
